@@ -1,0 +1,320 @@
+#!/usr/bin/env bash
+# Isolated verification harness for the rebuilt handoff_to_codex.sh.
+# Tests the transport FILE-PLANE (root resolution, per-(session,thread,dispatch) keying,
+# atomic non-truncating write, flag-guard/mis-invocation absorption, repo/CWD-independence,
+# missing-session-id safety). The live Codex delivery path (router/autoload) is stubbed:
+# `node`/`codex`/`powershell.exe` are faked so no real thread is touched.
+set -uo pipefail
+
+# Dual-layout probe: repo layout (tests/ beside skills/ipc/) and installed-skill layout
+# (tests/ inside the skill root, scripts/ as sibling) are both supported byte-identically.
+TDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT=""
+for _cand in "$TDIR/../skills/ipc/scripts/handoff_to_codex.sh" "$TDIR/../scripts/handoff_to_codex.sh"; do
+    [[ -f "$_cand" ]] && SCRIPT="$_cand" && break
+done
+[[ -n "$SCRIPT" ]] || { echo "FATAL: handoff_to_codex.sh not found in repo or installed layout" >&2; exit 1; }
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+IPCROOT="$TMP/ipcroot"; mkdir -p "$IPCROOT"
+BIN="$TMP/bin"; mkdir -p "$BIN"
+REPO="$TMP/repo"; mkdir -p "$REPO"; ( cd "$REPO" && git init -q && git config user.email t@t && git config user.name t )
+NOREPO="$TMP/norepo"; mkdir -p "$NOREPO"
+UUID="00000000-0000-4000-8000-000000000000"
+
+# --- stubs on PATH (node records argv; codex/powershell are no-ops) ---
+cat > "$BIN/node" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$TMP/nodeargs.log"
+echo '{"ok":true}'
+exit 0
+EOF
+cat > "$BIN/codex" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+cat > "$BIN/powershell.exe" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod +x "$BIN"/*
+
+PASS=0; FAIL=0
+ok(){ echo "  PASS: $1"; PASS=$((PASS+1)); }
+no(){ echo "  FAIL: $1"; FAIL=$((FAIL+1)); }
+run(){ # run(cwd, sid, args...) -> stdout in $OUT, exit in $RC
+  local cwd="$1" sid="$2"; shift 2
+  OUT="$( cd "$cwd" && CODEX_IPC_ROOT="$IPCROOT" CLAUDE_CODE_SESSION_ID="$sid" PATH="$BIN:$PATH" bash "$SCRIPT" "$@" 2>&1 )"; RC=$?
+}
+taskfiles(){ find "$IPCROOT" -name '*.task.md' 2>/dev/null; }
+count_task(){ taskfiles | wc -l | tr -d ' '; }
+
+echo "== 1. file-drop basic keying =="
+run "$REPO" "sessA" "do the thing"
+f=$(find "$IPCROOT/sessA/filedrop" -name '*.task.md' 2>/dev/null | head -1)
+[[ $RC -eq 0 ]] && ok "exit 0" || no "exit 0 (rc=$RC)"
+[[ -n "$f" ]] && ok "keyed task file under sessA/filedrop" || no "no keyed task file"
+[[ -n "$f" ]] && grep -qx "do the thing" "$f" && ok "task body written verbatim" || no "task body missing"
+[[ -n "$f" ]] && grep -q "\.reply\.md" "$f" && ok "payload points reply at per-dispatch .reply.md" || no "reply path missing"
+printf '%s' "$OUT" | grep -q "$(cygpath -m "$f" 2>/dev/null || echo "$f")" && ok "prints absolute task path" || no "task path not printed"
+
+echo "== 2. isolation: two sessions never share a file =="
+run "$REPO" "sessB" "task b"
+[[ -d "$IPCROOT/sessA" && -d "$IPCROOT/sessB" ]] && ok "separate per-session dirs" || no "sessions not isolated"
+
+echo "== 3. no truncation: two dispatches, same session =="
+before=$(find "$IPCROOT/sessA" -name '*.task.md' | wc -l | tr -d ' ')
+run "$REPO" "sessA" "second dispatch"
+after=$(find "$IPCROOT/sessA" -name '*.task.md' | wc -l | tr -d ' ')
+[[ "$after" -gt "$before" ]] && ok "second dispatch is a NEW file (first not overwritten): $before -> $after" || no "dispatch overwrote prior (count $before -> $after)"
+
+echo "== 4a. flag absorb: --ipc <uuid> --allow-any-thread \"real task\" =="
+: > "$TMP/nodeargs.log"
+run "$REPO" "sessC" --ipc "$UUID" --allow-any-thread "the real task"
+tf=$(find "$IPCROOT/sessC/$UUID" -name '*.task.md' 2>/dev/null | head -1)
+[[ -n "$tf" ]] && grep -qx "the real task" "$tf" && ok "real task used (flag absorbed, not captured as task)" || no "task body wrong: $(grep -A0 -m1 . "$tf" 2>/dev/null)"
+[[ -n "$tf" ]] && ! grep -qx -- "--allow-any-thread" "$tf" && ok "no '--allow-any-thread' as task body" || no "flag leaked into task body"
+grep -q -- "--allow-any-thread" "$TMP/nodeargs.log" && ok "client still receives --allow-any-thread (send-gate)" || no "client lost --allow-any-thread"
+grep -q -- '--task read "' "$TMP/nodeargs.log" && ok "client told to read the keyed task path (double-quoted)" || no "client task pointer wrong"
+
+echo "== 4b. flag-guard: a stray flag as task fails closed =="
+run "$REPO" "sessD" "--bogus-flag"
+[[ $RC -ne 0 ]] && ok "exit nonzero on flag-as-task" || no "did not fail closed (rc=$RC)"
+[[ -z "$(find "$IPCROOT/sessD" -name '*.task.md' 2>/dev/null)" ]] && ok "no task file written on guarded failure" || no "wrote a file despite guard"
+
+echo "== 5. repo/CWD-independence: works outside any git repo =="
+run "$NOREPO" "sessE" "task with no repo"
+nf=$(find "$IPCROOT/sessE/filedrop" -name '*.task.md' 2>/dev/null | head -1)
+[[ $RC -eq 0 && -n "$nf" ]] && ok "file-drop works with no git repo" || no "failed outside a repo (rc=$RC)"
+[[ -n "$nf" ]] && grep -q "not in a git repository" "$nf" && ok "payload notes no-repo context" || no "no-repo note missing"
+
+echo "== 6. missing session id: isolated token, no transcript guess =="
+OUT6="$( cd "$REPO" && CODEX_IPC_ROOT="$IPCROOT" PATH="$BIN:$PATH" env -u CLAUDE_CODE_SESSION_ID -u CLAUDE_SESSION_ID bash "$SCRIPT" "task no sid" 2>&1 )"; RC6=$?
+nosiddir=$(find "$IPCROOT" -maxdepth 1 -type d -name 'nosid-*' 2>/dev/null | head -1)
+[[ $RC6 -eq 0 && -n "$nosiddir" ]] && ok "runs with an isolated nosid-* token" || no "missing-sid handling failed (rc=$RC6)"
+sf=$(find "$nosiddir" -name '*.task.md' 2>/dev/null | head -1)
+[[ -n "$sf" ]] && grep -q "transcript path omitted by default" "$sf" && ok "transcript pointer omitted without opt-in" || no "transcript not omitted by default"
+
+echo "== 6b. transcript disclosure is OPT-IN and never guessed =="
+# default (sid present, no opt-in): omitted
+run "$REPO" "sessT" "task with sid, no opt-in"
+tf6=$(find "$IPCROOT/sessT/filedrop" -name '*.task.md' 2>/dev/null | head -1)
+[[ -n "$tf6" ]] && grep -q "transcript path omitted by default" "$tf6" && ok "sid present, no opt-in -> transcript omitted" || no "transcript leaked without opt-in"
+# opt-in but no sid: fail-closed "unavailable", never guessed. Select the dispatch
+# deterministically by its unique task body (mtime -newer is same-second flaky).
+OUT6B="$( cd "$REPO" && CODEX_IPC_ROOT="$IPCROOT" CODEX_IPC_INCLUDE_TRANSCRIPT=1 PATH="$BIN:$PATH" env -u CLAUDE_CODE_SESSION_ID -u CLAUDE_SESSION_ID bash "$SCRIPT" "task opt-in no sid" 2>&1 )"; RC6B=$?
+tf6b=""
+while IFS= read -r f; do
+    grep -qx "task opt-in no sid" "$f" && { tf6b="$f"; break; }
+done < <(find "$IPCROOT" -path '*nosid-*' -name '*.task.md' 2>/dev/null)
+[[ $RC6B -eq 0 && -n "$tf6b" ]] && grep -q "transcript path unavailable" "$tf6b" && ok "opt-in without sid -> unavailable (not guessed)" || no "opt-in/no-sid transcript handling wrong (rc=$RC6B)"
+# explicit override honored only under opt-in
+OUT6D="$( cd "$REPO" && CODEX_IPC_ROOT="$IPCROOT" CLAUDE_TRANSCRIPT="$TMP/fake-transcript.jsonl" CLAUDE_CODE_SESSION_ID="sessT2" PATH="$BIN:$PATH" bash "$SCRIPT" "no opt-in with explicit override" 2>&1 )"
+tf6c=$(find "$IPCROOT/sessT2/filedrop" -name '*.task.md' 2>/dev/null | head -1)
+OUT6C="$( cd "$REPO" && CODEX_IPC_ROOT="$IPCROOT" CODEX_IPC_INCLUDE_TRANSCRIPT=1 CLAUDE_TRANSCRIPT="$TMP/fake-transcript.jsonl" CLAUDE_CODE_SESSION_ID="sessT3" PATH="$BIN:$PATH" bash "$SCRIPT" "opt-in with explicit override" 2>&1 )"; RC6C=$?
+tf6d=$(find "$IPCROOT/sessT3/filedrop" -name '*.task.md' 2>/dev/null | head -1)
+[[ -n "$tf6d" ]] && grep -q "fake-transcript.jsonl" "$tf6d" && ok "opt-in honors explicit CLAUDE_TRANSCRIPT override" || no "opt-in override not honored"
+[[ -n "$tf6c" ]] && ! grep -q "fake-transcript.jsonl" "$tf6c" && ok "override ignored without opt-in" || no "override leaked without opt-in"
+
+echo "== 7. atomic write leaves no temp files =="
+[[ -z "$(find "$IPCROOT" -name '*.task.md.*' 2>/dev/null)" ]] && ok "no leftover mktemp temp files" || no "temp files left behind"
+
+echo "== 8. multi-thread grace: one session -> N threads, each its own dir =="
+U1="11111111-1111-4111-8111-111111111111"; U2="22222222-2222-4222-8222-222222222222"
+: > "$TMP/nodeargs.log"
+run "$REPO" "sessM" --ipc "$U1" "task for thread one"
+run "$REPO" "sessM" --ipc "$U2" "task for thread two"
+[[ -d "$IPCROOT/sessM/$U1" && -d "$IPCROOT/sessM/$U2" ]] && ok "two conversationIds -> two sibling thread dirs" || no "threads not isolated under the session"
+t1=$(find "$IPCROOT/sessM/$U1" -name '*.task.md' | head -1); t2=$(find "$IPCROOT/sessM/$U2" -name '*.task.md' | head -1)
+[[ -n "$t1" && -n "$t2" ]] && grep -qx "task for thread one" "$t1" && grep -qx "task for thread two" "$t2" && ok "each thread's task is in its own channel (no mixing)" || no "thread task bodies mixed/missing"
+
+echo "== 9. --ipc happy path: gui-delivered, exit 0 =="
+run "$REPO" "sessH" --ipc "$UUID" "deliver me"
+[[ $RC -eq 0 ]] && printf '%s' "$OUT" | grep -q "RESULT: gui-delivered" && ok "reports gui-delivered and exits 0" || no "ipc happy path wrong (rc=$RC)"
+printf '%s' "$OUT" | grep -q "reply will be written to" && ok "advertises the keyed reply path" || no "reply-path notice missing"
+
+echo "== 10. TRUE concurrency: 20 parallel dispatches across 2 sessions, no collision =="
+pids=()
+for i in $(seq 1 20); do
+  ( cd "$REPO" && CODEX_IPC_ROOT="$IPCROOT" CLAUDE_CODE_SESSION_ID="conc$((i % 2))" PATH="$BIN:$PATH" bash "$SCRIPT" "parallel $i" >/dev/null 2>&1 ) &
+  pids+=($!)
+done
+for p in "${pids[@]}"; do wait "$p"; done
+cnt=$(find "$IPCROOT/conc0" "$IPCROOT/conc1" -name '*.task.md' 2>/dev/null | wc -l | tr -d ' ')
+[[ "$cnt" -eq 20 ]] && ok "20 concurrent dispatches -> 20 distinct files (no clobber)" || no "concurrency collision: got $cnt/20"
+
+echo "== 11. rapid-fire same-session uniqueness (15 in a tight loop) =="
+for i in $(seq 1 15); do run "$REPO" "rapid" "burst $i"; done
+rc=$(find "$IPCROOT/rapid/filedrop" -name '*.task.md' 2>/dev/null | wc -l | tr -d ' ')
+[[ "$rc" -eq 15 ]] && ok "15 rapid dispatches -> 15 unique files" || no "rapid-fire collision: $rc/15"
+
+echo "== 12. --open / --app smoke (stubbed codex), incl. outside a repo =="
+run "$REPO" "sessO" --app;  [[ $RC -eq 0 ]] && ok "--app exits 0 in a repo" || no "--app failed (rc=$RC)"
+run "$REPO" "sessO" --open; [[ $RC -eq 0 ]] && ok "--open exits 0 in a repo" || no "--open failed (rc=$RC)"
+run "$NOREPO" "sessO" --app; [[ $RC -eq 0 ]] && ok "--app works outside a repo (uses PWD)" || no "--app failed outside repo (rc=$RC)"
+
+echo "== 13. apostrophe in transport root: pickup string stays quote-safe =="
+QROOT="$TMP/ob'rien/ipc"; mkdir -p "$QROOT"
+OUTQ="$( cd "$REPO" && CODEX_IPC_ROOT="$QROOT" CLAUDE_CODE_SESSION_ID="sessQ" PATH="$BIN:$PATH" bash "$SCRIPT" "task in apostrophe root" 2>&1 )"; RCQ=$?
+[[ $RCQ -eq 0 ]] && ok "runs with an apostrophe in the root" || no "failed with apostrophe root (rc=$RCQ)"
+printf '%s' "$OUTQ" | grep -q 'read "' && ok "pickup line double-quotes the path (apostrophe cannot break it)" || no "pickup line not double-quoted"
+
+# ============================================================================
+# Foreground-policy suite (14+). Uses stateful stubs: node dispatches by script
+# name with a first-send-fail mode; powershell.exe records args and exits with a
+# configured code. Timing knobs keep negative poll cases under ~3s.
+# ============================================================================
+FGDIR="$TMP/fg"; BIN2="$TMP/bin2"; mkdir -p "$FGDIR" "$BIN2"
+UUIDF="33333333-3333-4333-8333-333333333333"
+
+cat > "$BIN2/node" <<EOF
+#!/usr/bin/env bash
+FG="$FGDIR"
+case "\$*" in
+  *codex_ipc_client.mjs*)
+    printf '%s\n' "\$*" >> "\$FG/nodeargs.log"
+    n=\$(cat "\$FG/send_count" 2>/dev/null || echo 0); n=\$((n+1)); echo "\$n" > "\$FG/send_count"
+    mode=\$(cat "\$FG/client_mode" 2>/dev/null || echo always-ok)
+    case "\$mode" in
+      always-ok) echo '{"ok": true}'; exit 0;;
+      always-fail) echo '{ "error": "no-client-found" }'; exit 1;;
+      fail-then-ok)
+        if [[ "\$n" -le 1 ]]; then echo '{ "error": "no-client-found" }'; exit 1
+        else echo '{"ok": true}'; exit 0; fi;;
+    esac;;
+  *codex_ipc_session_inspect.mjs*)
+    mode=\$(cat "\$FG/inspect_mode" 2>/dev/null || echo ok)
+    case "\$mode" in
+      ok)        printf '{\n  "ok": true,\n  "thread": { "archived": 0 }\n}\n'; exit 0;;
+      okarchived) printf '{\n  "ok": true,\n  "thread": { "archived": 1 }\n}\n'; exit 1;;
+      notfound)  printf '{\n  "ok": false\n}\n'; exit 1;;
+      malformed) echo '{{{ not json'; exit 0;;
+      empty)     exit 0;;
+      stderr)    echo "boom: inspector crashed" >&2; exit 1;;
+    esac;;
+  *) echo '{"ok": true}'; exit 0;;
+esac
+EOF
+cat > "$BIN2/powershell.exe" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$FGDIR/pslog"
+exit "\$(cat "$FGDIR/pscode" 2>/dev/null || echo 0)"
+EOF
+cat > "$BIN2/codex" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod +x "$BIN2"/*
+
+fgreset(){ # fgreset <client_mode> [inspect_mode] [pscode]
+  rm -f "$FGDIR"/send_count "$FGDIR"/nodeargs.log "$FGDIR"/pslog
+  echo "${1}" > "$FGDIR/client_mode"
+  echo "${2:-ok}" > "$FGDIR/inspect_mode"
+  echo "${3:-0}" > "$FGDIR/pscode"
+}
+fgrun(){ # fgrun <wrapper args...> -> OUT/RC (fast poll knobs; hermetic PATH)
+  OUT="$( cd "$REPO" && CODEX_IPC_ROOT="$IPCROOT" CLAUDE_CODE_SESSION_ID="fgsess" \
+      CODEX_IPC_POLL_DEADLINE_S=2 CODEX_IPC_POLL_INTERVAL_S=1 \
+      PATH="$BIN2:$PATH" bash "$SCRIPT" "$@" 2>&1 )"; RC=$?
+}
+TAX_RE='^RESULT: (gui-delivered|gui-unowned|failed-closed) -- reason=[a-z0-9-]+ -- confirmation=[a-z0-9-]+$'
+assert_tax(){ # every RESULT line in $OUT must match the parser-compatible taxonomy
+  local bad
+  bad="$(printf '%s\n' "$OUT" | grep '^RESULT:' | grep -vE "$TAX_RE" || true)"
+  [[ -z "$bad" ]] && ok "$1: all RESULT lines parser-compatible" || { no "$1: non-conforming RESULT line"; printf '%s\n' "$bad"; }
+}
+
+echo "== 14. default policy defer: foreground-Codex deferral is explicit =="
+fgreset always-fail ok 2
+fgrun --ipc "$UUIDF" "t14 defer"
+[[ $RC -ne 0 ]] && printf '%s' "$OUT" | grep -q "RESULT: gui-unowned -- reason=codex-foreground-deferred -- confirmation=not-attempted" && ok "defer -> gui-unowned/codex-foreground-deferred" || no "defer subreason wrong (rc=$RC)"
+printf '%s' "$OUT" | grep -q "POLICY: foreground=defer (source: default) ack=none" && ok "active policy printed" || no "policy line missing"
+[[ -n "$(find "$IPCROOT/fgsess/$UUIDF" -name '*.task.md' 2>/dev/null)" ]] && ok "envelope written before deferral" || no "envelope missing on deferral"
+assert_tax "t14"
+
+echo "== 15. switch without ack: fails closed BEFORE any live IPC =="
+fgreset always-fail ok 0
+fgrun --ipc "$UUIDF" --foreground-policy switch -- "t15 switch no ack"
+[[ $RC -ne 0 ]] && printf '%s' "$OUT" | grep -q "reason=foreground-switch-unacknowledged" && ok "switch-no-ack fails closed" || no "switch-no-ack (rc=$RC)"
+[[ ! -f "$FGDIR/nodeargs.log" ]] && ok "no live send attempted" || no "live send attempted despite missing ack"
+[[ ! -f "$FGDIR/pslog" ]] && ok "no autoload attempted" || no "autoload attempted despite missing ack"
+printf '%s' "$OUT" | grep -qx 'FALLBACK -- file-drop is ready. In your Codex session, paste:' && ok "fallback preserved" || no "fallback line missing"
+assert_tax "t15"
+
+echo "== 16. switch with ack: autoload gets policy args; delivery reports foreground-switched =="
+fgreset fail-then-ok ok 0
+fgrun --ipc "$UUIDF" --foreground-policy switch --ack-foreground-switch -- "t16 switch ack"
+[[ $RC -eq 0 ]] && printf '%s' "$OUT" | grep -q "RESULT: gui-delivered -- reason=foreground-switched -- confirmation=not-checked" && ok "switch+ack delivers with honest confirmation" || no "switch+ack (rc=$RC)"
+grep -q -- "-ForegroundPolicy switch" "$FGDIR/pslog" 2>/dev/null && grep -q -- "-AckForegroundSwitch" "$FGDIR/pslog" && ok "helper received policy + ack" || no "helper args wrong: $(cat "$FGDIR/pslog" 2>/dev/null)"
+assert_tax "t16"
+
+echo "== 17. restore-if-known: fail-closed subreason =="
+fgreset always-fail ok 4
+fgrun --ipc "$UUIDF" --foreground-policy restore-if-known -- "t17 restore"
+[[ $RC -ne 0 ]] && printf '%s' "$OUT" | grep -q "RESULT: gui-unowned -- reason=foreground-restore-unproven -- confirmation=not-attempted" && ok "restore fails closed with restore-unproven" || no "restore subreason (rc=$RC)"
+assert_tax "t17"
+
+echo "== 18. unknown helper status: fails closed, never retries =="
+fgreset always-fail ok 7
+fgrun --ipc "$UUIDF" "t18 unknown status"
+[[ $RC -ne 0 ]] && printf '%s' "$OUT" | grep -q "reason=autoload-unexpected-status" && ok "unknown helper code -> failed-closed" || no "unknown code fell through (rc=$RC)"
+[[ "$(cat "$FGDIR/send_count")" == "1" ]] && ok "no live retry after unknown status" || no "retried despite unknown status ($(cat "$FGDIR/send_count") sends)"
+assert_tax "t18"
+
+echo "== 19. invalid policy value: envelope written, fails closed before live IPC =="
+fgreset always-ok ok 0
+fgrun --ipc "$UUIDF" --foreground-policy bogus -- "t19 invalid policy"
+[[ $RC -ne 0 ]] && printf '%s' "$OUT" | grep -q "reason=invalid-foreground-policy" && ok "invalid policy fails closed" || no "invalid policy (rc=$RC)"
+[[ ! -f "$FGDIR/nodeargs.log" ]] && ok "no live send on invalid policy" || no "live send despite invalid policy"
+tf19=""; while IFS= read -r f; do grep -qx "t19 invalid policy" "$f" && { tf19="$f"; break; }; done < <(find "$IPCROOT/fgsess" -name '*.task.md' 2>/dev/null)
+[[ -n "$tf19" ]] && ok "envelope written before policy failure" || no "envelope missing on policy failure"
+assert_tax "t19"
+
+echo "== 20. inspection ambiguity: five refusals, all before autoload =="
+for m in notfound:target-not-found okarchived:target-archived malformed:target-inspection-ambiguous empty:target-inspection-ambiguous stderr:target-inspection-ambiguous; do
+    imode="${m%%:*}"; want="${m##*:}"
+    fgreset always-fail "$imode" 0
+    fgrun --ipc "$UUIDF" "t20 $imode"
+    [[ $RC -ne 0 ]] && printf '%s' "$OUT" | grep -q "reason=${want}" && [[ ! -f "$FGDIR/pslog" ]] \
+        && ok "inspect=$imode -> $want, no deep-link" || no "inspect=$imode (rc=$RC, want $want)"
+done
+assert_tax "t20"
+
+echo "== 21. autoload ok but retry never succeeds: gui-unowned, not gui-delivered =="
+fgreset always-fail ok 0
+fgrun --ipc "$UUIDF" "t21 retry exhausted"
+[[ $RC -ne 0 ]] && printf '%s' "$OUT" | grep -q "RESULT: gui-unowned -- reason=autoload-incomplete -- confirmation=not-attempted" && ok "poll exhaustion -> autoload-incomplete" || no "poll exhaustion (rc=$RC)"
+! printf '%s' "$OUT" | grep -q "gui-delivered" && ok "never overclaims delivery" || no "overclaimed delivery"
+assert_tax "t21"
+
+echo "== 22. default-policy auto-load delivery still works (reason=auto-loaded) =="
+fgreset fail-then-ok ok 0
+fgrun --ipc "$UUIDF" "t22 autoload delivery"
+[[ $RC -eq 0 ]] && printf '%s' "$OUT" | grep -q "RESULT: gui-delivered -- reason=auto-loaded -- confirmation=not-checked" && ok "auto-loaded delivery intact" || no "auto-loaded delivery (rc=$RC)"
+assert_tax "t22"
+
+echo "== 23. '--' delimiter: dash-leading task accepted; trailing junk rejected =="
+fgreset always-ok ok 0
+fgrun --ipc "$UUIDF" -- "--task-that-looks-like-a-flag"
+tf23=""; while IFS= read -r f; do grep -qx -- "--task-that-looks-like-a-flag" "$f" && { tf23="$f"; break; }; done < <(find "$IPCROOT/fgsess" -name '*.task.md' 2>/dev/null)
+[[ $RC -eq 0 && -n "$tf23" ]] && ok "dash task delivered verbatim after --" || no "dash task (rc=$RC)"
+fgreset always-ok ok 0
+fgrun --ipc "$UUIDF" -- "task" "trailing-junk"
+[[ $RC -ne 0 ]] && printf '%s' "$OUT" | grep -q "unexpected trailing argument" && ok "trailing junk rejected" || no "trailing junk accepted (rc=$RC)"
+fgreset always-ok ok 0
+fgrun --ipc "$UUIDF" --bogus-flag -- "task"
+[[ $RC -ne 0 ]] && printf '%s' "$OUT" | grep -q "unknown --ipc flag" && ok "unknown flag rejected" || no "unknown flag accepted (rc=$RC)"
+
+echo "== 24. standing approval env: acts as ack and is printed =="
+fgreset fail-then-ok ok 0
+OUT="$( cd "$REPO" && CODEX_IPC_ROOT="$IPCROOT" CLAUDE_CODE_SESSION_ID="fgsess" \
+    CODEX_IPC_POLL_DEADLINE_S=2 CODEX_IPC_POLL_INTERVAL_S=1 \
+    CODEX_IPC_FOREGROUND_SWITCH_STANDING_APPROVAL=1 \
+    PATH="$BIN2:$PATH" bash "$SCRIPT" --ipc "$UUIDF" --foreground-policy switch -- "t24 standing" 2>&1 )"; RC=$?
+[[ $RC -eq 0 ]] && printf '%s' "$OUT" | grep -q "ack=standing-approval-env" && printf '%s' "$OUT" | grep -q "reason=foreground-switched" && ok "standing approval honored and disclosed" || no "standing approval (rc=$RC)"
+assert_tax "t24"
+
+echo ""
+echo "RESULT: $PASS passed, $FAIL failed"
+[[ $FAIL -eq 0 ]] && echo "ALL GREEN" || echo "FAILURES PRESENT"
+exit $FAIL

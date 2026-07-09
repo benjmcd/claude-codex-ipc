@@ -1,0 +1,38 @@
+# OS noise
+.DS_Store
+Thumbs.db
+
+# Dependencies / coverage
+node_modules/
+coverage/
+
+# Logs, temp, backups
+logs/
+*.log
+*.tmp
+*.bak
+*.bak-*
+
+# Generated IPC transport state (never commit envelopes/replies)
+*.task.md
+*.reply.md
+*.task.md.*
+*.reply.md.*
+ipc-state/
+.claude/ipc/
+
+# Local Codex/Claude/OMC tool-state (hooks can write these into any cwd)
+.codex/
+.claude/
+.omc/
+state_*.sqlite
+*.rollout.jsonl
+sessions/
+
+# Env / secrets
+.env
+.env.*
+
+# Editor
+.vscode/
+.idea/

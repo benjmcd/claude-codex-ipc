@@ -1,0 +1,15 @@
+# Normalize all text files in the repo to LF; check out as committed (no CRLF rewriting
+# that would break bash scripts run through Git Bash on Windows).
+* text=auto
+
+# Shell scripts and Node ESM MUST be LF in the working tree (a CR in the shebang or
+# heredoc breaks Git Bash execution).
+*.sh text eol=lf
+*.mjs text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.json text eol=lf
+
+# PowerShell tolerates LF; keep it explicit so Windows editors don't reintroduce CRLF churn.
+*.ps1 text eol=lf

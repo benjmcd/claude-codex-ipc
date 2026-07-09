@@ -1,0 +1,72 @@
+# CI: syntax checks, hermetic tests, and public-safety scans.
+# Deliberately absent: live Codex Desktop IPC, real Codex/Claude state, secrets.
+name: test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Shell syntax (bash -n)
+        run: |
+          bash -n skills/ipc/scripts/handoff_to_codex.sh
+          bash -n skills/ipc/scripts/codex_ipc_replies.sh
+          bash -n tests/test_ipc.sh
+          bash -n tests/test_reply_view.sh
+          bash -n tests/scan_public_safety.sh
+          bash -n install.sh
+          bash -n uninstall.sh
+
+      - name: Node syntax (node --check)
+        run: |
+          set -e
+          for f in skills/ipc/scripts/*.mjs; do
+            echo "node --check $f"
+            node --check "$f"
+          done
+
+      - name: PowerShell parse check (autoload helper)
+        # Parser-only (PSParser::Tokenize) — no execution. Windows leg only: the helper
+        # is Windows-only and ubuntu runners have no powershell.exe. Full revalidate is
+        # NOT run on CI: its Codex-state/desktop checks legitimately fail on runners.
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $errors = $null
+          $null = [System.Management.Automation.PSParser]::Tokenize((Get-Content -Raw 'skills/ipc/scripts/codex_ipc_autoload.ps1'), [ref]$errors)
+          if ($errors) { $errors | ForEach-Object { Write-Error $_.Message }; exit 1 }
+          Write-Output "PowerShell parse: clean"
+
+      - name: Hermetic transport tests
+        run: bash tests/test_ipc.sh
+
+      - name: Hermetic reply-viewer tests
+        # GNU find/date required; the windows runner's Git Bash provides them.
+        run: bash tests/test_reply_view.sh
+
+      - name: Static contract audit
+        run: node skills/ipc/scripts/codex_ipc_contract_audit.mjs
+
+      - name: Public-safety scan
+        run: bash tests/scan_public_safety.sh
+
+      - name: Installer dry-run (never a real install on CI)
+        run: |
+          ./install.sh --dry-run --target "$RUNNER_TEMP/skills with spaces/ipc"
+          ./uninstall.sh --dry-run --target "$RUNNER_TEMP/skills with spaces/ipc"

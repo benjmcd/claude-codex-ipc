@@ -1,0 +1,45 @@
+# Troubleshooting
+
+Skill-bundled quick reference:
+[skills/ipc/references/troubleshooting.md](../skills/ipc/references/troubleshooting.md). This page
+adds repo/install-level triage.
+
+## Install issues
+
+| Symptom | Cause / fix |
+|---|---|
+| `install.sh: refusing to overwrite existing install` | An `ipc` skill already exists at the target. Re-run with `--force` (it prints what it deletes) after checking the existing copy isn't a modified one you want to keep. |
+| Installed but `/ipc` not found | Standalone target must be exactly `~/.claude/skills/ipc/` (or `%USERPROFILE%\.claude\skills\ipc\`). For plugin installs the invocation is `/codex-ipc:ipc`. Restart/reload Claude Code after installing. |
+| Scripts fail with `\r: command not found` | CRLF line endings were introduced (editor or git config). The repo's `.gitattributes` forces LF for `*.sh`/`*.mjs`; re-checkout or `dos2unix` the scripts. |
+| `Permission denied` running `.sh` | `bash path/to/script.sh` works regardless of the execute bit; or `chmod +x` the scripts. |
+
+## Runtime issues
+
+| Symptom | Cause / fix |
+|---|---|
+| `node:sqlite is unavailable` | Inspection tools need Node.js with `node:sqlite` support (≥ 22.5; older 22.x/23.x lines may require `--experimental-sqlite`). Upgrade Node, or skip inspection — file-drop works without it. |
+| `ERROR: 'codex' not found on PATH` | Only `--app` / `--open` / `--exec` need the Codex CLI. File-drop and `--ipc` do not. |
+| `mapfile: command not found` | The reply viewer needs bash ≥ 4; stock macOS bash is 3.2. `brew install bash` and run the script with the newer bash. |
+| `--ipc` → `failed-closed` with pipe/connect errors | Codex Desktop is not running, or the private router protocol drifted after an update. Start the app; run `codex_ipc_revalidate.mjs`; suspect drift before suspecting the target. |
+| `--ipc` → `gui-unowned` repeatedly | No renderer owns the thread and auto-load could not complete (or you are actively working in Codex — the helper defers on purpose). Open `codex://threads/<conversationId>` manually, then rerun; or use the printed file-drop line. |
+| Delivered but nothing appears in the thread | Likely a mid-turn send: the router can report success while the message never materializes. Re-inspect the thread tail; resend when the turn is complete. |
+| Reply viewer exit 2 | No session id resolvable. Pass `--session <sid>` (the printed listing shows what exists). |
+| Reply viewer exit 1 on `--since` | Malformed `find -newermt` spec — the viewer fails closed rather than reporting a false "0 replies". |
+| Old envelopes disappeared | Retention pruning (`CODEX_IPC_RETENTION_DAYS`, default 7) ran on a later dispatch. Set `0` to disable. |
+
+## Test issues
+
+| Symptom | Cause / fix |
+|---|---|
+| `tests/test_ipc.sh` fails at git-dependent checks | The harness creates its own throwaway repo; it needs `git` on PATH (identity is set locally by the harness). |
+| Tests pass locally, CI safety scan fails | You introduced a private-looking pattern (personal path, real-looking UUID, key-like string). See `tests/scan_public_safety.sh` for the exact patterns. |
+| `test_reply_view.sh` T12 fails on macOS | The viewer and harness assume GNU `find`/`date`. Run in a GNU userland (Linux CI image or Git Bash). |
+
+## After a Codex Desktop update
+
+1. `node skills/ipc/scripts/codex_ipc_revalidate.mjs --thread <conversation-id>` (validate-only).
+2. If drift is suspected: `--allow-live-ipc-read --timeout-ms 1500` re-proves router framing
+   (sends `initialize` only).
+3. Only with explicit operator approval: controlled live re-proof via
+   `codex_ipc_write_proof.mjs --thread <id> --marker <unique> --send --ack-live-write
+   --allow-any-thread` against a thread you own.
