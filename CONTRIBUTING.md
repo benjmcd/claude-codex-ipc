@@ -48,4 +48,4 @@ behavior works without having actually run it.
 ## Commit / PR hygiene
 
 - Keep diffs minimal and focused; update docs in the same PR as behavior changes.
-- Update `CHANGELOG.md` under the unreleased heading.
+- Update `CHANGELOG.md` under the `[Unreleased]` heading.

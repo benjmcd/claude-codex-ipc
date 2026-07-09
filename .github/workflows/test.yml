@@ -70,3 +70,13 @@ jobs:
         run: |
           ./install.sh --dry-run --target "$RUNNER_TEMP/skills with spaces/ipc"
           ./uninstall.sh --dry-run --target "$RUNNER_TEMP/skills with spaces/ipc"
+
+      - name: PowerShell installer dry-run (never a real install on CI)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $target = Join-Path $env:RUNNER_TEMP 'ipc-ps-dryrun'
+          ./install.ps1 -DryRun -Target $target
+          New-Item -ItemType Directory -Force -Path $target | Out-Null
+          Set-Content -LiteralPath (Join-Path $target 'SKILL.md') -Value 'name: ipc'
+          ./uninstall.ps1 -DryRun -Target $target

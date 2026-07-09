@@ -2,6 +2,51 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+
+### Changed
+
+### Fixed
+
+## [0.1.1] — 2026-07-09
+
+Post-release hardening from an exhaustive dual-lane audit, verified by a multi-agent workflow.
+No breaking changes.
+
+### Added
+- CI now runs `install.ps1`/`uninstall.ps1` `-DryRun` on the Windows runner (runtime coverage,
+  not just PowerShell parsing).
+
+### Changed
+- Docs reconciled with the wrapper's live-send model: `handoff_to_codex.sh --ipc <uuid>` treats
+  the explicit UUID as the live-delivery acknowledgement and supplies the client's
+  `--send --ack-live-write --allow-any-thread` internally; inspect-before-send is the `/ipc`
+  agent's preflight step, not a wrapper gate (README, SECURITY, SKILL.md, contract audit REQ-006
+  relabeled as static guidance).
+- `codex_ipc_probe.mjs` now defaults to dry-run; live pipe connection requires the explicit
+  `--allow-live-ipc-read` flag (`codex_ipc_revalidate.mjs` updated to pass it through).
+- Clarified transcript disclosure (automatic resolution fails closed without an injected session
+  id; explicit `CLAUDE_TRANSCRIPT` honored only under `CODEX_IPC_INCLUDE_TRANSCRIPT=1`) and the
+  local-file threat model (same-user processes can read **and modify** envelope files).
+- Contract audit REQ-016 now covers the `gui-unowned` result taxonomy; `test_ipc.sh` asserts no
+  `/ipc` path invokes `codex exec` (making the REQ-017 no-headless note verifiable).
+
+### Fixed
+- **Installers refuse a destructive `--force`**: `install.sh`/`install.ps1` now reject a
+  `--target` that is the source tree, `$HOME`, a filesystem/drive root, or any directory that is
+  not an existing ipc-skill install — closing an `rm -rf`/`Remove-Item` data-loss footgun.
+- Retention sweep in `handoff_to_codex.sh` refuses to run against a dangerous `CODEX_IPC_ROOT`
+  (`$HOME`, `/`, drive root).
+- Numeric CLI flags across the `.mjs` tools now reject malformed values (e.g. `10junk`) instead
+  of silently truncating them.
+- Public-safety scan no longer wholesale-excludes the CI workflow file, so a leak elsewhere in it
+  would be caught.
+- `codex_ipc_revalidate.mjs` reports the real absolute Codex state-file paths instead of
+  skill-relative garbage (`codexStateFiles` diagnostics).
+- `codex_ipc_owner_probe.mjs` now requires `--ack-live-write` alongside `--send`.
+
 ## [0.1.0] — 2026-07-09
 
 First public release of the `ipc` skill as the `codex-ipc` plugin.

@@ -21,8 +21,9 @@ pointed at a more restricted location via `CODEX_IPC_ROOT`.
 
 A transcript path points at the full JSONL of a Claude session, which may contain material
 unrelated to the handoff. It is therefore **omitted by default** and included only when the
-operator sets `CODEX_IPC_INCLUDE_TRANSCRIPT=1`. The wrapper never guesses another session's
-transcript: without an injected session id it fails closed to "unavailable".
+operator sets `CODEX_IPC_INCLUDE_TRANSCRIPT=1`. Automatic transcript resolution fails closed to
+"unavailable" without an injected session id; an explicit `CLAUDE_TRANSCRIPT` is honored only when
+`CODEX_IPC_INCLUDE_TRANSCRIPT=1`.
 
 ### Reply files are untrusted model output
 
@@ -48,8 +49,9 @@ A live Desktop send starts a real model turn in a real thread. Gates, all fail-c
   `CODEX_IPC_AUTHORIZED_TEST_THREAD` env var. **No authorized thread id ships in the code.**
 - The wrapper refuses to deep-link missing or archived threads and writes the file-drop fallback
   before any live attempt.
-- Completeness note: the `handoff_to_codex.sh --ipc <uuid>` wrapper treats the explicit-UUID
-  invocation itself as the operator acknowledgement and internally supplies
+- Completeness note: selecting `--ipc <uuid>` is itself the live-delivery acknowledgement;
+  inspect-before-send is the `/ipc` agent's own preflight step, not a wrapper gate. The
+  `handoff_to_codex.sh --ipc <uuid>` wrapper internally supplies
   `--send --ack-live-write --allow-any-thread` to the client; the file-drop fallback envelope is
   still written first.
 

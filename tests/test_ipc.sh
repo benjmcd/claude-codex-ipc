@@ -29,8 +29,9 @@ printf '%s\n' "\$*" >> "$TMP/nodeargs.log"
 echo '{"ok":true}'
 exit 0
 EOF
-cat > "$BIN/codex" <<'EOF'
+cat > "$BIN/codex" <<EOF
 #!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$TMP/codexargs.log"
 exit 0
 EOF
 cat > "$BIN/powershell.exe" <<'EOF'
@@ -200,8 +201,9 @@ cat > "$BIN2/powershell.exe" <<EOF
 printf '%s\n' "\$*" >> "$FGDIR/pslog"
 exit "\$(cat "$FGDIR/pscode" 2>/dev/null || echo 0)"
 EOF
-cat > "$BIN2/codex" <<'EOF'
+cat > "$BIN2/codex" <<EOF
 #!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$FGDIR/codexargs.log"
 exit 0
 EOF
 chmod +x "$BIN2"/*
@@ -222,6 +224,14 @@ assert_tax(){ # every RESULT line in $OUT must match the parser-compatible taxon
   local bad
   bad="$(printf '%s\n' "$OUT" | grep '^RESULT:' | grep -vE "$TAX_RE" || true)"
   [[ -z "$bad" ]] && ok "$1: all RESULT lines parser-compatible" || { no "$1: non-conforming RESULT line"; printf '%s\n' "$bad"; }
+}
+assert_no_codex_exec_fallback(){
+  local bad
+  bad="$(
+    { [[ -f "$TMP/codexargs.log" ]] && cat "$TMP/codexargs.log"; [[ -f "$FGDIR/codexargs.log" ]] && cat "$FGDIR/codexargs.log"; } \
+      | grep -E '(^|[[:space:]])exec([[:space:]]|$)' || true
+  )"
+  [[ -z "$bad" ]] && echo "  CHECK: no /ipc path invoked codex exec" || { no "/ipc path invoked codex exec"; printf '%s\n' "$bad"; }
 }
 
 echo "== 14. default policy defer: foreground-Codex deferral is explicit =="
@@ -313,6 +323,7 @@ OUT="$( cd "$REPO" && CODEX_IPC_ROOT="$IPCROOT" CLAUDE_CODE_SESSION_ID="fgsess" 
     PATH="$BIN2:$PATH" bash "$SCRIPT" --ipc "$UUIDF" --foreground-policy switch -- "t24 standing" 2>&1 )"; RC=$?
 [[ $RC -eq 0 ]] && printf '%s' "$OUT" | grep -q "ack=standing-approval-env" && printf '%s' "$OUT" | grep -q "reason=foreground-switched" && ok "standing approval honored and disclosed" || no "standing approval (rc=$RC)"
 assert_tax "t24"
+assert_no_codex_exec_fallback
 
 echo ""
 echo "RESULT: $PASS passed, $FAIL failed"

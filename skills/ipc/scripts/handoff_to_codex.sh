@@ -58,6 +58,14 @@ IPC_ROOT="${CODEX_IPC_ROOT:-${HOME}/.claude/ipc}"
 # An apostrophe is legal in a Windows path (e.g. user "O'Brien"); the pickup instruction
 # double-quotes the path and Windows forbids '"' in paths, so no escaping is needed.
 case "$IPC_ROOT" in *$'\n'*) echo "ERROR: CODEX_IPC_ROOT must not contain a newline." >&2; exit 1;; esac
+IPC_ROOT_REAL="$(cd "$IPC_ROOT" 2>/dev/null && pwd -P || printf '%s' "$IPC_ROOT")"
+HOME_REAL="$(cd "$HOME" 2>/dev/null && pwd -P || printf '%s' "$HOME")"
+RETENTION_SWEEP_OK=1
+case "$IPC_ROOT_REAL" in
+    ""|/|"$HOME_REAL"|/[A-Za-z]|/[A-Za-z]/|[A-Za-z]:|[A-Za-z]:/|[A-Za-z]:\\)
+        RETENTION_SWEEP_OK=0
+        ;;
+esac
 
 # --- Optional project root: used ONLY to enrich the payload with git context. ---
 # Never required. The transport does not depend on being inside a git repository.
@@ -244,8 +252,12 @@ CHANNEL_DIR="${IPC_ROOT}/${CLAUDE_SID}/${CHANNEL_THREAD}"
 # this bounds stale-disclosure, not just disk. Env-tunable via CODEX_IPC_RETENTION_DAYS; 0 disables.
 RETENTION_DAYS="${CODEX_IPC_RETENTION_DAYS:-7}"
 if [[ "$RETENTION_DAYS" =~ ^[0-9]+$ && "$RETENTION_DAYS" -gt 0 ]]; then
-    find "$IPC_ROOT" -type f \( -name '*.task.md' -o -name '*.reply.md' \) -mtime +"$RETENTION_DAYS" -delete 2>/dev/null || true
-    find "$IPC_ROOT" -mindepth 1 -type d -empty -mtime +"$RETENTION_DAYS" -delete 2>/dev/null || true
+    if [[ "$RETENTION_SWEEP_OK" -eq 1 ]]; then
+        find "$IPC_ROOT" -type f \( -name '*.task.md' -o -name '*.reply.md' \) -mtime +"$RETENTION_DAYS" -delete 2>/dev/null || true
+        find "$IPC_ROOT" -mindepth 1 -type d -empty -mtime +"$RETENTION_DAYS" -delete 2>/dev/null || true
+    else
+        echo "WARNING: refusing retention sweep for dangerous CODEX_IPC_ROOT \"${IPC_ROOT}\"." >&2
+    fi
 fi
 mkdir -p "$CHANNEL_DIR"
 OUTBOUND_MSYS="${CHANNEL_DIR}/${DISPATCH_ID}.task.md"   # Claude Code -> Codex (this dispatch)

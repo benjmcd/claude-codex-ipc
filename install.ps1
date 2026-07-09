@@ -46,12 +46,36 @@ foreach ($f in $files) {
     Write-Output "    copy: `"$rel`""
 }
 
-if (Test-Path $Target) {
+if (Test-Path -LiteralPath $Target) {
     if ($Force) {
         Write-Output "  delete (then replace): `"$Target`" and everything under it"
     } else {
         Write-Output ""
         Write-Error "Refusing to overwrite existing install at `"$Target`". Re-run with -Force to replace it (-DryRun -Force shows what is deleted)."
+        exit 1
+    }
+}
+
+if ($Force -and (Test-Path -LiteralPath $Target)) {
+    $srcReal = (Resolve-Path -LiteralPath $SrcRoot).ProviderPath.TrimEnd('\', '/')
+    $targetReal = (Resolve-Path -LiteralPath $Target).ProviderPath.TrimEnd('\', '/')
+    $homeReal = (Resolve-Path -LiteralPath $HOME).ProviderPath.TrimEnd('\', '/')
+    $targetRoot = [System.IO.Path]::GetPathRoot($targetReal).TrimEnd('\', '/')
+
+    if (
+        [string]::IsNullOrWhiteSpace($targetReal) -or
+        $targetReal.Equals($srcReal, [System.StringComparison]::OrdinalIgnoreCase) -or
+        $targetReal.StartsWith("$srcReal\", [System.StringComparison]::OrdinalIgnoreCase) -or
+        $targetReal.Equals($homeReal, [System.StringComparison]::OrdinalIgnoreCase) -or
+        $targetReal.Equals($targetRoot, [System.StringComparison]::OrdinalIgnoreCase)
+    ) {
+        Write-Error "Refusing dangerous -Target `"$Target`"."
+        exit 1
+    }
+
+    $sentinel = Join-Path $Target "SKILL.md"
+    if (-not (Test-Path -LiteralPath $sentinel) -or -not (Select-String -LiteralPath $sentinel -Pattern '^name: ipc$' -Quiet)) {
+        Write-Error "-Force refuses to delete `"$Target`": not an ipc skill install."
         exit 1
     }
 }
@@ -62,7 +86,7 @@ if ($DryRun) {
     exit 0
 }
 
-if (Test-Path $Target) {
+if (Test-Path -LiteralPath $Target) {
     Remove-Item -Recurse -Force -Confirm:$false -LiteralPath $Target
 }
 New-Item -ItemType Directory -Force -Path $Target | Out-Null

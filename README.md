@@ -80,7 +80,10 @@ Dependencies and fallbacks per feature: [docs/COMPATIBILITY.md](docs/COMPATIBILI
 ## Safety
 
 Explicit target UUID for every live send — no heuristic targeting, ever. Dry-run by default;
-live writes need `--send --ack-live-write` (+`--allow-any-thread`); no authorized thread id ships.
+live writes need `--send --ack-live-write` (+`--allow-any-thread`) — except the
+`handoff_to_codex.sh --ipc <uuid>` wrapper, where selecting the explicit UUID is itself the
+acknowledgement and the wrapper supplies those client flags internally (see SECURITY.md
+"Completeness note"); no authorized thread id ships.
 All SQLite access `readOnly:true`; no config/account mutation; no HTTP listener; transcript
 disclosure opt-in. Threat model: [SECURITY.md](SECURITY.md). Failure triage:
 [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
@@ -98,10 +101,10 @@ CI adds syntax checks and public-safety scans on ubuntu + windows:
 
 Live route is Windows-only and version-fragile by nature. GUI delivery cannot set a thread's
 model/reasoning (renderer-controlled). Envelope files trust the local machine (any same-user
-process can read them). `--exec` output never appears in the Desktop GUI.
+process can read and modify them). `--exec` output never appears in the Desktop GUI.
 
 ## Status
 
-v0.1.0 · [MIT](LICENSE.md) · [benjmcd/claude-codex-ipc](https://github.com/benjmcd/claude-codex-ipc).
+v0.1.1 · [MIT](LICENSE.md) · [benjmcd/claude-codex-ipc](https://github.com/benjmcd/claude-codex-ipc).
 Re-run `codex_ipc_revalidate.mjs` after any Codex Desktop update; `restore-if-known` and bounded
 rollout observation remain unimplemented/experimental.

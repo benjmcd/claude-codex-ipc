@@ -161,18 +161,20 @@ function main() {
         ok: contains("scripts/handoff_to_codex.sh", 'CODEX_IPC_INCLUDE_TRANSCRIPT:-0'),
       },
     ], "Transcript pointers expose full local session context; include them only when needed."),
-    check("REQ-006", "Existing-session /ipc inspects before sending.", [
+    check("REQ-006", "Existing-session /ipc has static preflight inspection guidance and the inspector file exists.", [
       {
         label: "session inspector exists",
         file: "scripts/codex_ipc_session_inspect.mjs",
         ok: existsSync(skillPath("scripts/codex_ipc_session_inspect.mjs")),
       },
       {
-        label: "SKILL.md says always inspect before sending",
+        label: "SKILL.md scopes inspect-before-send as agent preflight",
         file: "SKILL.md",
-        ok: contains("SKILL.md", "Always inspect before sending any message."),
+        ok:
+          contains("SKILL.md", "Selecting `--ipc <uuid>` is itself the live-delivery acknowledgement") &&
+          contains("SKILL.md", "Inspect-before-send is the /ipc agent's own preflight step, not a wrapper gate."),
       },
-    ]),
+    ], "Static doc/file-existence evidence only: this does not verify runtime ordering. Selecting `--ipc <uuid>` is itself the live-delivery acknowledgement; the wrapper supplies the client's `--send --ack-live-write --allow-any-thread` internally. Inspect-before-send is the /ipc agent's own preflight step, not a wrapper gate."),
     check("REQ-007", "No-UUID /ipc has read-only candidate discovery before target selection.", [
       {
         label: "thread locator exists",
@@ -315,10 +317,11 @@ function main() {
     ]),
     check("REQ-016", "Results are parser-compatible: top-level category plus machine reason/confirmation tokens.", [
       {
-        label: "wrapper emits reason= and confirmation= tokens",
+        label: "wrapper emits all RESULT categories with reason= and confirmation= tokens",
         file: "scripts/handoff_to_codex.sh",
         ok:
           contains("scripts/handoff_to_codex.sh", /RESULT: gui-delivered -- reason=[a-z0-9$"{}_A-Z-]+ -- confirmation=/) &&
+          contains("scripts/handoff_to_codex.sh", /RESULT: gui-unowned -- reason=[a-z0-9-]+ -- confirmation=/) &&
           contains("scripts/handoff_to_codex.sh", /RESULT: failed-closed -- reason=[a-z0-9-]+ -- confirmation=/),
       },
       {
@@ -343,7 +346,7 @@ function main() {
         file: "scripts/handoff_to_codex.sh",
         ok: contains("scripts/handoff_to_codex.sh", "NOTE: --exec is headless. The result will NOT appear in the Codex Desktop GUI."),
       },
-    ], "Static greps prove the contract text and mode separation, not runtime absence; the hermetic tests exercise the --ipc path with a stubbed codex binary that would surface any exec-based fallback."),
+    ], "Static greps prove the contract text and mode separation, not runtime absence; the hermetic tests log stubbed codex argv and assert no /ipc path invokes codex exec."),
     check("REQ-011", "Future controlled write re-proof is dry-run-first and evidence-backed.", [
       {
         label: "write proof harness exists",

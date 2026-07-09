@@ -33,6 +33,7 @@ function usage() {
 
 Options:
   --dry-run                         Print requests and framed byte counts only.
+  --allow-live-ipc-read             Connect to the IPC pipe and wait for router responses.
   --pipe <path>                     Named pipe path. Default: ${DEFAULT_PIPE}
   --timeout-ms <n>                  Per-attempt timeout. Default: ${DEFAULT_TIMEOUT_MS}
   --protocol <ipc-router|app-server-json>
@@ -56,7 +57,8 @@ Exit code:
 
 function parseArgs(argv) {
   const opts = {
-    dryRun: false,
+    dryRun: true,
+    allowLiveIpcRead: false,
     pipePath: DEFAULT_PIPE,
     timeoutMs: DEFAULT_TIMEOUT_MS,
     protocol: DEFAULT_PROTOCOL,
@@ -76,6 +78,10 @@ function parseArgs(argv) {
     switch (arg) {
       case "--dry-run":
         opts.dryRun = true;
+        break;
+      case "--allow-live-ipc-read":
+        opts.allowLiveIpcRead = true;
+        opts.dryRun = false;
         break;
       case "--pipe":
         opts.pipePath = takeValue(argv, ++index, arg);
@@ -152,6 +158,9 @@ function takeValue(argv, index, flag) {
 }
 
 function parsePositiveInt(value, flag) {
+  if (!/^\d+$/.test(String(value))) {
+    throw new Error(`${flag} must be a positive integer`);
+  }
   const parsed = Number.parseInt(value, 10);
   if (!Number.isSafeInteger(parsed) || parsed <= 0) {
     throw new Error(`${flag} must be a positive integer`);

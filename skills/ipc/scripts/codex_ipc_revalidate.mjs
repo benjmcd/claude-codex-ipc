@@ -91,6 +91,9 @@ function takeValue(argv, index, flag) {
 }
 
 function parsePositiveInt(value, flag) {
+  if (!/^\d+$/.test(String(value))) {
+    throw new Error(`${flag} must be a positive integer`);
+  }
   const parsed = Number.parseInt(value, 10);
   if (!Number.isSafeInteger(parsed) || parsed <= 0) {
     throw new Error(`${flag} must be a positive integer`);
@@ -112,6 +115,9 @@ function rel(filePath) {
 
 // Resolve a "scripts/<name>" skill-relative path against the bundled skill root.
 function skillPath(relPath) {
+  if (path.isAbsolute(relPath)) {
+    return relPath;
+  }
   return path.join(SKILL_ROOT, ...relPath.split("/"));
 }
 
@@ -305,6 +311,7 @@ function runLiveIpcReadProbe(opts) {
       "ipc-router",
       "--framing",
       "uint32le",
+      "--allow-live-ipc-read",
       "--timeout-ms",
       String(opts.timeoutMs),
     ],

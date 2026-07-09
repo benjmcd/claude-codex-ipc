@@ -75,7 +75,7 @@ constraints, and context — so the handoff is self-contained and needs no follo
 
 ## Existing-session mode
 
-Always inspect before sending any message.
+Before using existing-session `/ipc`, the /ipc agent must run the read-only inspector as its separate preflight step. Selecting `--ipc <uuid>` is itself the live-delivery acknowledgement; the wrapper supplies the client's `--send --ack-live-write --allow-any-thread` internally. Inspect-before-send is the /ipc agent's own preflight step, not a wrapper gate.
 
 Run the read-only inspector (requires a Node.js version with `node:sqlite`; see
 [references/troubleshooting.md](references/troubleshooting.md)):

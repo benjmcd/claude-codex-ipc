@@ -2,8 +2,8 @@
 # Public-safety scan: fails if private/local/machine-specific content appears anywhere in the
 # repo. Run from anywhere; scans the repo root this script lives in.
 #
-# Excluded from scanning: this script itself and the CI workflow (both must NAME the forbidden
-# patterns in order to scan/document them), and .git internals.
+# Excluded from scanning: this script itself (it must NAME the forbidden patterns), and .git
+# internals. The CI workflow is scanned so leaks there are caught.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -14,7 +14,7 @@ scan() { # scan <label> <extended-regex>
     local label="$1" pattern="$2" hits
     hits="$(grep -rInE --binary-files=without-match \
         --exclude-dir=.git --exclude-dir=node_modules \
-        --exclude=scan_public_safety.sh --exclude=test.yml \
+        --exclude=scan_public_safety.sh \
         -e "$pattern" "$ROOT" 2>/dev/null || true)"
     if [[ -n "$hits" ]]; then
         echo "FAIL: $label"
@@ -64,7 +64,7 @@ fi
 ALLOWED_UUIDS='^(00000000-0000-4000-8000-000000000000|00000000-0000-4000-8000-00000000c0de|11111111-1111-4111-8111-111111111111|22222222-2222-4222-8222-222222222222|33333333-3333-4333-8333-333333333333)$'
 unknown_uuids="$(grep -rIhoE --binary-files=without-match \
     --exclude-dir=.git --exclude-dir=node_modules \
-    --exclude=scan_public_safety.sh --exclude=test.yml \
+    --exclude=scan_public_safety.sh \
     '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' "$ROOT" 2>/dev/null \
     | sort -u | grep -vE "$ALLOWED_UUIDS" || true)"
 if [[ -n "$unknown_uuids" ]]; then

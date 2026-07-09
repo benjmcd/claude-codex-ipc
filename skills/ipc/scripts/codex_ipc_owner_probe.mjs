@@ -35,11 +35,13 @@ const FOLLOWER_VERSION = 1;
 function usage() {
   return `Usage:
   node scripts/codex_ipc_owner_probe.mjs            # dry-run (no connection)
-  node scripts/codex_ipc_owner_probe.mjs --send     # one live negative probe
+  node scripts/codex_ipc_owner_probe.mjs --send --ack-live-write
+                                                     # one live negative probe
 
 Options:
   --send                Open the pipe and send initialize + one follower-start-turn
                         against the fixed synthetic sentinel (absent) thread id.
+  --ack-live-write      Required with --send; acknowledges this opens live IPC.
   --timeout-ms <n>      Per-step timeout. Default: ${DEFAULT_TIMEOUT_MS}
   --pipe <path>         Named pipe path. Default: ${DEFAULT_PIPE}
   --client-type <text>  Router initialize clientType. Default: external-owner-probe
@@ -53,6 +55,7 @@ can start on any real session. Read-only otherwise.`;
 function parseArgs(argv) {
   const opts = {
     send: false,
+    ackLiveWrite: false,
     timeoutMs: DEFAULT_TIMEOUT_MS,
     pipePath: DEFAULT_PIPE,
     clientType: "external-owner-probe",
@@ -64,11 +67,11 @@ function parseArgs(argv) {
       case "--send":
         opts.send = true;
         break;
+      case "--ack-live-write":
+        opts.ackLiveWrite = true;
+        break;
       case "--timeout-ms": {
-        const v = argv[++i];
-        const n = Number.parseInt(v, 10);
-        if (!Number.isSafeInteger(n) || n <= 0) throw new Error("--timeout-ms must be a positive integer");
-        opts.timeoutMs = n;
+        opts.timeoutMs = parsePositiveInt(takeValue(argv, ++i, arg), arg);
         break;
       }
       case "--pipe":
@@ -87,7 +90,29 @@ function parseArgs(argv) {
         throw new Error(`Unknown argument: ${arg}`);
     }
   }
+  if (opts.send && !opts.ackLiveWrite) {
+    throw new Error("--send requires --ack-live-write because this opens live IPC");
+  }
   return opts;
+}
+
+function takeValue(argv, index, flag) {
+  const value = argv[index];
+  if (!value || value.startsWith("--")) {
+    throw new Error(`${flag} requires a value`);
+  }
+  return value;
+}
+
+function parsePositiveInt(value, flag) {
+  if (!/^\d+$/.test(String(value))) {
+    throw new Error(`${flag} must be a positive integer`);
+  }
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+    throw new Error(`${flag} must be a positive integer`);
+  }
+  return parsed;
 }
 
 function encodeFrame(message) {

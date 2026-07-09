@@ -76,6 +76,20 @@ if [[ -e "$TARGET" ]]; then
     fi
 fi
 
+if [[ "$FORCE" -eq 1 && -e "$TARGET" ]]; then
+    SRC_REAL="$(cd "$SRC_ROOT" && pwd -P)"
+    TGT_REAL="$(cd "$TARGET" 2>/dev/null && pwd -P || echo "$TARGET")"
+    HOME_REAL="$(cd "$HOME" 2>/dev/null && pwd -P || echo "$HOME")"
+    case "$TGT_REAL" in
+        "$SRC_REAL"|"$SRC_REAL"/*|"$HOME_REAL"|/|/[A-Za-z]|"")
+            echo "ERROR: refusing dangerous --target \"${TARGET}\"." >&2
+            exit 1
+            ;;
+    esac
+    { [[ -f "$TARGET/SKILL.md" ]] && grep -q '^name: ipc$' "$TARGET/SKILL.md"; } \
+        || { echo "ERROR: --force refuses to delete \"${TARGET}\": not an ipc skill install." >&2; exit 1; }
+fi
+
 if [[ "$DRY_RUN" -eq 1 ]]; then
     echo ""
     echo "Dry run: nothing was copied or deleted."

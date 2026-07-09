@@ -145,6 +145,9 @@ function takeValue(argv, index, flag) {
 }
 
 function parsePositiveInt(value, flag) {
+  if (!/^\d+$/.test(String(value))) {
+    throw new Error(`${flag} must be a positive integer`);
+  }
   const parsed = Number.parseInt(value, 10);
   if (!Number.isSafeInteger(parsed) || parsed <= 0) {
     throw new Error(`${flag} must be a positive integer`);
@@ -153,6 +156,9 @@ function parsePositiveInt(value, flag) {
 }
 
 function parseEpochMs(value, flag) {
+  if (!/^\d+$/.test(String(value))) {
+    throw new Error(`${flag} must be a positive epoch-ms integer`);
+  }
   const parsed = Number.parseInt(value, 10);
   if (!Number.isSafeInteger(parsed) || parsed <= 0) {
     throw new Error(`${flag} must be a positive epoch-ms integer`);
