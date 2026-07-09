@@ -27,6 +27,13 @@ First public preparation of the `ipc` skill as the `codex-ipc` plugin. Not yet r
   works without it.
 - Script-dir-relative sibling resolution in the orchestrating tools (`codex_ipc_revalidate.mjs`,
   `codex_ipc_write_proof.mjs`, `codex_ipc_contract_audit.mjs`) so they run from any cwd.
+- QA infrastructure: hermetic transport tests extended 33→70 assertions (foreground-policy,
+  inspection-ambiguity, taxonomy, transcript-opt-in coverage) with dual-layout probes so the same
+  test files run in both the repo and installed-skill layouts; contract audit extended to 17
+  requirements (REQ-012..017: conservative policy default, ack-gated switch,
+  file-drop-before-policy-failure, positive inspection proof, parser-compatible taxonomy,
+  no-headless); revalidate gained a PowerShell parser check (skip-if-absent); CI gained a
+  Windows-guarded PowerShell parse step.
 
 ### Changed
 - `codex_ipc_write_proof.mjs`: the DB-byte marker count (`markerIncreased`) is now diagnostics

@@ -77,5 +77,6 @@ explicit operator approval.
 
 ## Reporting
 
-Until a maintainer contact is published (release blocker), report issues through the repository's
-issue tracker once public — or, for anything sensitive, directly to the maintainer out of band.
+Report issues through the repository's issue tracker
+(<https://github.com/benjmcd/claude-codex-ipc/issues>) — or, for anything sensitive, directly to
+the maintainer ([benjmcd](https://github.com/benjmcd)) out of band.

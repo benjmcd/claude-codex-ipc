@@ -13,6 +13,11 @@ the repo directory as a plugin with your Claude Code version's plugin command (e
 - Update: pull the repo; the plugin picks up the new files.
 - Uninstall: remove the plugin via Claude Code's plugin management.
 
+> **Windows path-length note:** clone to a short path (e.g. `C:\dev\claude-codex-ipc`) and
+> run `git config core.longpaths true` after cloning — deeply nested locations (cloud-synced
+> user folders, future `worktrees/`) can exceed the legacy 260-char limit otherwise. Avoid
+> cloud-synced folders for git working trees generally (sync engines race git on `.git` locks).
+
 ## B. Standalone skill
 
 Copies `skills/ipc/` to your user skills directory:

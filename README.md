@@ -194,13 +194,11 @@ on ubuntu and windows runners: [.github/workflows/test.yml](.github/workflows/te
 
 ## Release status
 
-**Pre-release. Blockers before any public publication:**
+**Pre-release (v0.1.0, unpublished).** Licensed [MIT](LICENSE.md); maintained by
+[benjmcd](https://github.com/benjmcd); repository:
+[benjmcd/claude-codex-ipc](https://github.com/benjmcd/claude-codex-ipc).
 
-1. **License not chosen** — [LICENSE.md](LICENSE.md) is a placeholder; `plugin.json` says
-   `UNLICENSED`.
-2. Maintainer identity/repository URL are `<TODO>` placeholders in
-   [.claude-plugin/plugin.json](.claude-plugin/plugin.json).
-3. Live Desktop IPC is point-in-time validated only (2026-07-08; see "Status of the two halves")
-   and rides private Codex Desktop internals — re-run `codex_ipc_revalidate.mjs` before each
-   release and after any Codex Desktop update. `restore-if-known` and bounded rollout observation
-   remain unimplemented/experimental.
+Standing caveat: live Desktop IPC is point-in-time validated only (2026-07-08; see "Status of the
+two halves") and rides private Codex Desktop internals — re-run `codex_ipc_revalidate.mjs` before
+each release and after any Codex Desktop update. `restore-if-known` and bounded rollout
+observation remain unimplemented/experimental.
