@@ -2,9 +2,9 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.1.0] — Unreleased
+## [0.1.0] — 2026-07-09
 
-First public preparation of the `ipc` skill as the `codex-ipc` plugin. Not yet released.
+First public release of the `ipc` skill as the `codex-ipc` plugin.
 
 ### Added
 - **Foreground policy for `--ipc`** (experimental, Windows): default `defer` (never navigate the
