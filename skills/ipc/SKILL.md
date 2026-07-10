@@ -197,6 +197,9 @@ of whether a reply was written (stop waiting; surface any reply as unverified, n
 Read-only inspection only; parse event types, never substring-grep (which also matches inside
 tool output). One delegation produces one reply: app-driven turns after the reply (e.g. goal
 checks) are supersession territory, discovered by re-inspection, not by watching forever.
+The prose above remains the completion-contract definition; mechanically check it with
+`scripts/codex_ipc_wait.mjs`, which emits `done`, `aborted`, `superseded`, `reply-missing`,
+`pending`, or `unavailable`.
 Compose handoffs with the completion contract in
 [references/handoff-template.md](references/handoff-template.md): self-verify BEFORE writing the
 reply; the reply is the last act of the turn.
