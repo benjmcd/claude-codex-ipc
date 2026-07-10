@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
 # Consolidated DERIVED, READ-ONLY view of Codex replies for the IPC skill.
 #
-# The authoritative channel is the set of per-dispatch reply files written under the keyed transport
-# root by handoff_to_codex.sh / Codex:
+# The primary source is the set of per-dispatch reply files under the keyed transport root:
 #   ${CODEX_IPC_ROOT:-~/.claude/ipc}/<claudeSessionId>/<conversationId|filedrop>/<dispatchId>.reply.md
-# This tool only READS and FORMATS them, newest-first, as a point-in-time view. It is NEVER the
-# authoritative channel, never writes/locks/prunes anything, and never creates the root. It exists to
+# A retained task with no readable primary may use a labeled rollout-derived fallback on stdout.
+# This tool never writes/locks/prunes anything and never creates the root. It exists to
 # restore the "skim all replies in one place" affordance without the old shared-file commingling bug —
 # per-entry (session/thread/dispatch) attribution is what keeps this a view, not a re-commingling.
 #
@@ -19,12 +18,18 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=codex_ipc_safe_render.sh
+source "$SCRIPT_DIR/codex_ipc_safe_render.sh"
+HARVESTER="$SCRIPT_DIR/codex_ipc_reply_harvest.mjs"
+
 # --- Two one-liners kept in lockstep with handoff_to_codex.sh (do NOT source the wrapper: it parses
 # --- argv, runs the reaper, and exits at top level). ---
 # kept in lockstep with handoff_to_codex.sh to_win() (uniq_hex not needed here)
 to_win() { cygpath -m "$1" 2>/dev/null || printf '%s' "$1" | sed 's|^/\([a-zA-Z]\)/|\U\1:/|'; }
 # kept in lockstep with handoff_to_codex.sh is_uuid()
 is_uuid() { [[ "${1:-}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; }
+valid_session() { [[ "${1:-}" =~ ^[A-Za-z0-9._-]+$ && "$1" != "." && "$1" != ".." ]]; }
 
 usage() {
     cat >&2 <<EOF
@@ -68,7 +73,7 @@ done
 [[ "$MAX_BYTES" =~ ^[1-9][0-9]*$ ]] || { echo "ERROR: --max-bytes must be a positive integer." >&2; exit 1; }
 if [[ -n "$SESSION" ]]; then
     # allowlist admits UUIDs and nosid-* verbatim; the dot-names '.'/'..' are traversal and rejected explicitly.
-    if [[ ! "$SESSION" =~ ^[A-Za-z0-9._-]+$ || "$SESSION" == "." || "$SESSION" == ".." ]]; then
+    if ! valid_session "$SESSION"; then
         echo "ERROR: invalid --session '$SESSION'." >&2; exit 1
     fi
 fi
@@ -88,10 +93,10 @@ list_sessions() {  # prints to the fd the caller redirects; capped at 20, newest
     for d in "$IPC_ROOT"/*/; do
         [[ -d "$d" ]] || continue
         name="$(basename "$d")"
-        newest="$(find "$d" -type f -name '*.reply.md' -printf '%T@\n' 2>/dev/null | sort -nr | head -1)"
-        cnt="$(find "$d" -type f -name '*.reply.md' 2>/dev/null | wc -l | tr -d ' ')"
+        newest="$(find "$d" -mindepth 2 -maxdepth 2 -type f -name '*.reply.md' -printf '%T@\n' 2>/dev/null | sort -nr | sed -n '1p')"
+        cnt="$(find "$d" -mindepth 2 -maxdepth 2 -type f -name '*.reply.md' 2>/dev/null | wc -l | tr -d ' ')"
         printf '%s\t%s\t%s\n' "${newest:-0}" "$name" "$cnt"
-    done | sort -t$'\t' -k1,1nr | head -20 | while IFS=$'\t' read -r m nm c; do
+    done | sort -t$'\t' -k1,1nr | sed -n '1,20p' | while IFS=$'\t' read -r m nm c; do
         if [[ "$m" == "0" ]]; then printf '  %-40s  %s replies\n' "$nm" "$c"
         else printf '  %-40s  %s replies (newest %s)\n' "$nm" "$c" "$(date -d "@$m" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo "$m")"; fi
     done
@@ -111,6 +116,10 @@ fi
 # --- Resolve session (mirrors the handoff_to_codex.sh CLAUDE_SID resolution; never guesses/mints a nosid token) ---
 if [[ -z "$SESSION" ]]; then
     SESSION="${CLAUDE_SESSION_ID:-${CLAUDE_CODE_SESSION_ID:-}}"
+fi
+if [[ -n "$SESSION" ]] && ! valid_session "$SESSION"; then
+    echo "ERROR: invalid resolved session identifier." >&2
+    exit 1
 fi
 if [[ -z "$SESSION" ]]; then
     {
@@ -147,10 +156,11 @@ if [[ -n "$SINCE" ]]; then
 fi
 
 # --- Enumeration (exit-status-propagating; retry-once on transient reaper race; hard-fail visibly) ---
-# -type f under find's default -P (lstat) is LOAD-BEARING: it excludes directories and symlinks named
-# *.reply.md and never follows links out of the root. Never add -L/-follow. The suffix-anchored glob
-# structurally excludes atomic_write temp siblings (<id>.reply.md.XXXXXX) and all *.task.md.
-FIND_ARGS=(-type f -name '*.reply.md')
+# -type f under find's default -P (lstat) is LOAD-BEARING: it excludes directories and symlinks and
+# never follows links out of the root. Never add -L/-follow. Suffix-anchored globs exclude temp siblings.
+if [[ -n "$CONV" ]]; then SCOPE_DEPTH=(-mindepth 1 -maxdepth 1)
+else SCOPE_DEPTH=(-mindepth 2 -maxdepth 2); fi
+FIND_ARGS=("${SCOPE_DEPTH[@]}" -type f '(' -name '*.reply.md' -o -name '*.task.md' ')')
 [[ -n "$SINCE" ]] && FIND_ARGS+=(-newermt "$SINCE")
 enumerate() { find "$SCOPE_DIR" "${FIND_ARGS[@]}" -printf '%T@\t%p\n' 2>/dev/null; }
 # `if var=$(...)` is load-bearing: under set -e a bare `raw=$(enumerate)` would EXIT on a transient
@@ -161,14 +171,35 @@ if [[ $rc -ne 0 ]]; then
 fi
 if [[ $rc -ne 0 ]]; then
     find "$SCOPE_DIR" "${FIND_ARGS[@]}" -printf '%T@\t%p\n' >/dev/null || true  # diagnostic: stderr visible
-    echo "ERROR: could not enumerate replies under \"$(to_win "$SCOPE_DIR")\" (see error above)." >&2
+    echo "ERROR: could not enumerate dispatches under \"$(to_win "$SCOPE_DIR")\" (see error above)." >&2
     exit 1
 fi
 
-# --- Sort (mtime desc; path-asc tie-break for determinism) + total ---
+# --- Select one entry per dispatch (reply wins), then sort by mtime desc + path asc. ---
 ENTRIES=()
 if [[ -n "$raw" ]]; then
-    mapfile -t ENTRIES < <(sort -t$'\t' -k1,1nr -k2,2 <<<"$raw")
+    declare -A ENTRY_MT=() ENTRY_PATH=() ENTRY_KIND=()
+    while IFS=$'\t' read -r entry_mt entry_path; do
+        [[ -n "$entry_path" ]] || continue
+        entry_thread="$(basename "$(dirname "$entry_path")")"
+        if [[ "$entry_thread" != "filedrop" ]] && ! is_uuid "$entry_thread"; then continue; fi
+        if [[ "$entry_path" == *.reply.md ]]; then
+            entry_kind="reply"; entry_dispatch="$(basename "$entry_path" .reply.md)"
+        else
+            entry_kind="task"; entry_dispatch="$(basename "$entry_path" .task.md)"
+        fi
+        entry_key="$(dirname "$entry_path")/$entry_dispatch"
+        if [[ -z "${ENTRY_KIND[$entry_key]+x}" || "$entry_kind" == "reply" ]]; then
+            ENTRY_MT[$entry_key]="$entry_mt"
+            ENTRY_PATH[$entry_key]="$entry_path"
+            ENTRY_KIND[$entry_key]="$entry_kind"
+        fi
+    done <<<"$raw"
+    mapfile -t ENTRIES < <(
+        for entry_key in "${!ENTRY_KIND[@]}"; do
+            printf '%s\t%s\t%s\n' "${ENTRY_MT[$entry_key]}" "${ENTRY_KIND[$entry_key]}" "${ENTRY_PATH[$entry_key]}"
+        done | sort -t$'\t' -k1,1nr -k3,3
+    )
 fi
 TOTAL="${#ENTRIES[@]}"
 
@@ -177,9 +208,9 @@ NOW="$(date '+%Y-%m-%d %H:%M:%S %Z' 2>/dev/null || echo 'unknown time')"
 SHOWN=$(( TOTAL < N ? TOTAL : N ))
 echo "# Codex replies — DERIVED READ-ONLY VIEW (point-in-time; never authoritative)"
 echo "# captured: ${NOW}   session: ${SESSION}${CONV:+   thread: ${CONV}}"
-echo "# root: \"$(to_win "$IPC_ROOT")\"   (authoritative source: the per-dispatch *.reply.md files)"
+echo "# root: \"$(to_win "$IPC_ROOT")\"   (reply files primary; rollouts are derived fallback)"
 echo "# replies older than CODEX_IPC_RETENTION_DAYS (default 7; 0 disables) are transport-pruned and not shown."
-echo "# Showing ${SHOWN} of ${TOTAL} replies, newest first${SINCE:+   (--since '${SINCE}')}${CONV:+   (thread ${CONV})}"
+echo "# Showing ${SHOWN} of ${TOTAL} dispatches, newest first${SINCE:+   (--since '${SINCE}')}${CONV:+   (thread ${CONV})}"
 echo ""
 
 # --- Render ---
@@ -187,28 +218,101 @@ i=0
 for entry in "${ENTRIES[@]}"; do
     (( i < N )) || break
     i=$(( i + 1 ))
-    mt="${entry%%$'\t'*}"; p="${entry#*$'\t'}"
+    mt="${entry%%$'\t'*}"; entry_rest="${entry#*$'\t'}"
+    kind="${entry_rest%%$'\t'*}"; p="${entry_rest#*$'\t'}"
     thread="$(basename "$(dirname "$p")")"
-    dispatch="$(basename "$p" .reply.md)"
+    if [[ "$kind" == "reply" ]]; then dispatch="$(basename "$p" .reply.md)"
+    else dispatch="$(basename "$p" .task.md)"; fi
+    dispatch_dir="$(dirname "$p")"
+    reply_path="${dispatch_dir}/${dispatch}.reply.md"
+    task_path="${dispatch_dir}/${dispatch}.task.md"
     tlabel="$thread"; [[ "$thread" == "filedrop" ]] && tlabel="filedrop (pseudo-thread, not a Codex conversationId)"
     when="$(date -d "@${mt%.*}" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo "$mt")"
     # per-file guard: file may have been pruned/swapped between enumeration and read (TOCTOU/reaper)
+    if [[ "$kind" == "reply" && ( ! -f "$reply_path" || -L "$reply_path" ) \
+        && -f "$task_path" && ! -L "$task_path" ]]; then
+        kind="task"; p="$task_path"
+    fi
     if [[ ! -f "$p" || -L "$p" ]]; then
         echo "=== [$i] ${when} | thread: ${tlabel} | dispatch: ${dispatch}"
         echo "    (pruned mid-scan — re-run to refresh)"; echo ""
         continue
     fi
+    reply_readable=0
+    if [[ -f "$reply_path" && ! -L "$reply_path" ]] \
+        && head -c 0 -- "$reply_path" >/dev/null 2>&1; then
+        reply_readable=1; kind="reply"; p="$reply_path"
+    fi
     bytes="$(stat -c %s "$p" 2>/dev/null || echo 0)"
     if [[ "$PATHS_ONLY" -eq 1 ]]; then
-        printf '%s\t%s\t%s\t%s\t"%s"\n' "$when" "$thread" "$dispatch" "$bytes" "$(to_win "$p")"
+        if [[ "$kind" == "reply" ]]; then path_source="reply-file"; else path_source="task-envelope"; fi
+        printf '%s\t%s\t%s\t%s\t%s\t"%s"\n' "$when" "$thread" "$dispatch" "$bytes" "$path_source" "$(to_win "$p")"
         continue
     fi
-    echo "=== [$i] ${when} | thread: ${tlabel} | dispatch: ${dispatch} | ${bytes} B"
+    if [[ "$reply_readable" -eq 0 ]]; then
+        source_kind="none"; reason="unavailable"; source_bytes=0; returned_bytes=0
+        duplicate_count=0; boundary_mode="-"; body_base64=""
+        if command -v node >/dev/null 2>&1 && [[ -f "$HARVESTER" && "$thread" != "filedrop" \
+            && -f "$task_path" && ! -L "$task_path" ]]; then
+            if harvest_line="$(node "$HARVESTER" --thread "$thread" --dispatch "$dispatch" \
+                --max-bytes "$MAX_BYTES")"; then
+                if [[ "$harvest_line" != *$'\n'* ]]; then
+                    IFS=$'\t' read -r source_kind reason source_bytes returned_bytes duplicate_count boundary_mode body_base64 <<<"$harvest_line"
+                fi
+            fi
+        fi
+        case "$source_kind" in
+            rollout-fallback)
+                [[ "$source_bytes" =~ ^[0-9]+$ ]] || source_bytes=0
+                [[ "$returned_bytes" =~ ^[0-9]+$ ]] || returned_bytes=0
+                [[ "$duplicate_count" =~ ^[0-9]+$ ]] || duplicate_count=0
+                duplicate_note=""; (( duplicate_count > 1 )) && duplicate_note=" | duplicates=${duplicate_count}"
+                echo "=== [$i] ${when} | thread: ${tlabel} | dispatch: ${dispatch} | source=rollout-fallback | ${source_bytes} B${duplicate_note}"
+                echo "    retained task: \"$(to_win "$task_path")\""
+                if [[ "$returned_bytes" -gt 0 ]]; then
+                    if ! printf '%s' "$body_base64" | base64 --decode | codex_ipc_render_stream; then
+                        echo ""
+                        echo "    (rollout body could not be decoded safely; re-run to refresh)"
+                    fi
+                else
+                    echo "    (empty rollout-derived final answer)"
+                fi
+                if [[ "$source_bytes" -gt "$returned_bytes" ]]; then
+                    echo ""
+                    echo "    [... truncated at ${returned_bytes} B of ${source_bytes} B - rollout-derived body]"
+                fi
+                ;;
+            reply-file)
+                echo "=== [$i] ${when} | thread: ${tlabel} | dispatch: ${dispatch} | source=reply-file"
+                echo "    (primary became readable during scan; re-run to refresh metadata)"
+                if ! codex_ipc_render_file "$reply_path" "$MAX_BYTES"; then
+                    echo "    (became unreadable during render; re-run to refresh)"
+                fi
+                ;;
+            *)
+                case "$reason" in pending|unavailable|ambiguous|unparseable) :;; *) reason="unavailable";; esac
+                echo "=== [$i] ${when} | thread: ${tlabel} | dispatch: ${dispatch} | source=none | reason=${reason}"
+                if [[ -f "$task_path" && ! -L "$task_path" ]]; then
+                    echo "    retained task: \"$(to_win "$task_path")\""
+                else
+                    echo "    (no retained task envelope; rollout fallback not consulted)"
+                fi
+                ;;
+        esac
+        echo ""
+        continue
+    fi
+    echo "=== [$i] ${when} | thread: ${tlabel} | dispatch: ${dispatch} | source=reply-file | ${bytes} B"
     echo "    \"$(to_win "$p")\""
     if [[ "$bytes" -eq 0 ]]; then
         echo "    (empty — possibly mid-write or pending; re-run to refresh)"
     else
-        head -c "$MAX_BYTES" -- "$p"
+        if ! codex_ipc_render_file "$p" "$MAX_BYTES"; then
+            echo ""
+            echo "    (became unreadable during render; re-run to refresh)"
+            echo ""
+            continue
+        fi
         if [[ "$bytes" -gt "$MAX_BYTES" ]]; then
             echo ""
             echo "    [... truncated at ${MAX_BYTES} B of ${bytes} B — full reply: \"$(to_win "$p")\"]"
@@ -223,8 +327,8 @@ while IFS= read -r t; do
     [[ -n "$t" ]] || continue
     d="$(dirname "$t")"; base="$(basename "$t" .task.md)"
     [[ -f "${d}/${base}.reply.md" ]] || pending=$(( pending + 1 ))
-done < <(find "$SCOPE_DIR" -type f -name '*.task.md' 2>/dev/null || true)
+done < <(find "$SCOPE_DIR" "${SCOPE_DEPTH[@]}" -type f -name '*.task.md' 2>/dev/null || true)
 if [[ "$pending" -gt 0 ]]; then
-    echo "# ${pending} dispatch(es) awaiting replies (scope-wide; not --since-filtered)."
+    echo "# ${pending} dispatch(es) awaiting primary reply files (scope-wide; not --since-filtered)."
 fi
 exit 0
