@@ -140,6 +140,17 @@ fallback first. Keep the invariant: one explicit conversationId per send.
 
 Every `--ipc` send reports exactly one machine-parseable result:
 `RESULT: gui-delivered|gui-unowned|failed-closed -- reason=<token> -- confirmation=<token>`.
+After router acceptance, confirmation is:
+
+- `rollout-hit`: the exact dispatch task basename was observed in a rollout user message. This
+  confirms admission only, not completion or reply-file success.
+- `rollout-pending`: at least one authoritative candidate was readable and parseable, but no
+  pickup was observed within the bounded budget.
+- `rollout-unavailable`: no authoritative candidate was usable, or ambiguity/schema drift
+  prevented a determination.
+
+All three preserve `gui-delivered` and exit 0 after an accepted send. Observer failure maps to
+`rollout-unavailable`; pending/unavailable never cause an automatic resend.
 See [references/architecture.md](references/architecture.md) for the full taxonomy, the auto-load
 /focus-snapback behavior (experimental, Windows-only), and their disclosed residues. The file-drop
 pickup line is preserved in every outcome.
@@ -157,11 +168,10 @@ proven by a read-only authority. The active policy and acknowledgement source ar
 send. Valid UUID/task invocations always write the file-drop envelope before any policy refusal.
 
 Do not send while the target appears mid-turn unless the user explicitly asked to interrupt,
-continue, or manage that active state. This rule is load-bearing: the router can report success for
-a mid-turn send while the message silently never materializes (observed in testing — no rollout
-entry, no queued follow-up). When delivery matters, re-inspect after sending and confirm the task
-text appeared in the thread tail. Never use `turn/interrupt`, config/account/plugin methods, or
-direct SQLite writes as part of `/ipc`.
+continue, or manage that active state. Router acceptance alone does not prove pickup. Use the
+post-acceptance confirmation token as bounded admission evidence; `rollout-pending` means only
+that no pickup was observed within budget and must not cause an automatic resend. Never use
+`turn/interrupt`, config/account/plugin methods, or direct SQLite writes as part of `/ipc`.
 
 ### Watch/status mode
 
@@ -241,8 +251,11 @@ disclosure outside the local machine.
 - Keep handoff/reference artifacts inside the associated repo, project, workspace, or worktree (the
   IPC transport envelope is the one exception).
 - The consolidated reply view (`scripts/codex_ipc_replies.sh`) is a read-only, point-in-time
-  DERIVED view of the per-dispatch `.reply.md` files; it is never the authoritative channel and
-  writes, locks, and creates nothing (not even the transport root).
+  DERIVED view. For each dispatch, a readable regular non-symlink `.reply.md` is primary and is
+  labeled `source=reply-file`. Only when that primary is absent or unreadable may a completed,
+  exactly correlated rollout provide `source=rollout-fallback`; otherwise the view reports
+  `source=none` with a visible reason. Source bodies are not assumed equal. Rollout-derived text is
+  stdout-only: the viewer writes, locks, and creates nothing (not even the transport root).
 - Do not modify global Codex config, account state, plugins, marketplace, thread archive state, or
   SQLite directly.
 - Keep all assertions scoped to the evidence actually inspected in the current run.

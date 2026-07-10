@@ -5,10 +5,24 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Bounded post-acceptance rollout confirmation for both live-send success branches:
+  `rollout-hit`, `rollout-pending`, or `rollout-unavailable`. Accepted sends remain
+  `gui-delivered`; observation failures map to unavailable without resend.
+- Hermetic rollout-reader and dual-source reply-harvest suites are syntax-checked and run on both
+  CI matrix legs.
 
 ### Changed
+- Reply viewing is file-primary with an exactly correlated, read-only rollout fallback when the
+  primary is absent or unreadable. Source labels are explicit and fallback text remains
+  stdout-only.
+- Current-facing README, skill, architecture, compatibility, install, and troubleshooting guidance
+  now documents M2 confirmation and dual-source reply semantics.
 
 ### Fixed
+- Auto-load retry deadline/interval knobs now reject zero or malformed values, warn visibly, and
+  fall back to documented positive defaults.
+- Corrected the host-identity ledger's refuted universal follower-sandbox claim and the README's
+  stale v0.1.1 status line.
 
 ## [0.1.2] — 2026-07-09
 

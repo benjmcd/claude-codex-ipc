@@ -49,6 +49,9 @@
 #                                      --ack-foreground-switch)
 #   CODEX_IPC_POLL_DEADLINE_S=<n>      auto-load retry poll window (default 30; test knob)
 #   CODEX_IPC_POLL_INTERVAL_S=<n>      auto-load retry poll interval (default 2; test knob)
+#   CODEX_IPC_OBSERVE_BUDGET_MS=<n>    post-acceptance rollout observation cap
+#                                      (default 8000; provisional)
+#   CODEX_IPC_OBSERVE_INTERVAL_MS=<n>  positive rollout observation interval override
 
 set -euo pipefail
 
@@ -415,10 +418,30 @@ if [[ "$MODE" == "ipc" ]]; then
             --task "read \"${OUTBOUND}\" and proceed" \
             --allow-any-thread --send --ack-live-write --timeout-ms 9000 2>&1)
     }
+    observe_rollout() {
+        local observation=""
+        if observation=$(node "${SCRIPT_DIR}/codex_ipc_rollout_observe.mjs" \
+            --thread "${IPC_CID}" \
+            --dispatch "${DISPATCH_ID}"); then
+            case "$observation" in
+                rollout-hit|rollout-pending|rollout-unavailable)
+                    printf '%s\n' "$observation"
+                    return 0
+                    ;;
+                *)
+                    echo "WARNING: rollout observer returned empty or invalid output; using rollout-unavailable." >&2
+                    ;;
+            esac
+        else
+            echo "WARNING: rollout observer failed; using rollout-unavailable." >&2
+        fi
+        printf '%s\n' "rollout-unavailable"
+    }
     echo "Injecting pickup line into live Desktop thread ${IPC_CID} via IPC router..."
     if send_live; then
+        CONFIRMATION=$(observe_rollout)
         echo "[ Delivered into live thread ${IPC_CID}. It should appear in your Codex Desktop GUI. ]"
-        echo "RESULT: gui-delivered -- reason=renderer-owned -- confirmation=not-checked"
+        echo "RESULT: gui-delivered -- reason=renderer-owned -- confirmation=${CONFIRMATION}"
         echo "Codex's reply will be written to ${INBOUND} (Claude Code reads it)."
         exit 0
     fi
@@ -504,20 +527,27 @@ if [[ "$MODE" == "ipc" ]]; then
     esac
     # Bounded retry poll. Timing knobs exist for hermetic tests only; defaults preserve
     # the historical 30s/2s behavior.
-    POLL_DEADLINE_S="${CODEX_IPC_POLL_DEADLINE_S:-30}"
-    POLL_INTERVAL_S="${CODEX_IPC_POLL_INTERVAL_S:-2}"
-    [[ "$POLL_DEADLINE_S" =~ ^[0-9]+$ ]] || POLL_DEADLINE_S=30
-    [[ "$POLL_INTERVAL_S" =~ ^[0-9]+$ ]] || POLL_INTERVAL_S=2
+    POLL_DEADLINE_S="${CODEX_IPC_POLL_DEADLINE_S-30}"
+    POLL_INTERVAL_S="${CODEX_IPC_POLL_INTERVAL_S-2}"
+    if [[ ! "$POLL_DEADLINE_S" =~ ^[1-9][0-9]*$ ]]; then
+        echo "WARNING: CODEX_IPC_POLL_DEADLINE_S=${POLL_DEADLINE_S} must be a positive integer; using default 30." >&2
+        POLL_DEADLINE_S=30
+    fi
+    if [[ ! "$POLL_INTERVAL_S" =~ ^[1-9][0-9]*$ ]]; then
+        echo "WARNING: CODEX_IPC_POLL_INTERVAL_S=${POLL_INTERVAL_S} must be a positive integer; using default 2." >&2
+        POLL_INTERVAL_S=2
+    fi
     DEADLINE=$((SECONDS + POLL_DEADLINE_S))
     while (( SECONDS < DEADLINE )); do
         sleep "$POLL_INTERVAL_S"
         if send_live; then
             DELIVER_REASON="auto-loaded"
             [[ "$FOREGROUND_POLICY" == "switch" ]] && DELIVER_REASON="foreground-switched"
+            CONFIRMATION=$(observe_rollout)
             echo "[ Delivered into live thread ${IPC_CID}. It should appear in your Codex Desktop GUI. ]"
-            echo "RESULT: gui-delivered -- reason=${DELIVER_REASON} -- confirmation=not-checked"
-            echo "(Auto-load residue: the Codex window is now on this thread. Confirmation is not-checked:" >&2
-            echo " bounded rollout observation is a planned follow-up; re-inspect if delivery certainty matters.)" >&2
+            echo "RESULT: gui-delivered -- reason=${DELIVER_REASON} -- confirmation=${CONFIRMATION}"
+            echo "(Rollout confirmation reflects bounded pickup observation only; it does not confirm" >&2
+            echo " completion or reply-file success.)" >&2
             echo "Codex's reply will be written to ${INBOUND} (Claude Code reads it)."
             exit 0
         fi

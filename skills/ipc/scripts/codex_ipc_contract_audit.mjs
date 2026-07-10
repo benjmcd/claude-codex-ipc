@@ -74,6 +74,13 @@ function contains(relPath, pattern) {
   return text.includes(pattern);
 }
 
+function matchCount(relPath, pattern) {
+  if (!existsSync(skillPath(relPath))) {
+    return 0;
+  }
+  return [...readText(relPath).matchAll(pattern)].length;
+}
+
 function check(id, requirement, evidenceChecks, residualRisk = null) {
   const evidence = evidenceChecks.map((item) => ({
     label: item.label,
@@ -317,12 +324,24 @@ function main() {
     ]),
     check("REQ-016", "Results are parser-compatible: top-level category plus machine reason/confirmation tokens.", [
       {
-        label: "wrapper emits all RESULT categories with reason= and confirmation= tokens",
+        label: "both accepted-send branches observe once and emit the resulting confirmation token",
         file: "scripts/handoff_to_codex.sh",
         ok:
-          contains("scripts/handoff_to_codex.sh", /RESULT: gui-delivered -- reason=[a-z0-9$"{}_A-Z-]+ -- confirmation=/) &&
+          matchCount("scripts/handoff_to_codex.sh", /CONFIRMATION=\$\(observe_rollout\)/g) === 2 &&
+          matchCount(
+            "scripts/handoff_to_codex.sh",
+            /RESULT: gui-delivered -- reason=[a-z0-9$"{}_A-Z-]+ -- confirmation=\$\{CONFIRMATION\}/g,
+          ) === 2 &&
           contains("scripts/handoff_to_codex.sh", /RESULT: gui-unowned -- reason=[a-z0-9-]+ -- confirmation=/) &&
           contains("scripts/handoff_to_codex.sh", /RESULT: failed-closed -- reason=[a-z0-9-]+ -- confirmation=/),
+      },
+      {
+        label: "no accepted-send RESULT hard-codes confirmation=not-checked",
+        file: "scripts/handoff_to_codex.sh",
+        ok: !contains(
+          "scripts/handoff_to_codex.sh",
+          /RESULT: gui-delivered[^\n]*confirmation=not-checked/,
+        ),
       },
       {
         label: "SKILL.md documents the taxonomy format",

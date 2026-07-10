@@ -5,8 +5,9 @@ Optional extra: guarded, experimental delivery straight into a Codex Desktop GUI
 Ships as a Claude Code plugin (`codex-ipc`) with one skill (`ipc`); also installs standalone.
 
 **Is:** per-dispatch task/reply files keyed by `(session, conversation, dispatch)` — isolated and
-correlated by construction; a read-only reply viewer; read-only Codex state inspection; an
-explicit-UUID-only live delivery route with dry-run-first tooling and revalidation harnesses.
+correlated by construction; a read-only, file-primary reply viewer with rollout-derived fallback;
+read-only Codex state inspection; an explicit-UUID-only live delivery route with dry-run-first
+tooling and revalidation harnesses.
 
 **Is NOT:** not MCP; not an official OpenAI API (the Desktop route rides undocumented private
 internals — unaffiliated with OpenAI); not a production message broker (plaintext files + a local
@@ -15,7 +16,7 @@ pipe; no queueing guarantees, no multi-user security model).
 | | Stable core | Experimental extras |
 |---|---|---|
 | What | File-backed dispatch/reply, reply viewer, read-only inspection | Desktop named-pipe injection, `codex://` autoload, focus snapback |
-| Depends on | bash, coreutils (Node for inspection) | Private Codex Desktop internals, Windows, PowerShell |
+| Depends on | bash, coreutils (Node optional for rollout fallback/inspection) | Private Codex Desktop internals, Windows, PowerShell |
 | After a Codex Desktop update | Unaffected | **Assume broken until revalidated** (`codex_ipc_revalidate.mjs`) |
 
 Live Desktop IPC was point-in-time validated (2026-07-08: write-proof harness, `defer` and
@@ -48,6 +49,16 @@ skills/ipc/scripts/codex_ipc_replies.sh
 The wrapper always writes the file-drop before any live attempt, so a failed delivery still
 leaves a working pickup line. Live results are machine-parseable:
 `RESULT: gui-delivered|gui-unowned|failed-closed -- reason=<token> -- confirmation=<token>`.
+After an accepted live send, confirmation is `rollout-hit` (the exact dispatch task basename was
+observed in a rollout user message), `rollout-pending` (at least one authoritative candidate was
+readable/parseable, but no pickup was observed within the bounded budget), or
+`rollout-unavailable` (observation could not make a determination). These tokens
+confirm at most rollout admission; they do not confirm completion or reply-file success, and
+pending/unavailable do not trigger an automatic resend.
+The reply viewer selects a readable regular non-symlink `.reply.md` as `source=reply-file`
+before considering an exactly correlated completed rollout as `source=rollout-fallback`.
+Fallback is stdout-only; it does not create a cache or reconstruct a reply file, and the two source
+bodies are not assumed equal.
 Foreground-policy grammar and full operational rules: [skills/ipc/SKILL.md](skills/ipc/SKILL.md).
 
 ## Configuration (all env vars; none required for file-drop)
@@ -63,6 +74,8 @@ Foreground-policy grammar and full operational rules: [skills/ipc/SKILL.md](skil
 | `CODEX_MODEL` / `CODEX_REASONING_EFFORT` | unset | `--exec` pins; passed only when set |
 | `CODEX_SESSION_ID` | unset | Target session for `--exec`/`--open` |
 | `CODEX_IPC_POLL_DEADLINE_S` / `_INTERVAL_S` | `30` / `2` | Auto-load retry poll (test knobs) |
+| `CODEX_IPC_OBSERVE_BUDGET_MS` | `8000` (provisional) | Hard cap for post-acceptance rollout observation |
+| `CODEX_IPC_OBSERVE_INTERVAL_MS` | observer default | Positive observation interval override; invalid values warn and fall back |
 | `IPC_TOOLKIT_ROOT` | unset | Manual toolkit-root override (scripts self-locate otherwise) |
 
 ## Features / platforms
@@ -70,7 +83,7 @@ Foreground-policy grammar and full operational rules: [skills/ipc/SKILL.md](skil
 | Feature | Windows | Linux/macOS | Stability |
 |---|---|---|---|
 | File-drop handoff | ✅ | ✅ | Stable |
-| Reply viewer | ✅ | ✅ (bash ≥ 4 + GNU coreutils) | Stable |
+| Reply viewer | ✅ | ✅ (bash ≥ 4 + GNU coreutils; Node optional for rollout fallback) | Stable |
 | Inspector / locator / snapshot | ✅ | ✅ (Node with `node:sqlite`, ≥ 22.5) | Stable, read-only |
 | Desktop pipe IPC + `codex://` autoload | ✅ | ❌ | **Experimental**, touches live Desktop |
 | Headless `--exec` | ✅ | ✅ (Codex CLI) | Optional, no GUI effect |
@@ -91,7 +104,10 @@ disclosure opt-in. Threat model: [SECURITY.md](SECURITY.md). Failure triage:
 ## Testing
 
 ```bash
-bash tests/test_ipc.sh && bash tests/test_reply_view.sh   # hermetic; no Codex/Claude state, no network
+bash tests/test_ipc.sh
+bash tests/test_reply_view.sh
+bash tests/test_rollout_reader.sh
+bash tests/test_reply_harvest.sh   # all hermetic; no Codex/Claude state, no network
 ```
 
 CI adds syntax checks and public-safety scans on ubuntu + windows:
@@ -105,6 +121,6 @@ process can read and modify them). `--exec` output never appears in the Desktop 
 
 ## Status
 
-v0.1.1 · [MIT](LICENSE.md) · [benjmcd/claude-codex-ipc](https://github.com/benjmcd/claude-codex-ipc).
-Re-run `codex_ipc_revalidate.mjs` after any Codex Desktop update; `restore-if-known` and bounded
-rollout observation remain unimplemented/experimental.
+v0.1.2 · [MIT](LICENSE.md) · [benjmcd/claude-codex-ipc](https://github.com/benjmcd/claude-codex-ipc).
+Re-run `codex_ipc_revalidate.mjs` after any Codex Desktop update. The live route and its bounded
+rollout observation remain experimental; `restore-if-known` remains fail-closed/unvalidated.
