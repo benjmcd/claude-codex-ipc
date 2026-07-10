@@ -151,7 +151,10 @@ function classifyDispatch(records, parserDiagnostics, dispatchId) {
           status: "unavailable",
           diagnostics: inWindowErrors.map((item) => ({ code: "malformed-json", ...item })),
         };
-      } else if (laterUsers.length > 0) {
+      } else if (!turn.turnId && laterUsers.length > 0) {
+        // Ambiguity rule of the ORDERED-EVENT FALLBACK only. When the turn carries a turn_id,
+        // its boundaries are already unambiguous, so a later user message inside the same turn
+        // (e.g. the operator typing into the thread while the lane works) is not ambiguity.
         outcome = {
           status: "unavailable",
           diagnostics: [{ code: "intervening-user-message", line: laterUsers[0].line }],

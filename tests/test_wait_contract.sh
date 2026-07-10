@@ -202,6 +202,17 @@ process.stdout.write(crypto.createHash("sha256").update(rows.join("\n")).digest(
 EOF
 }
 
+echo "== 0. turn-id-primary correlation outranks the fallback's ambiguity rule =="
+# A later user message inside the SAME turn_id'd turn (the operator typing while the lane works)
+# is not ambiguity: turn_id already delimits the turn. Observed live 2026-07-10.
+CASE="$TMP/intervening-user"; mkdir -p "$CASE"
+write_prefix "$CASE/rollout-$THREAD.jsonl"
+printf '%s\n' "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"turn_id\":\"$OWN_TURN\",\"message\":\"operator note typed mid-turn\"}}" >>"$CASE/rollout-$THREAD.jsonl"
+printf '%s\n' "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"$OWN_TURN\",\"last_agent_message\":\"complete\"}}" >>"$CASE/rollout-$THREAD.jsonl"
+make_reply "$CASE/reply.md"
+run_case "$CASE" --rollout-path "$CASE/rollout-$THREAD.jsonl" --reply-path "$CASE/reply.md"
+assert_token done "a mid-turn operator message does not defeat turn-id correlation"
+
 echo "== 1. six determination tokens and own-turn semantics =="
 CASE="$TMP/done"; mkdir -p "$CASE"; write_done "$CASE/rollout-$THREAD.jsonl"; make_reply "$CASE/reply.md"
 BEFORE="$(tree_digest "$CASE")"

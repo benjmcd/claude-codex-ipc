@@ -531,6 +531,38 @@ await test("bounded expiry returns pending without wall-clock sleep", async () =
   assert.equal(sleepCalls, 3);
 });
 
+await test("an operator message inside a turn-id'd own turn does not block completion", async () => {
+  // Regression: the intervening-user-message ambiguity belongs to the ordered-event fallback.
+  // With a turn_id the boundaries are unambiguous, so the operator typing into the thread while
+  // the lane works must not turn a completed dispatch into `unavailable`. (Observed live.)
+  const root = caseDir("intervening-user-with-turn-id");
+  const rollout = writeRollout(root, [
+    ...ownOpenRecords(),
+    event("user_message", ownTurn, { message: "operator note typed mid-turn" }),
+    event("task_complete", ownTurn),
+  ]);
+  const reply = path.join(root, "reply.md");
+  fs.writeFileSync(reply, "body");
+  const result = await waitForCompletion(directOptions(root, rollout, reply), { now: () => 0 });
+  assert.equal(result.token, "done");
+});
+
+await test("an intervening user message without turn ids remains ambiguous", async () => {
+  // The fallback rule still applies where turn_id is genuinely absent.
+  const root = caseDir("intervening-user-no-turn-id");
+  const rollout = writeRollout(root, [
+    sessionMeta(),
+    event("task_started", undefined),
+    event("user_message", undefined, { message: `read C:/handoff/${taskName} and proceed` }),
+    event("user_message", undefined, { message: "operator note typed mid-turn" }),
+    event("task_complete", undefined),
+  ]);
+  const reply = path.join(root, "reply.md");
+  fs.writeFileSync(reply, "body");
+  const result = await waitForCompletion(directOptions(root, rollout, reply), { now: () => 0 });
+  assert.equal(result.token, "unavailable");
+});
+
 await test("first read exhausting the budget yields pending, not unavailable", async () => {
   // Regression: a read that only ran out of budget is not an authority failure. The candidate
   // exists and parses; we simply never finished observing it. The clock is already past the
