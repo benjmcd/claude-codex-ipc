@@ -189,6 +189,30 @@ test("file shrink under a cursor is fail-visible", () => {
   assert.equal(result.reason, "file-truncated");
 });
 
+test("same-identity shrink during an active read is fail-visible", () => {
+  const target = path.join(tmp, "rollout-midread-shrink-00000000-0000-4000-8000-000000000000.jsonl");
+  fs.copyFileSync(basicPath, target);
+  const originalRead = fs.readSync;
+  let injected = false;
+  fs.readSync = function injectedRead(descriptor, ...args) {
+    const bytesRead = originalRead.call(fs, descriptor, ...args);
+    if (!injected && bytesRead > 0) {
+      injected = true;
+      fs.truncateSync(target, 1);
+    }
+    return bytesRead;
+  };
+  let result;
+  try {
+    result = readRolloutFile(target);
+  } finally {
+    fs.readSync = originalRead;
+  }
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "file-truncated");
+  assert.ok(result.diagnostics.some((item) => item.code === "file-truncated"));
+});
+
 test("over-cap complete record reports path line and byte offset", () => {
   const target = path.join(tmp, "rollout-cap-00000000-0000-4000-8000-000000000000.jsonl");
   fs.writeFileSync(target, `${JSON.stringify({ type: "session_meta", payload: { id: "00000000-0000-4000-8000-000000000000" } })}\n`);

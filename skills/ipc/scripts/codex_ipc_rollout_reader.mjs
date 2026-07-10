@@ -412,6 +412,17 @@ export function readRolloutFile(filePath, options = {}) {
       diagnostic("descriptor-revalidation-failed", { path: filePath }),
     ], { records, parseErrorCount });
   }
+  if (finalDescriptorStat.size < initialStat.size || finalDescriptorStat.size < position) {
+    return failure(filePath, "file-truncated", [
+      ...diagnostics,
+      diagnostic("file-truncated", {
+        path: filePath,
+        initialSize: initialStat.size,
+        finalSize: finalDescriptorStat.size,
+        byteOffset: position,
+      }),
+    ], { records, parseErrorCount });
+  }
 
   let pathIdentity;
   try {
