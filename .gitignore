@@ -36,3 +36,6 @@ sessions/
 # Editor
 .vscode/
 .idea/
+
+# Lane worktrees (git worktree add worktrees/<name>)
+worktrees/
