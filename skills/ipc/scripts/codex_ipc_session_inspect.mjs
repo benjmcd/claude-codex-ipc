@@ -6,7 +6,7 @@
 // tail so a caller can inspect current state before sending a handoff.
 
 import { createReadStream } from "node:fs";
-import { existsSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readdirSync, realpathSync, statSync } from "node:fs";
 import path from "node:path";
 import readline from "node:readline";
 
@@ -144,12 +144,12 @@ function validateUuid(value, flag) {
 
 async function inspectSession(opts) {
   const dbThread = readDbThread(opts.dbPath, opts.threadId);
-  const rolloutCandidates = findRolloutCandidates(
+  const rolloutSelection = findRolloutCandidates(
     opts.sessionsRoot,
     opts.threadId,
     dbThread.thread?.rolloutPath || null,
   );
-  const primaryRollout = rolloutCandidates[0] || null;
+  const primaryRollout = rolloutSelection.primaryCandidate;
   const rolloutSummary = primaryRollout
     ? await parseRollout(primaryRollout.path, opts.tailEvents, opts.maxTextChars)
     : null;
@@ -162,14 +162,27 @@ async function inspectSession(opts) {
     threadId: opts.threadId,
     dbThread,
     rollout: {
-      candidates: rolloutCandidates,
+      candidates: rolloutSelection.candidates,
       primary: rolloutSummary,
+      candidatesAmbiguous: rolloutSelection.status === "ambiguous",
+      ambiguousCandidates: rolloutSelection.ambiguousCandidates,
+      selection: {
+        status: rolloutSelection.status,
+        reason: rolloutSelection.reason,
+        authority: rolloutSelection.authority,
+        path: primaryRollout?.path || null,
+        candidateCount: rolloutSelection.candidates.length,
+        aliasCount: rolloutSelection.aliasCount,
+      },
     },
     activitySignals: inferActivitySignals(dbThread.thread, rolloutSummary),
     warnings: [
       "Read-only evidence only: no IPC connection, no Desktop message send, and no SQLite write were attempted.",
       "DB row and rollout presence do not prove the owning Desktop renderer is currently open.",
       "Activity signals are heuristic; read the rollout context before interrupting or adding a new turn.",
+      ...(rolloutSelection.status === "ambiguous"
+        ? ["Multiple distinct rollout candidates have equal authority; no primary rollout was selected."]
+        : []),
     ],
   };
 }
@@ -251,23 +264,39 @@ function summarizeThread(row) {
 
 function findRolloutCandidates(sessionsRoot, threadId, dbRolloutPath) {
   const candidates = [];
-  const seen = new Set();
+  const candidatesByIdentity = new Map();
 
   function addCandidate(filePath, source) {
-    if (!filePath || seen.has(filePath) || !existsSync(filePath)) {
+    if (!filePath || !existsSync(filePath)) {
       return;
     }
     const stat = statSync(filePath);
     if (!stat.isFile()) {
       return;
     }
-    seen.add(filePath);
-    candidates.push({
+    const canonical = canonicalPath(filePath);
+    const identity = fileIdentity(filePath, canonical);
+    const existing = candidatesByIdentity.get(identity);
+    if (existing) {
+      if (!existing.aliases.includes(filePath)) {
+        existing.aliases.push(filePath);
+      }
+      if (source === "db.rollout_path") {
+        existing.path = filePath;
+        existing.source = source;
+      }
+      return;
+    }
+    const candidate = {
       path: filePath,
       source,
       size: stat.size,
       mtimeMs: stat.mtimeMs,
-    });
+      canonicalPath: canonical,
+      aliases: [filePath],
+    };
+    candidatesByIdentity.set(identity, candidate);
+    candidates.push(candidate);
   }
 
   addCandidate(dbRolloutPath, "db.rollout_path");
@@ -280,15 +309,94 @@ function findRolloutCandidates(sessionsRoot, threadId, dbRolloutPath) {
     }
   }
 
-  return candidates.sort((left, right) => {
+  candidates.sort((left, right) => {
     if (left.source === "db.rollout_path" && right.source !== "db.rollout_path") {
       return -1;
     }
     if (right.source === "db.rollout_path" && left.source !== "db.rollout_path") {
       return 1;
     }
-    return right.mtimeMs - left.mtimeMs;
+    return right.mtimeMs - left.mtimeMs || left.canonicalPath.localeCompare(right.canonicalPath);
   });
+
+  // Authority order: an existing DB-designated rollout wins over broad scanning;
+  // otherwise exactly one physical sessions-root match may be selected. Parse
+  // validity is reported by rollout.primary.parsedOk and never causes an implicit
+  // fallback to a different file than the DB named.
+  const dbCandidate = candidates.find((candidate) => candidate.source === "db.rollout_path");
+  const aliasCount = candidates.reduce((count, candidate) => count + candidate.aliases.length, 0);
+  if (dbCandidate) {
+    return {
+      candidates,
+      primaryCandidate: dbCandidate,
+      ambiguousCandidates: [],
+      status: "found",
+      reason: "db-rollout-path",
+      authority: "db.rollout_path",
+      aliasCount,
+    };
+  }
+  if (candidates.length === 1) {
+    return {
+      candidates,
+      primaryCandidate: candidates[0],
+      ambiguousCandidates: [],
+      status: "found",
+      reason: "single-candidate",
+      authority: "sessions-root-match",
+      aliasCount,
+    };
+  }
+  if (candidates.length > 1) {
+    return {
+      candidates,
+      primaryCandidate: null,
+      ambiguousCandidates: candidates,
+      status: "ambiguous",
+      reason: "multiple-candidates",
+      authority: "sessions-root-match",
+      aliasCount,
+    };
+  }
+  return {
+    candidates,
+    primaryCandidate: null,
+    ambiguousCandidates: [],
+    status: "unavailable",
+    reason: "no-candidate",
+    authority: "none",
+    aliasCount,
+  };
+}
+
+function canonicalPath(filePath) {
+  let resolved;
+  try {
+    resolved = realpathSync.native(filePath);
+  } catch {
+    resolved = path.resolve(filePath);
+  }
+  if (process.platform === "win32") {
+    if (resolved.startsWith("\\\\?\\UNC\\")) {
+      resolved = `\\\\${resolved.slice(8)}`;
+    } else if (resolved.startsWith("\\\\?\\")) {
+      resolved = resolved.slice(4);
+    }
+    return resolved.toLowerCase();
+  }
+  return resolved;
+}
+
+function fileIdentity(filePath, canonical) {
+  try {
+    const stat = statSync(filePath, { bigint: true });
+    if (stat.ino !== 0n) {
+      return `${stat.dev}:${stat.ino}`;
+    }
+  } catch {
+    // Canonical path identity remains available when bigint stat is unsupported.
+  }
+  return canonical;
 }
 
 function* walkFiles(root) {
@@ -435,14 +543,18 @@ function inferActivitySignals(thread, rollout) {
   const recent = rollout?.recentItems || [];
   const lastItem = recent.at(-1) || null;
   const lastTaskComplete = lastOfType(recent, ["task_complete"]);
+  const lastTurnAborted = lastOfType(recent, ["turn_aborted"]);
+  const lastTerminal = lastOfType(recent, ["task_complete", "turn_aborted"]);
   const lastAgentMessage = lastOfType(recent, ["agent_message", "assistant_message", "message"]);
   const lastUserMessage = lastOfType(recent, ["user_message"]);
   const lastLine = lastItem?.line ?? null;
   const lastTaskCompleteLine = lastTaskComplete?.line ?? null;
+  const lastTurnAbortedLine = lastTurnAborted?.line ?? null;
+  const lastTerminalLine = lastTerminal?.line ?? null;
   const lastUserLine = lastUserMessage?.line ?? null;
   const maybeMidTurn =
     typeof lastUserLine === "number" &&
-    (typeof lastTaskCompleteLine !== "number" || lastUserLine > lastTaskCompleteLine) &&
+    (typeof lastTerminalLine !== "number" || lastUserLine > lastTerminalLine) &&
     (!lastAgentMessage || lastAgentMessage.line < lastUserLine);
 
   return {
@@ -451,13 +563,24 @@ function inferActivitySignals(thread, rollout) {
     newestRolloutLine: lastLine,
     newestRolloutType: lastItem?.payloadType || null,
     lastTaskCompleteLine,
+    lastTurnAbortedLine,
+    lastTerminalLine,
+    lastTerminalType: lastTerminal?.payloadType || null,
+    terminalState:
+      lastTerminal?.payloadType === "turn_aborted"
+        ? "aborted"
+        : lastTerminal?.payloadType === "task_complete"
+          ? "completed"
+          : "none",
     lastUserMessageLine: lastUserLine,
     lastAgentMessageLine: lastAgentMessage?.line ?? null,
     hasTaskCompleteInTail: Boolean(lastTaskComplete),
+    hasTurnAbortedInTail: Boolean(lastTurnAborted),
+    hasTerminalInTail: Boolean(lastTerminal),
     maybeMidTurn,
     conclusion:
       maybeMidTurn
-        ? "tail suggests a user turn may not yet have a following agent message/task_complete"
+        ? "tail suggests a user turn may not yet have a following agent message/terminal event"
         : "no mid-turn condition inferred from the requested tail",
   };
 }
