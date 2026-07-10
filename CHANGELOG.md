@@ -9,6 +9,9 @@ All notable changes to this project will be documented in this file.
 ### Changed
 
 ### Fixed
+- `tests/test_wait_contract.sh` probed only the repo layout, so from an installed skill root it
+  reported `SKIP: codex_ipc_wait.mjs absent` and exited 0 while the tool sat one directory away.
+  It now uses the dual-layout probe every other suite uses (landed after the v0.1.5 tag).
 
 ## [0.1.5] — 2026-07-10
 
