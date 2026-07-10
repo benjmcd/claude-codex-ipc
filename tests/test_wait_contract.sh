@@ -32,7 +32,15 @@ set -uo pipefail
 
 TDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$TDIR/.." && pwd)"
-WAIT_TOOL="${CODEX_IPC_WAIT_TEST_TARGET:-$ROOT/skills/ipc/scripts/codex_ipc_wait.mjs}"
+# Dual-layout probe: repo layout (tests/ beside skills/ipc/) and installed-skill layout
+# (tests/ inside the skill root, scripts/ as sibling). Without this the suite self-skips in
+# installed roots, where the tool exists but under a different relative path.
+WAIT_TOOL="${CODEX_IPC_WAIT_TEST_TARGET:-}"
+if [[ -z "$WAIT_TOOL" ]]; then
+    for _cand in "$ROOT/skills/ipc/scripts/codex_ipc_wait.mjs" "$ROOT/scripts/codex_ipc_wait.mjs"; do
+        [[ -f "$_cand" ]] && WAIT_TOOL="$_cand" && break
+    done
+fi
 
 if [[ ! -f "$WAIT_TOOL" ]]; then
   echo "SKIP: codex_ipc_wait.mjs absent"
