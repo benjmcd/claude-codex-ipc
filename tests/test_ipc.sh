@@ -193,6 +193,18 @@ case "\$*" in
       empty)     exit 0;;
       stderr)    echo "boom: inspector crashed" >&2; exit 1;;
     esac;;
+  *codex_ipc_rollout_observe.mjs*)
+    printf '%s\n' "\$*" >> "\$FG/observe_args.log"
+    n=\$(cat "\$FG/observe_count" 2>/dev/null || echo 0); n=\$((n+1)); echo "\$n" > "\$FG/observe_count"
+    mode=\$(cat "\$FG/observe_mode" 2>/dev/null || echo rollout-hit)
+    case "\$mode" in
+      rollout-hit|rollout-pending|rollout-unavailable) echo "\$mode"; exit 0;;
+      crash)      echo "boom: observer crashed" >&2; exit 1;;
+      empty)      exit 0;;
+      garbage)    echo "not-an-observation-token"; exit 0;;
+      timeout)    echo "observer timed out" >&2; exit 124;;
+      spawn-fail) echo "observer could not start" >&2; exit 127;;
+    esac;;
   *) echo '{"ok": true}'; exit 0;;
 esac
 EOF
@@ -209,10 +221,12 @@ EOF
 chmod +x "$BIN2"/*
 
 fgreset(){ # fgreset <client_mode> [inspect_mode] [pscode]
-  rm -f "$FGDIR"/send_count "$FGDIR"/nodeargs.log "$FGDIR"/pslog
+  rm -f "$FGDIR"/send_count "$FGDIR"/nodeargs.log "$FGDIR"/pslog \
+        "$FGDIR"/observe_count "$FGDIR"/observe_args.log
   echo "${1}" > "$FGDIR/client_mode"
   echo "${2:-ok}" > "$FGDIR/inspect_mode"
   echo "${3:-0}" > "$FGDIR/pscode"
+  echo "${4:-rollout-hit}" > "$FGDIR/observe_mode"
 }
 fgrun(){ # fgrun <wrapper args...> -> OUT/RC (fast poll knobs; hermetic PATH)
   OUT="$( cd "$REPO" && CODEX_IPC_ROOT="$IPCROOT" CLAUDE_CODE_SESSION_ID="fgsess" \
@@ -254,7 +268,7 @@ assert_tax "t15"
 echo "== 16. switch with ack: autoload gets policy args; delivery reports foreground-switched =="
 fgreset fail-then-ok ok 0
 fgrun --ipc "$UUIDF" --foreground-policy switch --ack-foreground-switch -- "t16 switch ack"
-[[ $RC -eq 0 ]] && printf '%s' "$OUT" | grep -q "RESULT: gui-delivered -- reason=foreground-switched -- confirmation=not-checked" && ok "switch+ack delivers with honest confirmation" || no "switch+ack (rc=$RC)"
+[[ $RC -eq 0 ]] && printf '%s' "$OUT" | grep -q "RESULT: gui-delivered -- reason=foreground-switched -- confirmation=rollout-hit" && ok "switch+ack delivers with observed confirmation" || no "switch+ack (rc=$RC)"
 grep -q -- "-ForegroundPolicy switch" "$FGDIR/pslog" 2>/dev/null && grep -q -- "-AckForegroundSwitch" "$FGDIR/pslog" && ok "helper received policy + ack" || no "helper args wrong: $(cat "$FGDIR/pslog" 2>/dev/null)"
 assert_tax "t16"
 
@@ -300,7 +314,7 @@ assert_tax "t21"
 echo "== 22. default-policy auto-load delivery still works (reason=auto-loaded) =="
 fgreset fail-then-ok ok 0
 fgrun --ipc "$UUIDF" "t22 autoload delivery"
-[[ $RC -eq 0 ]] && printf '%s' "$OUT" | grep -q "RESULT: gui-delivered -- reason=auto-loaded -- confirmation=not-checked" && ok "auto-loaded delivery intact" || no "auto-loaded delivery (rc=$RC)"
+[[ $RC -eq 0 ]] && printf '%s' "$OUT" | grep -q "RESULT: gui-delivered -- reason=auto-loaded -- confirmation=rollout-hit" && ok "auto-loaded delivery observed" || no "auto-loaded delivery (rc=$RC)"
 assert_tax "t22"
 
 echo "== 23. '--' delimiter: dash-leading task accepted; trailing junk rejected =="
@@ -323,6 +337,77 @@ OUT="$( cd "$REPO" && CODEX_IPC_ROOT="$IPCROOT" CLAUDE_CODE_SESSION_ID="fgsess" 
     PATH="$BIN2:$PATH" bash "$SCRIPT" --ipc "$UUIDF" --foreground-policy switch -- "t24 standing" 2>&1 )"; RC=$?
 [[ $RC -eq 0 ]] && printf '%s' "$OUT" | grep -q "ack=standing-approval-env" && printf '%s' "$OUT" | grep -q "reason=foreground-switched" && ok "standing approval honored and disclosed" || no "standing approval (rc=$RC)"
 assert_tax "t24"
+
+echo "== 25. renderer-owned success maps each observer token without changing delivery =="
+for token in rollout-hit rollout-pending rollout-unavailable; do
+    fgreset always-ok ok 0 "$token"
+    fgrun --ipc "$UUIDF" "t25 $token"
+    [[ $RC -eq 0 ]] && printf '%s' "$OUT" | grep -qx "RESULT: gui-delivered -- reason=renderer-owned -- confirmation=${token}" \
+        && ok "$token preserves renderer-owned delivery" || no "$token mapping (rc=$RC)"
+    [[ "$(cat "$FGDIR/observe_count" 2>/dev/null || echo 0)" == "1" ]] \
+        && grep -q -- "--thread $UUIDF --dispatch " "$FGDIR/observe_args.log" 2>/dev/null \
+        && ok "$token observes once with thread + dispatch" || no "$token observer contract"
+    assert_tax "t25-$token"
+done
+
+echo "== 26. observer failures normalize to unavailable after accepted send =="
+for mode in crash empty garbage timeout spawn-fail; do
+    fgreset always-ok ok 0 "$mode"
+    fgrun --ipc "$UUIDF" "t26 $mode"
+    [[ $RC -eq 0 ]] \
+        && printf '%s' "$OUT" | grep -qx "RESULT: gui-delivered -- reason=renderer-owned -- confirmation=rollout-unavailable" \
+        && [[ "$(printf '%s\n' "$OUT" | grep -c '^RESULT:')" == "1" ]] \
+        && [[ "$(cat "$FGDIR/send_count" 2>/dev/null || echo 0)" == "1" ]] \
+        && ok "$mode preserves one accepted-send RESULT without resend" || no "$mode normalization (rc=$RC)"
+    assert_tax "t26-$mode"
+done
+
+echo "== 27. pending observation after auto-load never resends =="
+fgreset fail-then-ok ok 0 rollout-pending
+fgrun --ipc "$UUIDF" "t27 pending no resend"
+[[ $RC -eq 0 ]] && printf '%s' "$OUT" | grep -qx "RESULT: gui-delivered -- reason=auto-loaded -- confirmation=rollout-pending" \
+    && ok "auto-loaded pending preserves delivery" || no "auto-loaded pending (rc=$RC)"
+[[ "$(cat "$FGDIR/send_count" 2>/dev/null || echo 0)" == "2" ]] \
+    && [[ "$(cat "$FGDIR/observe_count" 2>/dev/null || echo 0)" == "1" ]] \
+    && ok "pending adds one observation and no resend" || no "pending send/observe count"
+assert_tax "t27"
+
+echo "== 28. auto-load poll knobs reject zero/malformed values with visible fallback =="
+fgknobrun(){ # fgknobrun <deadline> <interval> <client_mode> <task>
+  local deadline="$1" interval="$2" client_mode="$3" task="$4"
+  fgreset "$client_mode" ok 0 rollout-hit
+  OUT="$( cd "$REPO" && CODEX_IPC_ROOT="$IPCROOT" CLAUDE_CODE_SESSION_ID="fgsess" \
+      CODEX_IPC_POLL_DEADLINE_S="$deadline" CODEX_IPC_POLL_INTERVAL_S="$interval" \
+      PATH="$BIN2:$PATH" bash "$SCRIPT" --ipc "$UUIDF" "$task" 2>&1 )"; RC=$?
+}
+
+for knobcase in deadline-zero deadline-malformed interval-zero interval-malformed; do
+    case "$knobcase" in
+      deadline-zero)      fgknobrun 0 1 fail-then-ok "t28 $knobcase"; want="CODEX_IPC_POLL_DEADLINE_S=0";;
+      deadline-malformed) fgknobrun nope 1 fail-then-ok "t28 $knobcase"; want="CODEX_IPC_POLL_DEADLINE_S=nope";;
+      interval-zero)      fgknobrun 1 0 always-fail "t28 $knobcase"; want="CODEX_IPC_POLL_INTERVAL_S=0";;
+      interval-malformed) fgknobrun 1 nope fail-then-ok "t28 $knobcase"; want="CODEX_IPC_POLL_INTERVAL_S=nope";;
+    esac
+    if [[ "$knobcase" == "interval-zero" ]]; then
+        [[ $RC -ne 0 ]] && printf '%s' "$OUT" | grep -q "WARNING: ${want} must be a positive integer" \
+            && [[ "$(cat "$FGDIR/send_count" 2>/dev/null || echo 0)" == "2" ]] \
+            && ok "$knobcase falls back without a tight loop" || no "$knobcase fallback (rc=$RC)"
+    else
+        [[ $RC -eq 0 ]] && printf '%s' "$OUT" | grep -q "WARNING: ${want} must be a positive integer" \
+            && printf '%s' "$OUT" | grep -q "confirmation=rollout-hit" \
+            && ok "$knobcase warns and falls back" || no "$knobcase fallback (rc=$RC)"
+    fi
+    assert_tax "t28-$knobcase"
+done
+
+echo "== 29. non-accepted outcomes never invoke rollout observation =="
+fgreset always-fail ok 7 rollout-hit
+fgrun --ipc "$UUIDF" "t29 no observation"
+[[ $RC -ne 0 ]] && [[ ! -f "$FGDIR/observe_count" ]] \
+    && printf '%s' "$OUT" | grep -q "RESULT: failed-closed -- reason=autoload-unexpected-status -- confirmation=not-attempted" \
+    && ok "failed send remains not-attempted with no observer" || no "observer ran before acceptance (rc=$RC)"
+assert_tax "t29"
+
 assert_no_codex_exec_fallback
 
 echo ""
