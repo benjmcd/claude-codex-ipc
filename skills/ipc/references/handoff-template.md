@@ -12,10 +12,11 @@ Per the `/ipc` workspace-scoping rule, place the FILLED handoff inside the assoc
 - **Isolation:** the worktree path + branch this lane owns. Confirm no other active session owns it before starting.
 - **Done-criteria:** concrete, checkable completion conditions (tests pass, artifacts produced, gates cleared).
 - **Verification:** how the work will be checked, and by whom — a separate review lane, not self-approval. Also specify the MECHANICAL self-checks the worker must run and attach evidence for (greps for required/absent phrases, hashes, counts, exit codes): a delegated reviewer told only "your output will be cross-checked" tends to settle at topic-level granularity, while forced mechanical checks surface clause-level omissions.
-- **Constraints:** model/effort for SUBAGENTS the lane may deploy — and require the model to be
-  set EXPLICITLY on EVERY subagent spawn, never left to the app's global default (an omitted
-  model silently inherits the operator's `config.toml` default model, which is usually outside
-  the authorized roster — observed in production). The target thread's own model, reasoning,
+- **Constraints:** model/effort for SUBAGENTS the lane may deploy — name exact model IDs AND
+  effort levels, and require both to be set EXPLICITLY on EVERY subagent spawn, never left to
+  the app's global default (an omitted model silently inherits the operator's `config.toml`
+  default, which may be outside the authorized roster — observed in production). The target
+  thread's own model, reasoning,
   sandbox policy, and approval mode are never changed by dispatch — the turn runs under whatever
   the thread is already set to. Narrowest-correct-change; no-delete/archive-instead; no
   co-author attribution; current phase (audit / plan / implement).
