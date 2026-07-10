@@ -22,7 +22,11 @@ adds repo/install-level triage.
 | `mapfile: command not found` | The reply viewer needs bash ≥ 4; stock macOS bash is 3.2. `brew install bash` and run the script with the newer bash. |
 | `--ipc` → `failed-closed` with pipe/connect errors | Codex Desktop is not running, or the private router protocol drifted after an update. Start the app; run `codex_ipc_revalidate.mjs`; suspect drift before suspecting the target. |
 | `--ipc` → `gui-unowned` repeatedly | No renderer owns the thread and auto-load could not complete (or you are actively working in Codex — the helper defers on purpose). Open `codex://threads/<conversationId>` manually, then rerun; or use the printed file-drop line. |
-| Delivered but nothing appears in the thread | Likely a mid-turn send: the router can report success while the message never materializes. Re-inspect the thread tail; resend when the turn is complete. |
+| `confirmation=rollout-hit` | The exact dispatch pickup was observed in a rollout user message. This confirms admission only; inspect completion/reply state separately. |
+| `confirmation=rollout-pending` | At least one authoritative rollout candidate was readable/parseable, but no pickup was observed within the bounded budget. Do not infer non-delivery or resend automatically; inspect current thread state first. |
+| `confirmation=rollout-unavailable` | Observation could not make a determination because no authoritative candidate was usable or ambiguity/schema drift intervened. The accepted send remains `gui-delivered`; inspect current state without automatic resend. |
+| Reply view shows `source=rollout-fallback` | The primary reply file was absent or unreadable at check time, so the viewer selected an exactly correlated completed rollout body. The two source bodies are not assumed equal; fallback is stdout-only. |
+| Reply view shows `source=none` | Neither source yielded content. Use the visible `pending`, `unavailable`, `ambiguous`, or `unparseable` reason; no cache or reply file is synthesized. |
 | Reply viewer exit 2 | No session id resolvable. Pass `--session <sid>` (the printed listing shows what exists). |
 | Reply viewer exit 1 on `--since` | Malformed `find -newermt` spec — the viewer fails closed rather than reporting a false "0 replies". |
 | Old envelopes disappeared | Retention pruning (`CODEX_IPC_RETENTION_DAYS`, default 7) ran on a later dispatch. Set `0` to disable. |

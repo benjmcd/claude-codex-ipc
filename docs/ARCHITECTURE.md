@@ -37,6 +37,15 @@ ${CODEX_IPC_ROOT:-~/.claude/ipc}/<claudeSessionId>/<conversationId|filedrop>/<di
 - Bounded retention: envelopes are pruned opportunistically on the next dispatch after
   `CODEX_IPC_RETENTION_DAYS` (default 7; 0 disables).
 
+## Reply resolution
+
+The reply viewer is a derived, read-only projection. For each retained dispatch it selects a
+readable regular non-symlink `.reply.md` first and labels it `source=reply-file`. Only when that
+primary is absent or unreadable may an exactly correlated, completed rollout supply
+`source=rollout-fallback`. If neither source yields content, the viewer emits `source=none` with
+a visible reason. It never treats the two bodies as equal, and rollout-derived text is stdout-only:
+no cache, reconstructed reply file, transport-root write, lock, or retention side effect is added.
+
 ## Delivery routes on top of the transport
 
 1. **File-drop (default, stable):** operator pastes one printed pickup line into their Codex
@@ -45,6 +54,12 @@ ${CODEX_IPC_ROOT:-~/.claude/ipc}/<claudeSessionId>/<conversationId|filedrop>/<di
    wrapper injects the pickup line into the renderer-owned Desktop thread over the app's private
    named-pipe router; unowned threads are auto-loaded via the app's own `codex://threads/<id>`
    deep link with focus snapback. Result taxonomy: `gui-delivered | gui-unowned | failed-closed`.
+   An accepted send then receives one bounded confirmation token: `rollout-hit`,
+   `rollout-pending`, or `rollout-unavailable`. A hit proves only that the exact dispatch pickup
+   reached a rollout user message; pending means an authoritative candidate was readable/parseable
+   but no pickup was observed within budget; unavailable means observation could not determine a
+   result. None proves completion or reply-file success, and no observation outcome causes an
+   automatic resend.
    Built on private internals — revalidate after every Codex Desktop update. That includes
    host-identity drift: since 2026-07-09 the Codex Desktop GUI runs as `ChatGPT.exe` under the
    unchanged `OpenAI.Codex` package family, so foreground/GUI identification is positive
@@ -70,6 +85,9 @@ ${CODEX_IPC_ROOT:-~/.claude/ipc}/<claudeSessionId>/<conversationId|filedrop>/<di
 
 - Explicit conversation UUID per live send; no heuristic write targeting.
 - File-drop fallback precedes and survives every live attempt.
+- Exactly one RESULT line follows every post-envelope live outcome; accepted sends stay
+  `gui-delivered` regardless of observation token.
+- Reply files remain primary; rollout fallback is correlated, read-only, and stdout-only.
 - SQLite is opened `readOnly:true` everywhere; no config/account/plugin/archive mutation.
 - Transcript disclosure is opt-in (`CODEX_IPC_INCLUDE_TRANSCRIPT=1`).
 - No authorized thread id ships in the code (`CODEX_IPC_AUTHORIZED_TEST_THREAD` is

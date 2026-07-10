@@ -23,10 +23,10 @@ Desktop update, silently. Revalidate experimental features with
 | | |
 |---|---|
 | Supported OS | Windows (Git Bash/MSYS/WSL), Linux, macOS |
-| Dependencies | bash ≥ 4 (macOS ships bash 3.2 — `brew install bash`), GNU `find`/`sort`/`stat`/`date` (GNU coreutils; on macOS install `findutils`/`coreutils` or run in a GNU userland) |
+| Dependencies | bash ≥ 4 (macOS ships bash 3.2 — `brew install bash`), GNU `find`/`sort`/`stat`/`date` (GNU coreutils; on macOS install `findutils`/`coreutils` or run in a GNU userland); Node.js is optional for rollout-derived fallback, while primary reply-file viewing remains available without it |
 | Stability | **Stable**, read-only by contract (never writes/locks/creates) |
 | Touches live Desktop state | No |
-| Fallback | Read the per-dispatch `*.reply.md` files directly |
+| Source precedence | A readable regular non-symlink per-dispatch `*.reply.md` is primary; only when it is absent or unreadable may an exactly correlated completed rollout provide stdout-only fallback; otherwise `source=none` is visible |
 
 ## Session inspector (`codex_ipc_session_inspect.mjs`)
 
@@ -98,7 +98,7 @@ whatever its current product branding.
 | Date | Observed change | IPC consequence |
 |---|---|---|
 | 2026-07-09 | GUI executable renamed `Codex.exe` → `ChatGPT.exe` ("ChatGPT desktop app, Codex mode"); package family unchanged (`OpenAI.Codex_2p2nqsd0c76g0`, observed at 26.707.3563.0); headless `resources\codex.exe` child unchanged; `codex://`, `\\.\pipe\codex-ipc`, router methods, and `~/.codex` state all unchanged | Name-only foreground detection failed open; fixed by positive path/package identity in `codex_ipc_autoload.ps1` (fail-closed on ambiguity) and a package-based `desktopVersionHint` in `codex_ipc_revalidate.mjs`. Transport unchanged — no client/pipe/scheme changes needed |
-| 2026-07-09 (build 26.707.3748.0) | Desktop now applies a **managed restricted permission profile to IPC-injected follower turns** regardless of thread or global `danger-full-access`/`approval_policy=never` settings: read-anywhere, write only to the thread workspace + its visualizations dir, network off, commands run as the `codexsandboxoffline` sandbox user. Verified on both the auto-loaded and renderer-owned delivery paths (three probe turns, two threads); a pre-merge 2026-07-08 follower turn on the same machine ran `danger-full-access`, so this is new app-side hardening, not thread state. Thread `approval_policy` is still honored: `never` → no prompts, out-of-profile commands hard-fail; `on-request` → operator sees approval prompts | Task delivery, in-workspace execution, and chat replies are unaffected. The **reply-file leg breaks** when `~/.claude/ipc` is outside the thread workspace: `Set-Content` fails (access denied) on `never` threads, or requires manual operator approval on `on-request` threads. Mitigations: harvest replies read-only from the thread rollout (Claude-side), or use threads whose workspace covers the transport root. `/ipc` MUST NOT try to defeat the sandbox — it is the app's own policy for external clients |
+| 2026-07-09 (build 26.707.3748.0) | Managed restriction is **VERIFIED only for the two named `GPT-5.5` probe turns**: the old/restored-thread probe and the sender-labelled owned-thread probe. The universal follower-turn claim is **REFUTED** by same-build `GPT-5.6-sol` full-access pickup turns. The selecting condition is **UNPROVEN**: model, thread settings, and delivery route are confounded, and the rollouts contain no first-class route field | Reply-file write success is governed by the effective per-turn permission profile together with the thread `approval_policy`. In the verified managed turns, `on-request` permitted an approved outside-root write while `never` denied the equivalent write. Do not infer a turn's profile from follower status or route. Reply viewing remains file-primary, with read-only rollout fallback only when the primary is absent or unreadable; `/ipc` does not bypass the effective profile |
 
 ### Verified live write-proof entries
 

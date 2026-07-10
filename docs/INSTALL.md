@@ -54,7 +54,8 @@ PowerShell equivalents:
 
 | Feature | Needs |
 |---|---|
-| File-drop handoff, reply viewer | bash + coreutils (Git Bash on Windows). Nothing else. |
+| File-drop handoff, primary reply-file viewing | bash + coreutils (Git Bash on Windows). Nothing else. |
+| Bounded rollout confirmation and rollout-derived reply fallback | Node.js (built-ins only). Optional: primary reply-file viewing remains available without Node. |
 | Read-only inspection (inspector/locator/snapshot) | Node.js with `node:sqlite` support (≥ 22.5; older 22.x/23.x lines may require `--experimental-sqlite`) |
 | Live Desktop IPC (`--ipc`) | Windows, Node.js, Codex Desktop running; PowerShell for auto-load |
 | `--app` / `--open` / `--exec` | Codex CLI on PATH |
