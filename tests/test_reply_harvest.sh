@@ -30,7 +30,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 const { harvestDispatch } = await import(pathToFileURL(process.env.HARVESTER));
-const { observeRollout } = await import(pathToFileURL(process.env.OBSERVER));
+const { DEFAULT_OBSERVE_BUDGET_MS, observeRollout } = await import(pathToFileURL(process.env.OBSERVER));
 let passed = 0;
 async function test(name, fn) {
   try {
@@ -50,6 +50,10 @@ const basic = path.join(
 const tmp = process.env.TMPDIR_TEST;
 const dispatch = "1000000000-1-abcdef0123456789";
 
+await test("observe budget default reflects measured pickup p90", () => {
+  assert.equal(DEFAULT_OBSERVE_BUDGET_MS, 20000);
+});
+
 await test("regular reply file is primary without rollout access", () => {
   const reply = path.join(tmp, "primary.reply.md");
   fs.writeFileSync(reply, "PRIMARY");
@@ -64,6 +68,77 @@ await test("regular reply file is primary without rollout access", () => {
   assert.equal(result.sourceBytes, 7);
   assert.equal(result.returnedBytes, 4);
   assert.equal(result.bodyBase64, null);
+});
+
+await test("standalone supersession marker warns without replacing the primary reply", () => {
+  const threadId = "22222222-2222-4222-8222-222222222222";
+  const dispatchId = "8400000000-8-abcdef0123456789";
+  const reply = path.join(tmp, `${dispatchId}.reply.md`);
+  const rollout = path.join(tmp, `rollout-superseded-${threadId}.jsonl`);
+  const finalMessage = "REPLY-SUPERSEDED\nInspect the completed thread before relying on the reply file.";
+  fs.writeFileSync(reply, "PRIMARY-MUST-STAY");
+  const records = [
+    { type: "session_meta", payload: { id: threadId } },
+    { type: "event_msg", payload: { type: "task_started", turn_id: "00000000-0000-4000-8000-00000000c0de" } },
+    { type: "event_msg", payload: { type: "user_message", message: `read C:/x/${dispatchId}.task.md and proceed` } },
+    { type: "event_msg", payload: { type: "agent_message", message: finalMessage, phase: "final_answer" } },
+    { type: "event_msg", payload: { type: "task_complete", turn_id: "00000000-0000-4000-8000-00000000c0de", last_agent_message: finalMessage } },
+  ];
+  fs.writeFileSync(rollout, `${records.map((item) => JSON.stringify(item)).join("\n")}\n`);
+  const result = harvestDispatch({
+    threadId,
+    dispatchId,
+    replyPath: reply,
+    rolloutPath: rollout,
+    maxBytes: 4096,
+  });
+  assert.equal(result.source, "reply-file");
+  assert.equal(result.bodyBase64, null);
+  assert.equal(fs.readFileSync(reply, "utf8"), "PRIMARY-MUST-STAY");
+  assert.equal(result.replySuperseded, true);
+});
+
+await test("discussion of supersession marker does not warn", () => {
+  const threadId = "22222222-2222-4222-8222-222222222222";
+  const dispatchId = "8500000000-8-abcdef0123456789";
+  const reply = path.join(tmp, `${dispatchId}.reply.md`);
+  const rollout = path.join(tmp, `rollout-discussion-${threadId}.jsonl`);
+  const finalMessage = "This quotes the completion marker below without superseding the reply:\nREPLY-SUPERSEDED\nEnd quotation.";
+  fs.writeFileSync(reply, "PRIMARY-DISCUSSION");
+  const records = [
+    { type: "session_meta", payload: { id: threadId } },
+    { type: "event_msg", payload: { type: "task_started", turn_id: "33333333-3333-4333-8333-333333333333" } },
+    { type: "event_msg", payload: { type: "user_message", message: `read C:/x/${dispatchId}.task.md and proceed` } },
+    { type: "event_msg", payload: { type: "agent_message", message: finalMessage, phase: "final_answer" } },
+    { type: "event_msg", payload: { type: "task_complete", turn_id: "33333333-3333-4333-8333-333333333333", last_agent_message: finalMessage } },
+  ];
+  fs.writeFileSync(rollout, `${records.map((item) => JSON.stringify(item)).join("\n")}\n`);
+  const result = harvestDispatch({
+    threadId,
+    dispatchId,
+    replyPath: reply,
+    rolloutPath: rollout,
+  });
+  assert.equal(result.source, "reply-file");
+  assert.equal(result.replySuperseded, false);
+});
+
+await test("marker in an unterminated superseded turn does not warn", () => {
+  const threadId = "33333333-3333-4333-8333-333333333333";
+  const dispatchId = "5000000000-5-abcdef0123456789";
+  const reply = path.join(tmp, `${dispatchId}-unterminated.reply.md`);
+  const source = path.join(
+    process.env.FIXTURES,
+    `rollout-superseded-${threadId}.jsonl`,
+  );
+  const rollout = path.join(tmp, `rollout-unterminated-${threadId}.jsonl`);
+  const records = fs.readFileSync(source, "utf8").trim().split("\n").map(JSON.parse);
+  records[3].payload.message = "REPLY-SUPERSEDED\nThis turn never reached its own terminal.";
+  fs.writeFileSync(rollout, `${records.map((item) => JSON.stringify(item)).join("\n")}\n`);
+  fs.writeFileSync(reply, "PROVISIONAL-PRIMARY");
+  const result = harvestDispatch({ threadId, dispatchId, replyPath: reply, rolloutPath: rollout });
+  assert.equal(result.source, "reply-file");
+  assert.equal(result.replySuperseded, false);
 });
 
 await test("completed rollout is selected only when primary is unavailable", () => {
@@ -333,6 +408,26 @@ fi
 PASS=0; FAIL=0
 ok(){ echo "  PASS: $1"; PASS=$((PASS+1)); }
 no(){ echo "  FAIL: $1"; FAIL=$((FAIL+1)); }
+diagnostics_are_control_safe(){
+  node - "$1" <<'NODE'
+const fs = require("node:fs");
+const text = fs.readFileSync(process.argv[2], "utf8");
+const withoutLineEndings = text.replace(/\r?\n/g, "");
+if (/[\u0000-\u001f\u007f-\u009f]/u.test(withoutLineEndings)) process.exit(1);
+for (const escaped of ["\\u0000", "\\u001b", "\\u001f", "\\u007f", "\\u0085", "\\u009b"]) {
+  if (!text.includes(escaped)) process.exit(1);
+}
+const prefix = "ROLLOUT_DIAGNOSTIC ";
+const diagnostics = text.split(/\r?\n/).filter(Boolean).map((line) => {
+  if (!line.startsWith(prefix)) process.exit(1);
+  return JSON.parse(line.slice(prefix.length));
+});
+const drift = diagnostics.find((item) => item.code === "schema-drift");
+if (!drift) process.exit(1);
+if (drift.envelopeType !== "drift\u0000\u001b\u001f\u007f\u0085type") process.exit(1);
+if (drift.payloadType !== "unknown\u009bshape") process.exit(1);
+NODE
+}
 
 echo "== Observer CLI contract =="
 BASIC="$FIXTURES/rollout-basic-11111111-1111-4111-8111-111111111111.jsonl"
@@ -350,6 +445,47 @@ OUT="$(CODEX_IPC_ROLLOUT_MAX_RECORD_BYTES=1 node "$OBSERVER" \
   --rollout-path "$BASIC" --budget-ms 50 --interval-ms 10 2>"$ERR")"; RC=$?
 [[ $RC -eq 0 && "$OUT" == "rollout-unavailable" ]] \
   && ok "schema/record-cap failure maps to unavailable with exit 0" || no "observer cap mapping (rc=$RC out=$OUT)"
+
+DIAGNOSTIC_ROLLOUT="$TMP/rollout-diagnostic-22222222-2222-4222-8222-222222222222.jsonl"
+node - "$DIAGNOSTIC_ROLLOUT" <<'NODE'
+const fs = require("node:fs");
+const target = process.argv[2];
+const records = [
+  { type: "session_meta", payload: { id: "22222222-2222-4222-8222-222222222222" } },
+  { type: "drift\u0000\u001b\u001f\u007f\u0085type", payload: { type: "unknown\u009bshape" } },
+];
+fs.writeFileSync(target, `${records.map((item) => JSON.stringify(item)).join("\n")}\n`);
+NODE
+HARVEST_ERR="$TMP/harvest-diagnostic.err"
+OUT="$(node "$HARVESTER" --thread 22222222-2222-4222-8222-222222222222 \
+  --dispatch 8300000000-8-abcdef0123456789 --rollout-path "$DIAGNOSTIC_ROLLOUT" 2>"$HARVEST_ERR")"; RC=$?
+[[ $RC -eq 0 && "$OUT" == $'none\tpending\t0\t0\t0\t-\t' && "$OUT" != *$'\n'* ]] \
+  && diagnostics_are_control_safe "$HARVEST_ERR" \
+  && ok "harvester diagnostics escape C0 and C1 without changing stdout shape" \
+  || no "harvester diagnostic byte hygiene (rc=$RC out=$OUT)"
+OBSERVE_ERR="$TMP/observe-diagnostic.err"
+OUT="$(node "$OBSERVER" --thread 22222222-2222-4222-8222-222222222222 \
+  --dispatch 8300000000-8-abcdef0123456789 --rollout-path "$DIAGNOSTIC_ROLLOUT" \
+  --budget-ms 50 --interval-ms 10 2>"$OBSERVE_ERR")"; RC=$?
+[[ $RC -eq 0 && "$OUT" == "rollout-pending" && "$OUT" != *$'\n'* ]] \
+  && diagnostics_are_control_safe "$OBSERVE_ERR" \
+  && ok "observer diagnostics escape C0 and C1 without changing its token" \
+  || no "observer diagnostic byte hygiene (rc=$RC out=$OUT)"
+
+SUPERSEDED_DISPATCH=8400000000-8-abcdef0123456789
+SUPERSEDED_REPLY="$TMP/$SUPERSEDED_DISPATCH.reply.md"
+SUPERSEDED_ROLLOUT="$TMP/rollout-superseded-22222222-2222-4222-8222-222222222222.jsonl"
+SUPERSEDED_ERR="$TMP/superseded.err"
+before_hash="$(sha256sum "$SUPERSEDED_REPLY")"
+OUT="$(node "$HARVESTER" --thread 22222222-2222-4222-8222-222222222222 \
+  --dispatch "$SUPERSEDED_DISPATCH" --reply-path "$SUPERSEDED_REPLY" \
+  --rollout-path "$SUPERSEDED_ROLLOUT" 2>"$SUPERSEDED_ERR")"; RC=$?
+after_hash="$(sha256sum "$SUPERSEDED_REPLY")"
+[[ $RC -eq 0 && "$OUT" == $'reply-file\t-\t17\t17\t0\t-\t' && "$OUT" != *"PRIMARY-MUST-STAY"* \
+  && "$before_hash" == "$after_hash" ]] \
+  && grep -Fxq $'REPLY_SUPERSEDED_WARNING\tprimary reply may be superseded; inspect the dispatch thread before relying on it.' "$SUPERSEDED_ERR" \
+  && ok "harvester warns on stderr while primary stdout and file stay unchanged" \
+  || no "harvester superseded warning contract (rc=$RC out=$OUT)"
 
 echo "== Viewer dual-source integration =="
 IPCROOT="$TMP/ipc"; SESSIONS="$TMP/sessions"; SID=s1; THREAD=11111111-1111-4111-8111-111111111111
@@ -399,6 +535,53 @@ OUT="$(CODEX_IPC_ROOT="$IPCROOT" CODEX_IPC_SESSIONS_ROOT="$SESSIONS" \
   CLAUDE_CODE_SESSION_ID="$SID" bash "$VIEWER" --paths-only 2>&1)"; RC=$?
 [[ $RC -eq 0 && "$OUT" != *"PRIMARY-CONFLICT"* && "$OUT" != *"latest final"* ]] \
   && ok "paths-only remains body-free" || no "paths-only fallback gate (rc=$RC)"
+
+SUPER_VIEW_DISPATCH=8600000000-8-abcdef0123456789
+DISCUSS_VIEW_DISPATCH=8700000000-8-abcdef0123456789
+VIEW_ROLLOUT="$SESSIONS/2026/07/09/$(basename "$BASIC")"
+node - "$VIEW_ROLLOUT" "$SUPER_VIEW_DISPATCH" "$DISCUSS_VIEW_DISPATCH" <<'NODE'
+const fs = require("node:fs");
+const [target, superseded, discussion] = process.argv.slice(2);
+const owner = "11111111-1111-4111-8111-111111111111";
+const supersededFinal = "REPLY-SUPERSEDED\nInspect the completed thread before relying on the reply file.";
+const discussionFinal = "This quotes the completion marker below without superseding the reply:\nREPLY-SUPERSEDED\nEnd quotation.";
+const records = [
+  { type: "session_meta", payload: { id: owner } },
+  { type: "event_msg", payload: { type: "task_started", turn_id: "00000000-0000-4000-8000-00000000c0de" } },
+  { type: "event_msg", payload: { type: "user_message", message: `read C:/x/${superseded}.task.md and proceed` } },
+  { type: "event_msg", payload: { type: "agent_message", message: supersededFinal, phase: "final_answer" } },
+  { type: "event_msg", payload: { type: "task_complete", turn_id: "00000000-0000-4000-8000-00000000c0de", last_agent_message: supersededFinal } },
+  { type: "event_msg", payload: { type: "task_started", turn_id: "33333333-3333-4333-8333-333333333333" } },
+  { type: "event_msg", payload: { type: "user_message", message: `read C:/x/${discussion}.task.md and proceed` } },
+  { type: "event_msg", payload: { type: "agent_message", message: discussionFinal, phase: "final_answer" } },
+  { type: "event_msg", payload: { type: "task_complete", turn_id: "33333333-3333-4333-8333-333333333333", last_agent_message: discussionFinal } },
+];
+fs.writeFileSync(target, `${records.map((item) => JSON.stringify(item)).join("\n")}\n`);
+NODE
+printf 'task' > "$IPCROOT/$SID/$THREAD/$SUPER_VIEW_DISPATCH.task.md"
+printf 'SUPERSEDED-PRIMARY-BODY' > "$IPCROOT/$SID/$THREAD/$SUPER_VIEW_DISPATCH.reply.md"
+printf 'task' > "$IPCROOT/$SID/$THREAD/$DISCUSS_VIEW_DISPATCH.task.md"
+printf 'DISCUSSION-PRIMARY-BODY' > "$IPCROOT/$SID/$THREAD/$DISCUSS_VIEW_DISPATCH.reply.md"
+before="$(manifest)"
+OUT="$(CODEX_IPC_ROOT="$IPCROOT" CODEX_IPC_SESSIONS_ROOT="$SESSIONS" \
+  CLAUDE_CODE_SESSION_ID="$SID" bash "$VIEWER" -c "$THREAD" 2>&1)"; RC=$?
+after="$(manifest)"
+[[ $RC -eq 0 && "$before" == "$after" && "$OUT" == *"SUPERSEDED-PRIMARY-BODY"* && "$OUT" == *"DISCUSSION-PRIMARY-BODY"* \
+  && "$(printf '%s\n' "$OUT" | grep -Fc '[WARNING: REPLY-SUPERSEDED] Primary reply may be superseded; inspect the dispatch thread before relying on it.')" -eq 1 ]] \
+  && ok "viewer annotates only standalone supersession while preserving primary bodies" \
+  || no "viewer supersession annotation (rc=$RC)"
+OUT="$(CODEX_IPC_ROOT="$IPCROOT" CODEX_IPC_SESSIONS_ROOT="$SESSIONS" \
+  CLAUDE_CODE_SESSION_ID="$SID" bash "$VIEWER" -c "$THREAD" --paths-only 2>&1)"; RC=$?
+[[ $RC -eq 0 && "$OUT" == *"$SUPER_VIEW_DISPATCH"* && "$OUT" == *"$DISCUSS_VIEW_DISPATCH"* \
+  && "$OUT" != *"REPLY-SUPERSEDED"* && "$OUT" != *"PRIMARY-BODY"* ]] \
+  && ok "supersession annotation does not alter paths-only shape" \
+  || no "viewer supersession paths-only contract (rc=$RC)"
+OUT="$(CODEX_IPC_ROOT="$IPCROOT" CODEX_IPC_SESSIONS_ROOT="$SESSIONS" \
+  CLAUDE_CODE_SESSION_ID="$SID" PATH="/usr/bin:/bin" bash "$VIEWER" -c "$THREAD" 2>&1)"; RC=$?
+[[ $RC -eq 0 && "$OUT" == *"SUPERSEDED-PRIMARY-BODY"* && "$OUT" == *"DISCUSSION-PRIMARY-BODY"* \
+  && "$OUT" != *"REPLY-SUPERSEDED"* ]] \
+  && ok "Node absence leaves superseded primary rendering unaffected" \
+  || no "viewer supersession no-Node contract (rc=$RC)"
 
 echo "== Fallback renderer, retention boundary, and deterministic output =="
 THREAD2=22222222-2222-4222-8222-222222222222; DISPATCH2=8200000000-8-abcdef0123456789
