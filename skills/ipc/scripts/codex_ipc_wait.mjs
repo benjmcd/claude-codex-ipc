@@ -304,6 +304,9 @@ function inspectReply(filePath) {
 
   let descriptor;
   try {
+    // O_NOFOLLOW is undefined on win32, so open-time symlink refusal is a no-op there. The
+    // lstat pre-check above and the post-open identity comparison below are what actually
+    // enforce "regular, non-symlink" on every platform.
     descriptor = fs.openSync(
       filePath,
       fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0),
@@ -389,6 +392,9 @@ export async function waitForCompletion(options, injected = {}) {
   let cursor = null;
   let readableCandidate = false;
   let lastLocation = null;
+  // A read that only ran out of budget is not an authority failure: the candidate exists and is
+  // parseable, we simply did not finish observing it. That is `pending`, never `unavailable`.
+  let deadlineOnlyReadFailure = false;
 
   for (let iteration = 0; iteration < maxIterations; iteration += 1) {
     if (iteration > 0 && now() - startedAt >= budgetMs) break;
@@ -420,6 +426,7 @@ export async function waitForCompletion(options, injected = {}) {
         if (parsed.reason !== "deadline-exceeded") {
           return { token: "unavailable", diagnostics };
         }
+        deadlineOnlyReadFailure = true;
       } else {
         readableCandidate = true;
         cursor = parsed.cursor;
@@ -439,7 +446,10 @@ export async function waitForCompletion(options, injected = {}) {
     await sleep(Math.min(intervalMs, Math.max(1, budgetMs - elapsed)));
   }
 
-  if (!candidatePath || !readableCandidate) {
+  if (!candidatePath) {
+    return { token: "unavailable", diagnostics };
+  }
+  if (!readableCandidate && !deadlineOnlyReadFailure) {
     return { token: "unavailable", diagnostics };
   }
   const lifecycle = classifyDispatch(records, diagnostics, options.dispatchId);

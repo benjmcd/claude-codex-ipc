@@ -531,6 +531,43 @@ await test("bounded expiry returns pending without wall-clock sleep", async () =
   assert.equal(sleepCalls, 3);
 });
 
+await test("first read exhausting the budget yields pending, not unavailable", async () => {
+  // Regression: a read that only ran out of budget is not an authority failure. The candidate
+  // exists and parses; we simply never finished observing it. The clock is already past the
+  // deadline when the first read runs.
+  const root = caseDir("deadline-first-read");
+  const rollout = writeRollout(root, ownOpenRecords());
+  let calls = 0;
+  const result = await waitForCompletion(
+    directOptions(root, rollout, path.join(root, "missing.md"), { budgetMs: 5, intervalMs: 1 }),
+    {
+      // Stay inside the budget while the candidate is located, then jump past the deadline so
+      // the read itself is the only thing that fails.
+      now: () => {
+        calls += 1;
+        return calls <= 2 ? 0 : 1000;
+      },
+      sleep: async () => {},
+    },
+  );
+  assert.equal(result.token, "pending");
+});
+
+await test("readable candidate plus later budget expiry yields pending, not unavailable", async () => {
+  // The candidate was read successfully at least once, then the budget expired mid-poll.
+  const root = caseDir("deadline-partial-read");
+  const rollout = writeRollout(root, ownOpenRecords());
+  let clock = 0;
+  const result = await waitForCompletion(
+    directOptions(root, rollout, path.join(root, "missing.md"), { budgetMs: 20, intervalMs: 5 }),
+    {
+      now: () => clock,
+      sleep: async (ms) => { clock += ms; },
+    },
+  );
+  assert.equal(result.token, "pending");
+});
+
 await test("direct wait API normalizes a zero interval instead of polling unboundedly", async () => {
   const root = caseDir("direct-zero-interval");
   const rollout = writeRollout(root, ownOpenRecords());

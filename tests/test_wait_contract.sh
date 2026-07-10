@@ -203,84 +203,84 @@ EOF
 }
 
 echo "== 1. six determination tokens and own-turn semantics =="
-CASE="$TMP/done"; mkdir -p "$CASE"; write_done "$CASE/rollout.jsonl"; make_reply "$CASE/reply.md"
+CASE="$TMP/done"; mkdir -p "$CASE"; write_done "$CASE/rollout-$THREAD.jsonl"; make_reply "$CASE/reply.md"
 BEFORE="$(tree_digest "$CASE")"
-run_case "$CASE" --rollout-path "$CASE/rollout.jsonl" --reply-path "$CASE/reply.md"
+run_case "$CASE" --rollout-path "$CASE/rollout-$THREAD.jsonl" --reply-path "$CASE/reply.md"
 assert_token done "done requires the own task_complete plus a regular reply"
 AFTER="$(tree_digest "$CASE")"
 [[ "$BEFORE" == "$AFTER" ]] && ok "determination is read-only over injected fixtures" || no "determination mutated fixture state"
 
-CASE="$TMP/done-sequence"; mkdir -p "$CASE"; write_done_without_user_turn "$CASE/rollout.jsonl"; make_reply "$CASE/reply.md"
-run_case "$CASE" --rollout-path "$CASE/rollout.jsonl" --reply-path "$CASE/reply.md"
+CASE="$TMP/done-sequence"; mkdir -p "$CASE"; write_done_without_user_turn "$CASE/rollout-$THREAD.jsonl"; make_reply "$CASE/reply.md"
+run_case "$CASE" --rollout-path "$CASE/rollout-$THREAD.jsonl" --reply-path "$CASE/reply.md"
 assert_token done "user_message without turn_id correlates to its surrounding own turn"
 
-CASE="$TMP/reply-missing"; mkdir -p "$CASE"; write_done "$CASE/rollout.jsonl"
-run_case "$CASE" --rollout-path "$CASE/rollout.jsonl" --reply-path "$CASE/missing.reply.md"
+CASE="$TMP/reply-missing"; mkdir -p "$CASE"; write_done "$CASE/rollout-$THREAD.jsonl"
+run_case "$CASE" --rollout-path "$CASE/rollout-$THREAD.jsonl" --reply-path "$CASE/missing.reply.md"
 assert_token reply-missing "completed own turn without a reply is reply-missing"
 
-CASE="$TMP/pending"; mkdir -p "$CASE"; write_pending "$CASE/rollout.jsonl"; make_reply "$CASE/reply.md"
-run_case "$CASE" --rollout-path "$CASE/rollout.jsonl" --reply-path "$CASE/reply.md"
+CASE="$TMP/pending"; mkdir -p "$CASE"; write_pending "$CASE/rollout-$THREAD.jsonl"; make_reply "$CASE/reply.md"
+run_case "$CASE" --rollout-path "$CASE/rollout-$THREAD.jsonl" --reply-path "$CASE/reply.md"
 assert_token pending "reply presence cannot complete an open own turn"
 
-CASE="$TMP/aborted"; mkdir -p "$CASE"; write_aborted "$CASE/rollout.jsonl"; make_reply "$CASE/reply.md"
-run_case "$CASE" --rollout-path "$CASE/rollout.jsonl" --reply-path "$CASE/reply.md"
+CASE="$TMP/aborted"; mkdir -p "$CASE"; write_aborted "$CASE/rollout-$THREAD.jsonl"; make_reply "$CASE/reply.md"
+run_case "$CASE" --rollout-path "$CASE/rollout-$THREAD.jsonl" --reply-path "$CASE/reply.md"
 assert_token aborted "turn_aborted beats a present reply"
 
-CASE="$TMP/superseded"; mkdir -p "$CASE"; write_superseded "$CASE/rollout.jsonl"; make_reply "$CASE/reply.md"
-run_case "$CASE" --rollout-path "$CASE/rollout.jsonl" --reply-path "$CASE/reply.md"
+CASE="$TMP/superseded"; mkdir -p "$CASE"; write_superseded "$CASE/rollout-$THREAD.jsonl"; make_reply "$CASE/reply.md"
+run_case "$CASE" --rollout-path "$CASE/rollout-$THREAD.jsonl" --reply-path "$CASE/reply.md"
 assert_token superseded "later unrelated task_complete never certifies a superseded dispatch"
 
-CASE="$TMP/compacted"; mkdir -p "$CASE"; write_compacted_supersession "$CASE/rollout.jsonl"; make_reply "$CASE/reply.md"
-run_case "$CASE" --rollout-path "$CASE/rollout.jsonl" --reply-path "$CASE/reply.md"
+CASE="$TMP/compacted"; mkdir -p "$CASE"; write_compacted_supersession "$CASE/rollout-$THREAD.jsonl"; make_reply "$CASE/reply.md"
+run_case "$CASE" --rollout-path "$CASE/rollout-$THREAD.jsonl" --reply-path "$CASE/reply.md"
 assert_token superseded "compaction turn without a user message cannot inherit the dispatch marker"
 
-CASE="$TMP/post-terminal"; mkdir -p "$CASE"; write_completed_then_later "$CASE/rollout.jsonl"; make_reply "$CASE/reply.md"
-run_case "$CASE" --rollout-path "$CASE/rollout.jsonl" --reply-path "$CASE/reply.md"
+CASE="$TMP/post-terminal"; mkdir -p "$CASE"; write_completed_then_later "$CASE/rollout-$THREAD.jsonl"; make_reply "$CASE/reply.md"
+run_case "$CASE" --rollout-path "$CASE/rollout-$THREAD.jsonl" --reply-path "$CASE/reply.md"
 assert_token done "a later start after the own terminal does not retroactively supersede"
 
-CASE="$TMP/false-marker"; mkdir -p "$CASE"; write_false_marker "$CASE/rollout.jsonl"; make_reply "$CASE/reply.md"
-run_case "$CASE" --rollout-path "$CASE/rollout.jsonl" --reply-path "$CASE/reply.md"
+CASE="$TMP/false-marker"; mkdir -p "$CASE"; write_false_marker "$CASE/rollout-$THREAD.jsonl"; make_reply "$CASE/reply.md"
+run_case "$CASE" --rollout-path "$CASE/rollout-$THREAD.jsonl" --reply-path "$CASE/reply.md"
 assert_token pending "marker text outside user_message cannot bind a dispatch turn"
 
 echo "== 2. reply authority, derivation, regular-file checks, and ambiguity =="
-CASE="$TMP/reply-explicit"; mkdir -p "$CASE"; write_done "$CASE/rollout.jsonl"
+CASE="$TMP/reply-explicit"; mkdir -p "$CASE"; write_done "$CASE/rollout-$THREAD.jsonl"
 make_reply "$CASE/transport/sid/$THREAD/$DISPATCH.reply.md"
-run_case "$CASE" --rollout-path "$CASE/rollout.jsonl" --session sid --reply-path "$CASE/explicit-missing.md"
+run_case "$CASE" --rollout-path "$CASE/rollout-$THREAD.jsonl" --session sid --reply-path "$CASE/explicit-missing.md"
 assert_token reply-missing "explicit reply path wins over a valid session-derived reply"
 
-CASE="$TMP/reply-session"; mkdir -p "$CASE"; write_done "$CASE/rollout.jsonl"
+CASE="$TMP/reply-session"; mkdir -p "$CASE"; write_done "$CASE/rollout-$THREAD.jsonl"
 make_reply "$CASE/transport/sid/$THREAD/$DISPATCH.reply.md"
-run_case "$CASE" --rollout-path "$CASE/rollout.jsonl" --session sid
+run_case "$CASE" --rollout-path "$CASE/rollout-$THREAD.jsonl" --session sid
 assert_token done "session derives the exact transport-root reply path"
 
-CASE="$TMP/reply-scan"; mkdir -p "$CASE"; write_done "$CASE/rollout.jsonl"
+CASE="$TMP/reply-scan"; mkdir -p "$CASE"; write_done "$CASE/rollout-$THREAD.jsonl"
 make_reply "$CASE/transport/only/$THREAD/$DISPATCH.reply.md"
 RUN_ENV=("CODEX_IPC_ROOT=$TMP/wrong-env-root")
-run_case "$CASE" --rollout-path "$CASE/rollout.jsonl"
+run_case "$CASE" --rollout-path "$CASE/rollout-$THREAD.jsonl"
 assert_token done "unique reply scan works and transport-root flag overrides CODEX_IPC_ROOT"
 
-CASE="$TMP/reply-env"; mkdir -p "$CASE"; write_done "$CASE/rollout.jsonl"
+CASE="$TMP/reply-env"; mkdir -p "$CASE"; write_done "$CASE/rollout-$THREAD.jsonl"
 make_reply "$CASE/env-root/sid/$THREAD/$DISPATCH.reply.md"
 RUN_ENV=("CODEX_IPC_ROOT=$CASE/env-root")
 mkdir -p "$CASE/sessions"
 run_wait --thread "$THREAD" --dispatch "$DISPATCH" --sessions-root "$CASE/sessions" \
-  --rollout-path "$CASE/rollout.jsonl" --session sid
+  --rollout-path "$CASE/rollout-$THREAD.jsonl" --session sid
 assert_token done "CODEX_IPC_ROOT supplies the default transport root"
 
-CASE="$TMP/reply-ambiguous"; mkdir -p "$CASE"; write_done "$CASE/rollout.jsonl"
+CASE="$TMP/reply-ambiguous"; mkdir -p "$CASE"; write_done "$CASE/rollout-$THREAD.jsonl"
 make_reply "$CASE/transport/a/$THREAD/$DISPATCH.reply.md"
 make_reply "$CASE/transport/b/$THREAD/$DISPATCH.reply.md"
-run_case "$CASE" --rollout-path "$CASE/rollout.jsonl"
+run_case "$CASE" --rollout-path "$CASE/rollout-$THREAD.jsonl"
 assert_token unavailable "two distinct reply-scan hits are unavailable"
 
-CASE="$TMP/reply-symlink"; mkdir -p "$CASE"; write_done "$CASE/rollout.jsonl"; make_reply "$CASE/target.md"
+CASE="$TMP/reply-symlink"; mkdir -p "$CASE"; write_done "$CASE/rollout-$THREAD.jsonl"; make_reply "$CASE/target.md"
 if ! "$NODE_BIN" -e 'require("node:fs").symlinkSync(process.argv[1], process.argv[2])' "$CASE/target.md" "$CASE/link.md" >/dev/null 2>&1; then
   mkdir -p "$CASE/target-dir"
   "$NODE_BIN" -e 'require("node:fs").symlinkSync(process.argv[1], process.argv[2], "junction")' \
     "$CASE/target-dir" "$CASE/link.md" >/dev/null 2>&1 || true
 fi
 if "$NODE_BIN" -e 'process.exit(require("node:fs").lstatSync(process.argv[1]).isSymbolicLink() ? 0 : 1)' "$CASE/link.md"; then
-  run_case "$CASE" --rollout-path "$CASE/rollout.jsonl" --reply-path "$CASE/link.md"
+  run_case "$CASE" --rollout-path "$CASE/rollout-$THREAD.jsonl" --reply-path "$CASE/link.md"
   assert_token reply-missing "a symlinked reply is not an eligible completion artifact"
 else
   no "could not create an actual symlink for the required reply test"
@@ -291,17 +291,17 @@ CASE="$TMP/no-rollout"; mkdir -p "$CASE/sessions"; make_reply "$CASE/reply.md"
 run_case "$CASE" --reply-path "$CASE/reply.md"
 assert_token unavailable "no authoritative rollout candidate is unavailable"
 
-CASE="$TMP/rollout-explicit"; mkdir -p "$CASE"; make_reply "$CASE/reply.md"; write_done "$CASE/explicit.jsonl"
+CASE="$TMP/rollout-explicit"; mkdir -p "$CASE"; make_reply "$CASE/reply.md"; write_done "$CASE/explicit-$THREAD.jsonl"
 printf '%s\n' 'not a sessions directory' >"$CASE/not-a-directory"
 run_wait --thread "$THREAD" --dispatch "$DISPATCH" --sessions-root "$CASE/not-a-directory" \
-  --transport-root "$CASE/transport" --rollout-path "$CASE/explicit.jsonl" --reply-path "$CASE/reply.md"
+  --transport-root "$CASE/transport" --rollout-path "$CASE/explicit-$THREAD.jsonl" --reply-path "$CASE/reply.md"
 assert_token done "explicit rollout path wins without consulting the locator root"
 
-CASE="$TMP/malformed"; mkdir -p "$CASE"; write_prefix "$CASE/rollout.jsonl"
-printf '{"type":"event_msg","payload":{"type":"agent_message","message":"bad:\001\200"}}\n' >>"$CASE/rollout.jsonl"
-printf '%s\n' "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"$OWN_TURN\"}}" >>"$CASE/rollout.jsonl"
+CASE="$TMP/malformed"; mkdir -p "$CASE"; write_prefix "$CASE/rollout-$THREAD.jsonl"
+printf '{"type":"event_msg","payload":{"type":"agent_message","message":"bad:\001\200"}}\n' >>"$CASE/rollout-$THREAD.jsonl"
+printf '%s\n' "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"$OWN_TURN\"}}" >>"$CASE/rollout-$THREAD.jsonl"
 make_reply "$CASE/reply.md"
-run_case "$CASE" --rollout-path "$CASE/rollout.jsonl" --reply-path "$CASE/reply.md"
+run_case "$CASE" --rollout-path "$CASE/rollout-$THREAD.jsonl" --reply-path "$CASE/reply.md"
 assert_token unavailable "malformed rollout schema is unavailable"
 # Permit only HT/LF/CR used for diagnostic line framing; reject all other C0/C1 bytes.
 if "$NODE_BIN" -e 'const b=require("node:fs").readFileSync(process.argv[1]); process.exit([...b].some(x => (x<=8)||(x>=11&&x<=12)||(x>=14&&x<=31)||(x>=127&&x<=159)) ? 1 : 0)' "$ERR_FILE"; then
@@ -311,14 +311,14 @@ else
 fi
 
 echo "== 4. bounded re-evaluation and option precedence =="
-CASE="$TMP/single-shot"; mkdir -p "$CASE"; write_pending "$CASE/rollout.jsonl"; make_reply "$CASE/reply.md"
+CASE="$TMP/single-shot"; mkdir -p "$CASE"; write_pending "$CASE/rollout-$THREAD.jsonl"; make_reply "$CASE/reply.md"
 (
   sleep 2
-  printf '%s\n' "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"$OWN_TURN\",\"last_agent_message\":\"complete\"}}" >>"$CASE/rollout.jsonl"
+  printf '%s\n' "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"$OWN_TURN\",\"last_agent_message\":\"complete\"}}" >>"$CASE/rollout-$THREAD.jsonl"
 ) &
 WRITER_PID=$!
 RUN_ENV=("CODEX_IPC_WAIT_BUDGET_MS=5000" "CODEX_IPC_WAIT_INTERVAL_MS=5000")
-run_case "$CASE" --rollout-path "$CASE/rollout.jsonl" --reply-path "$CASE/reply.md" \
+run_case "$CASE" --rollout-path "$CASE/rollout-$THREAD.jsonl" --reply-path "$CASE/reply.md" \
   --budget-ms 0 --interval-ms 25
 assert_token pending "budget flag zero overrides env and performs one evaluation"
 if kill -0 "$WRITER_PID" >/dev/null 2>&1; then
@@ -335,14 +335,14 @@ else
   no "budget=0 incurred a polling-sized delay (${ELAPSED_MS}ms)"
 fi
 
-CASE="$TMP/env-poll"; mkdir -p "$CASE"; write_pending "$CASE/rollout.jsonl"; make_reply "$CASE/reply.md"
+CASE="$TMP/env-poll"; mkdir -p "$CASE"; write_pending "$CASE/rollout-$THREAD.jsonl"; make_reply "$CASE/reply.md"
 (
   sleep 0.12
-  printf '%s\n' "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"$OWN_TURN\",\"last_agent_message\":\"complete\"}}" >>"$CASE/rollout.jsonl"
+  printf '%s\n' "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"$OWN_TURN\",\"last_agent_message\":\"complete\"}}" >>"$CASE/rollout-$THREAD.jsonl"
 ) &
 WRITER_PID=$!
 RUN_ENV=("CODEX_IPC_WAIT_BUDGET_MS=1500" "CODEX_IPC_WAIT_INTERVAL_MS=25")
-run_case "$CASE" --rollout-path "$CASE/rollout.jsonl" --reply-path "$CASE/reply.md"
+run_case "$CASE" --rollout-path "$CASE/rollout-$THREAD.jsonl" --reply-path "$CASE/reply.md"
 wait "$WRITER_PID"
 assert_token done "budget and interval environment values drive in-process re-evaluation"
 if (( ELAPSED_MS >= 60 && ELAPSED_MS < 1500 )); then
@@ -351,20 +351,20 @@ else
   no "env-budget polling timing escaped its bound (${ELAPSED_MS}ms)"
 fi
 
-CASE="$TMP/flag-poll"; mkdir -p "$CASE"; write_pending "$CASE/rollout.jsonl"; make_reply "$CASE/reply.md"
+CASE="$TMP/flag-poll"; mkdir -p "$CASE"; write_pending "$CASE/rollout-$THREAD.jsonl"; make_reply "$CASE/reply.md"
 (
   sleep 0.12
-  printf '%s\n' "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"$OWN_TURN\",\"last_agent_message\":\"complete\"}}" >>"$CASE/rollout.jsonl"
+  printf '%s\n' "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"$OWN_TURN\",\"last_agent_message\":\"complete\"}}" >>"$CASE/rollout-$THREAD.jsonl"
 ) &
 WRITER_PID=$!
 RUN_ENV=("CODEX_IPC_WAIT_BUDGET_MS=0" "CODEX_IPC_WAIT_INTERVAL_MS=5000")
-run_case "$CASE" --rollout-path "$CASE/rollout.jsonl" --reply-path "$CASE/reply.md" \
+run_case "$CASE" --rollout-path "$CASE/rollout-$THREAD.jsonl" --reply-path "$CASE/reply.md" \
   --budget-ms 1000 --interval-ms 25
 wait "$WRITER_PID"
 assert_token done "budget and interval flags override conflicting environment values"
 
-CASE="$TMP/budget-expiry"; mkdir -p "$CASE"; write_pending "$CASE/rollout.jsonl"; make_reply "$CASE/reply.md"
-run_case "$CASE" --rollout-path "$CASE/rollout.jsonl" --reply-path "$CASE/reply.md" \
+CASE="$TMP/budget-expiry"; mkdir -p "$CASE"; write_pending "$CASE/rollout-$THREAD.jsonl"; make_reply "$CASE/reply.md"
+run_case "$CASE" --rollout-path "$CASE/rollout-$THREAD.jsonl" --reply-path "$CASE/reply.md" \
   --budget-ms 120 --interval-ms 20
 assert_token pending "unchanged state is pending at positive-budget expiry"
 if (( ELAPSED_MS >= 60 && ELAPSED_MS < 3000 )); then
@@ -373,8 +373,8 @@ else
   no "positive budget timing escaped its bounded window (${ELAPSED_MS}ms)"
 fi
 
-CASE="$TMP/interval-zero"; mkdir -p "$CASE"; write_pending "$CASE/rollout.jsonl"; make_reply "$CASE/reply.md"
-run_case "$CASE" --rollout-path "$CASE/rollout.jsonl" --reply-path "$CASE/reply.md" \
+CASE="$TMP/interval-zero"; mkdir -p "$CASE"; write_pending "$CASE/rollout-$THREAD.jsonl"; make_reply "$CASE/reply.md"
+run_case "$CASE" --rollout-path "$CASE/rollout-$THREAD.jsonl" --reply-path "$CASE/reply.md" \
   --budget-ms 120 --interval-ms 0
 assert_token pending "zero interval falls back and preserves determination output"
 if grep -qi 'interval' "$ERR_FILE"; then
@@ -388,8 +388,8 @@ else
   no "zero interval fallback exceeded the wall-time bound (${ELAPSED_MS}ms)"
 fi
 
-CASE="$TMP/interval-malformed"; mkdir -p "$CASE"; write_pending "$CASE/rollout.jsonl"; make_reply "$CASE/reply.md"
-run_case "$CASE" --rollout-path "$CASE/rollout.jsonl" --reply-path "$CASE/reply.md" \
+CASE="$TMP/interval-malformed"; mkdir -p "$CASE"; write_pending "$CASE/rollout-$THREAD.jsonl"; make_reply "$CASE/reply.md"
+run_case "$CASE" --rollout-path "$CASE/rollout-$THREAD.jsonl" --reply-path "$CASE/reply.md" \
   --budget-ms 120 --interval-ms malformed
 assert_token pending "malformed interval falls back and preserves determination output"
 if grep -qi 'interval' "$ERR_FILE"; then
@@ -442,24 +442,24 @@ EOF
 LOADER_URL="$("$NODE_BIN" -e 'process.stdout.write(require("node:url").pathToFileURL(process.argv[1]).href)' "$LOADER")"
 NODE_ARGS=(--experimental-loader "$LOADER_URL")
 
-run_case "$TMP/done" --rollout-path "$TMP/done/rollout.jsonl" --reply-path "$TMP/done/reply.md"
+run_case "$TMP/done" --rollout-path "$TMP/done/rollout-$THREAD.jsonl" --reply-path "$TMP/done/reply.md"
 assert_token done "dependency guard permits the done path"
 
-run_case "$TMP/aborted" --rollout-path "$TMP/aborted/rollout.jsonl" --reply-path "$TMP/aborted/reply.md"
+run_case "$TMP/aborted" --rollout-path "$TMP/aborted/rollout-$THREAD.jsonl" --reply-path "$TMP/aborted/reply.md"
 assert_token aborted "dependency guard permits the aborted path"
 
-run_case "$TMP/superseded" --rollout-path "$TMP/superseded/rollout.jsonl" --reply-path "$TMP/superseded/reply.md"
+run_case "$TMP/superseded" --rollout-path "$TMP/superseded/rollout-$THREAD.jsonl" --reply-path "$TMP/superseded/reply.md"
 assert_token superseded "dependency guard permits the superseded path"
 
-run_case "$TMP/reply-missing" --rollout-path "$TMP/reply-missing/rollout.jsonl" \
+run_case "$TMP/reply-missing" --rollout-path "$TMP/reply-missing/rollout-$THREAD.jsonl" \
   --reply-path "$TMP/reply-missing/missing.reply.md"
 assert_token reply-missing "dependency guard permits the reply-missing path"
 
-run_case "$TMP/pending" --rollout-path "$TMP/pending/rollout.jsonl" --reply-path "$TMP/pending/reply.md" \
+run_case "$TMP/pending" --rollout-path "$TMP/pending/rollout-$THREAD.jsonl" --reply-path "$TMP/pending/reply.md" \
   --budget-ms 60 --interval-ms 10
 assert_token pending "dependency guard permits the bounded pending path"
 
-run_case "$TMP/reply-ambiguous" --rollout-path "$TMP/reply-ambiguous/rollout.jsonl"
+run_case "$TMP/reply-ambiguous" --rollout-path "$TMP/reply-ambiguous/rollout-$THREAD.jsonl"
 assert_token unavailable "dependency guard permits the unavailable path"
 
 NODE_ARGS=()

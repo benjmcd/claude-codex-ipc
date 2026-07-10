@@ -121,6 +121,6 @@ process can read and modify them). `--exec` output never appears in the Desktop 
 
 ## Status
 
-v0.1.4 · [MIT](LICENSE.md) · [benjmcd/claude-codex-ipc](https://github.com/benjmcd/claude-codex-ipc).
+v0.1.5 · [MIT](LICENSE.md) · [benjmcd/claude-codex-ipc](https://github.com/benjmcd/claude-codex-ipc).
 Re-run `codex_ipc_revalidate.mjs` after any Codex Desktop update. The live route and its bounded
 rollout observation remain experimental; `restore-if-known` remains fail-closed/unvalidated.

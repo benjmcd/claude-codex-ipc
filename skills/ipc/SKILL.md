@@ -199,7 +199,11 @@ tool output). One delegation produces one reply: app-driven turns after the repl
 checks) are supersession territory, discovered by re-inspection, not by watching forever.
 The prose above remains the completion-contract definition; mechanically check it with
 `scripts/codex_ipc_wait.mjs`, which emits `done`, `aborted`, `superseded`, `reply-missing`,
-`pending`, or `unavailable`.
+`pending`, or `unavailable` (single-shot by default; `--budget-ms` bounds an optional poll).
+Rollout identity precondition: an explicit `--rollout-path` must name a `<threadId>.jsonl`-suffixed
+file whose first record is a matching `session_meta` — the shared reader validates identity even
+for explicit paths, so a renamed or copied rollout yields `unavailable` with an identity-mismatch
+diagnostic rather than reading the wrong thread.
 Compose handoffs with the completion contract in
 [references/handoff-template.md](references/handoff-template.md): self-verify BEFORE writing the
 reply; the reply is the last act of the turn.

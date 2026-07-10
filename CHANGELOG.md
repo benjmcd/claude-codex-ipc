@@ -10,6 +10,34 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+## [0.1.5] — 2026-07-10
+
+Makes the delegation completion contract mechanically checkable, and surfaces the per-thread
+settings a dispatcher needs before delegating.
+
+### Added
+- `skills/ipc/scripts/codex_ipc_wait.mjs`: the sanctioned dispatcher-side completion check.
+  Correlates a dispatch to its OWN turn (task-marker `user_message`, `turn_id`-primary) and emits
+  exactly one token — `done` (reply file present AND that turn reached `task_complete`
+  un-superseded), `aborted` (that turn ended in `turn_aborted`, regardless of reply), `superseded`
+  (a newer turn opened before its terminal — never certified by a later, unrelated terminal),
+  `reply-missing`, `pending`, or `unavailable`. Single-shot by default; `--budget-ms` bounds an
+  optional in-process poll. Read-only, Node built-ins only, no `node:sqlite`, no daemon.
+  A reply file's existence alone was never completion — dispatchers previously hand-rolled this
+  check and got it wrong.
+- `tests/test_ipc_wait.sh` (unit) and `tests/test_wait_contract.sh` (black-box conformance suite
+  authored independently from the contract text, with a negative self-test proving a wrong
+  implementation fails it). Both wired into CI.
+- `codex_ipc_session_inspect.mjs` surfaces the thread's stored `approvalMode` and `sandboxPolicy`
+  (schema-tolerant, fail-visible parse), so a dispatcher can preflight whether an injected turn
+  will be able to write its reply file before delegating.
+
+### Changed
+- `skills/ipc/SKILL.md` and `references/handoff-template.md` document the completion contract's
+  mechanical checker, the rollout identity precondition for explicit `--rollout-path`, and the
+  rules that dispatch never alters a target thread's model/reasoning/sandbox/approval and that
+  subagent model+effort must be set explicitly on every spawn.
+
 ## [0.1.4] — 2026-07-10
 
 Post-v0.1.3 hardening: adversarial-review follow-ups plus the R3 router-contract drift sentinel.
