@@ -112,9 +112,13 @@ node "${CLAUDE_SKILL_DIR}/scripts/codex_ipc_write_proof.mjs" --thread <conversat
 ```
 
 Use the inspector output to identify: the target title, cwd/project, model, reasoning effort,
-archived flag, and rollout path; the latest user/agent/task-complete signals; whether the tail
-suggests the session may be mid-turn; and whether the instruction is a handoff, oversight
-request, status check, continuation, review, wait/watch request, or management request. If the inspector
+archived flag, and rollout path; the thread's stored `approvalMode` and `sandboxPolicy` —
+injected turns run under these, so when the handoff needs reply-file writes outside the thread
+workspace, prefer a `sandboxPolicy.type=disabled` thread (a `managed` thread hard-fails such
+writes under `approval_mode=never`, or prompts the operator under `on-request`); the latest
+user/agent/task-complete signals; whether the tail suggests the session may be mid-turn; and
+whether the instruction is a handoff, oversight request, status check, continuation, review,
+wait/watch request, or management request. If the inspector
 is ambiguous, read the referenced rollout JSONL directly with targeted grep/tail before asking the
 user. Ask one concise question only when sending would risk interrupting or misdirecting the wrong
 thread.

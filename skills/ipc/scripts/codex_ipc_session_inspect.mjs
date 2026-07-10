@@ -35,6 +35,8 @@ const THREAD_COLUMNS = [
   "title",
   "model",
   "reasoning_effort",
+  "sandbox_policy",
+  "approval_mode",
   "tokens_used",
   "archived",
   "thread_source",
@@ -238,6 +240,18 @@ function readDbThread(dbPath, threadId) {
   }
 }
 
+function parseJsonColumn(value) {
+  if (value === null || value === undefined || value === "") {
+    return null;
+  }
+  try {
+    return JSON.parse(value);
+  } catch {
+    // Fail-visible: surface the raw column text rather than hiding a schema drift.
+    return { unparsed: String(value) };
+  }
+}
+
 function summarizeThread(row) {
   if (!row) {
     return { exists: false };
@@ -250,6 +264,10 @@ function summarizeThread(row) {
     title: row.title || null,
     model: row.model || null,
     reasoningEffort: row.reasoning_effort || null,
+    // Per-thread agent settings (GUI-controlled, mutable): injected follower turns run
+    // under these — preflight them before delegating when reply-file writes matter.
+    approvalMode: row.approval_mode || null,
+    sandboxPolicy: parseJsonColumn(row.sandbox_policy),
     tokensUsed: row.tokens_used ?? null,
     archived: row.archived ?? null,
     threadSource: row.thread_source || null,
