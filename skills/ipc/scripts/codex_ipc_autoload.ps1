@@ -11,15 +11,22 @@
 #                    authority exists, so in-app thread restoration cannot be proven. A
 #                    syntactically valid -RestoreConversationId is NOT proof.
 #
-# Conservative foreground detection: only a process name matching 'codex' (case-insensitive)
-# is treated as provably-Codex. Unknown/empty foreground names are treated as
-# possibly-Codex for gating: they defer and never auto-switch (displacing an unidentified
-# app is worse than deferring). Known non-Codex foreground keeps the original
-# deep-link + focus-snapback behavior unchanged.
+# Conservative foreground detection (positive identity, fail closed). Since the
+# 2026-07-09 host merge the Codex Desktop GUI runs as ChatGPT.exe under the unchanged
+# OpenAI.Codex package family, so name-only matching is insufficient in both directions:
+#   provably-Codex  : process name 'codex' (pre-merge GUI, kept for backward compat), or
+#                     process name 'chatgpt' whose executable path lies under
+#                     WindowsApps\OpenAI.Codex_* (the merged host).
+#   gated-as-Codex  : unknown/empty foreground names, or a 'chatgpt' process whose path is
+#                     unreadable (elevated/protected) — ambiguous identity defers and never
+#                     auto-switches (displacing an unidentified app is worse than deferring).
+#   known non-Codex : everything else, including a 'chatgpt' process with a readable path
+#                     outside OpenAI.Codex_* (e.g. a distinct ChatGPT-family app) — keeps
+#                     the original deep-link + focus-snapback behavior unchanged.
 #
 # -DryRun prints a compact machine-readable action record and never calls Start-Process,
-# SetForegroundWindow, or keybd_event. -MockForegroundProcess substitutes the foreground
-# process name for hermetic tests.
+# SetForegroundWindow, or keybd_event. -MockForegroundProcess / -MockForegroundPath
+# substitute the foreground process identity for hermetic tests.
 #
 # Exit codes:
 #   0 = deep-link action permitted and completed (or dry-run equivalent)
@@ -35,6 +42,7 @@ param(
     [switch]$AckForegroundSwitch,
     [switch]$DryRun,
     [string]$MockForegroundProcess = "",
+    [string]$MockForegroundPath = "",
     [int]$DeferSeconds = 120
 )
 
@@ -60,32 +68,50 @@ public class W {
 }
 "@
 
-function Get-FgProcName {
-    if ($MockForegroundProcess -ne "") { return $MockForegroundProcess }
+# Package-path identity for the merged host. WindowsApps package directories are
+# ACL-protected (a same-user process cannot fabricate one), so a path prefix under
+# WindowsApps\OpenAI.Codex_* is positive identity, not a spoofable name.
+$CODEX_PKG_PATH_RE = '(?i)[\\/]WindowsApps[\\/]OpenAI\.Codex_[^\\/]+[\\/]'
+
+function Get-FgIdentity {
+    if ($MockForegroundProcess -ne "") {
+        return [pscustomobject]@{ Name = $MockForegroundProcess; Path = $MockForegroundPath }
+    }
     $h = [W]::GetForegroundWindow(); $fgpid = 0
     [W]::GetWindowThreadProcessId($h, [ref]$fgpid) | Out-Null
-    try { (Get-Process -Id $fgpid -ErrorAction Stop).Name } catch { "unknown" }
+    try {
+        $p = Get-Process -Id $fgpid -ErrorAction Stop
+        # .Path may be $null for elevated/protected processes; classification treats
+        # a pathless 'chatgpt' as ambiguous (gated), never as provably non-Codex.
+        [pscustomobject]@{ Name = $p.Name; Path = [string]$p.Path }
+    } catch { [pscustomobject]@{ Name = "unknown"; Path = "" } }
 }
 
-function Test-CodexLike([string]$name) {
-    # Provably Codex, or unidentifiable (conservative: gate as if Codex).
-    return ($name -match '^(?i)codex$') -or [string]::IsNullOrWhiteSpace($name) -or ($name -eq 'unknown')
+function Test-CodexCertain($fg) {
+    if ($fg.Name -match '^(?i)codex$') { return $true }
+    return ($fg.Name -match '^(?i)chatgpt$') -and
+           (-not [string]::IsNullOrWhiteSpace($fg.Path)) -and
+           ($fg.Path -match $CODEX_PKG_PATH_RE)
 }
 
-function Test-CodexCertain([string]$name) {
-    return ($name -match '^(?i)codex$')
+function Test-CodexLike($fg) {
+    # Provably Codex, or unidentifiable, or ambiguous ChatGPT (conservative: gate as if Codex).
+    if (Test-CodexCertain $fg) { return $true }
+    if ([string]::IsNullOrWhiteSpace($fg.Name) -or ($fg.Name -eq 'unknown')) { return $true }
+    return ($fg.Name -match '^(?i)chatgpt$') -and [string]::IsNullOrWhiteSpace($fg.Path)
 }
 
-$fgName = Get-FgProcName
+$fg = Get-FgIdentity
+$fgName = $fg.Name
 
-if (Test-CodexLike $fgName) {
+if (Test-CodexLike $fg) {
     switch ($ForegroundPolicy) {
         "switch" {
             if (-not $AckForegroundSwitch) {
                 Write-Error "ACTION: switch-refused policy=switch foreground=$fgName reason=ack-missing"
                 exit 5
             }
-            if (-not (Test-CodexCertain $fgName)) {
+            if (-not (Test-CodexCertain $fg)) {
                 # Unknown foreground must never be auto-switched.
                 Write-Error "ACTION: defer policy=switch foreground=$fgName reason=foreground-unidentified"
                 exit 2
@@ -114,7 +140,7 @@ if (Test-CodexLike $fgName) {
                 exit 2
             }
             $deferDeadline = (Get-Date).AddSeconds($DeferSeconds)
-            while (Test-CodexLike (Get-FgProcName)) {
+            while (Test-CodexLike (Get-FgIdentity)) {
                 if ((Get-Date) -ge $deferDeadline) {
                     Write-Error "defer window expired: operator active in Codex (or foreground unidentifiable); nothing was fired"
                     exit 2
@@ -122,7 +148,8 @@ if (Test-CodexLike $fgName) {
                 Start-Sleep -Seconds 3
             }
             # Operator switched away; fall through to the non-Codex deep-link path below.
-            $fgName = Get-FgProcName
+            $fg = Get-FgIdentity
+            $fgName = $fg.Name
         }
     }
 }

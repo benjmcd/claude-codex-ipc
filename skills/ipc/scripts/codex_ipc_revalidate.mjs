@@ -228,14 +228,38 @@ function checkCodexCliVersion() {
 }
 
 function checkDesktopVersionHint() {
+  // Informational hint only (never gates the summary). Since the 2026-07-09 host merge
+  // the Codex Desktop GUI runs as ChatGPT.exe under the unchanged OpenAI.Codex package
+  // family, alongside a headless resources\codex.exe child. Identify the GUI positively
+  // via the package InstallLocation (legacy pre-merge 'Codex' name still matches), and
+  // explicitly reject the resources\codex.exe app-server child as the GUI. When the GUI
+  // cannot be identified, say so honestly instead of reporting the wrong binary.
   const ps = [
-    "$p = Get-Process -Name Codex -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty Path;",
-    "if (-not $p) { Write-Output '{\"running\":false}'; exit 0 }",
-    "$v = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($p);",
-    "$o = [ordered]@{ running=$true; path=$p; fileVersion=$v.FileVersion; productVersion=$v.ProductVersion };",
+    "$pkg = Get-AppxPackage OpenAI.Codex -ErrorAction SilentlyContinue | Select-Object -First 1;",
+    "if (-not $pkg) { Write-Output '{\"packageInstalled\":false,\"guiIdentified\":false}'; exit 0 }",
+    "$root = $pkg.InstallLocation;",
+    "$gui = Get-Process -Name ChatGPT,Codex -ErrorAction SilentlyContinue |",
+    "Where-Object { $_.Path -and $_.Path.StartsWith($root, [System.StringComparison]::OrdinalIgnoreCase)",
+    "-and $_.Path -notmatch '(?i)[\\\\/]resources[\\\\/]codex\\.exe$' } |",
+    "Select-Object -First 1;",
+    "$o = [ordered]@{ packageInstalled=$true; packageName=$pkg.Name; packageVersion=[string]$pkg.Version;",
+    "packageFamily=$pkg.PackageFamilyName; guiIdentified=[bool]$gui };",
+    "if ($gui) { $v = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($gui.Path);",
+    "$o.guiName=$gui.Name; $o.guiPath=$gui.Path; $o.fileVersion=$v.FileVersion; $o.productVersion=$v.ProductVersion }",
     "$o | ConvertTo-Json -Compress",
   ].join(" ");
-  return runCommand("powershell.exe", ["-NoProfile", "-Command", ps], { maxChars: 2000 });
+  const result = runCommand("powershell.exe", ["-NoProfile", "-Command", ps], { maxChars: 2000 });
+  if (result.error || !result.ok) {
+    // Hint is informational by contract: never gate the summary on a host where
+    // powershell.exe or the Appx module is unavailable (e.g. non-Windows, Server Core).
+    return {
+      ...result,
+      ok: true,
+      skipped: true,
+      reason: "desktop version hint unavailable on this host (informational check; never gating).",
+    };
+  }
+  return result;
 }
 
 function checkCodexPipePresence() {

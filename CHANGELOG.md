@@ -10,6 +10,39 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+## [0.1.2] — 2026-07-09
+
+Host-identity compatibility patch for the 2026-07-09 Codex/ChatGPT Windows app merge: the Codex
+Desktop GUI now runs as `ChatGPT.exe` under the unchanged `OpenAI.Codex` package family. Transport
+surfaces (`\\.\pipe\codex-ipc`, `codex://`, router methods, `~/.codex` state, RESULT taxonomy,
+exit codes) are unaffected and unchanged.
+
+### Added
+- `tests/test_autoload_matrix.sh`: hermetic behavioral matrix for `codex_ipc_autoload.ps1` —
+  runs the real script under `-DryRun` with mocked foreground identity across
+  legacy-Codex / merged-host / other-ChatGPT / ambiguous / unknown × defer / switch /
+  restore-if-known; skips cleanly where `powershell.exe` is absent; asserts process hygiene.
+  Wired into CI.
+- `codex_ipc_autoload.ps1`: `-MockForegroundPath` test hook (used only when
+  `-MockForegroundProcess` is supplied; inert in production).
+- `docs/COMPATIBILITY.md`: "Host-identity ledger" section with the 2026-07-09 entry.
+
+### Fixed
+- **Foreground safety failed open on the merged host** (`codex_ipc_autoload.ps1`): detection was
+  name-only (`^(?i)codex$`), so the ChatGPT-branded Codex GUI was classified "known non-Codex"
+  and an unowned-thread handoff could fire `codex://` while the operator was in the visible app —
+  under every policy. Identity is now positive: legacy `Codex` process name, or `ChatGPT` name
+  with executable path under `WindowsApps\OpenAI.Codex_*` (ACL-protected, not name-spoofable).
+  A `ChatGPT`-named foreground with unreadable path is ambiguous and defers (fail closed). A
+  distinct ChatGPT-family app with a readable non-Codex path keeps the original
+  deep-link + snapback behavior. Exit codes, action records, and policy semantics unchanged.
+- **`desktopVersionHint` misattributed the Desktop after the rename**
+  (`codex_ipc_revalidate.mjs`): `Get-Process -Name Codex` now matched the headless
+  `resources\codex.exe` app-server child. The hint (still informational, never gating) now
+  reports the `OpenAI.Codex` package identity/version and positively identifies the GUI under
+  the package install location, explicitly rejecting `resources\codex.exe`, with an honest
+  `guiIdentified:false` when no GUI is found.
+
 ## [0.1.1] — 2026-07-09
 
 Post-release hardening from an exhaustive dual-lane audit, verified by a multi-agent workflow.

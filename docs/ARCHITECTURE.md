@@ -45,7 +45,11 @@ ${CODEX_IPC_ROOT:-~/.claude/ipc}/<claudeSessionId>/<conversationId|filedrop>/<di
    wrapper injects the pickup line into the renderer-owned Desktop thread over the app's private
    named-pipe router; unowned threads are auto-loaded via the app's own `codex://threads/<id>`
    deep link with focus snapback. Result taxonomy: `gui-delivered | gui-unowned | failed-closed`.
-   Built on private internals — revalidate after every Codex Desktop update.
+   Built on private internals — revalidate after every Codex Desktop update. That includes
+   host-identity drift: since 2026-07-09 the Codex Desktop GUI runs as `ChatGPT.exe` under the
+   unchanged `OpenAI.Codex` package family, so foreground/GUI identification is positive
+   (executable path + package), never process-name-only (see `docs/COMPATIBILITY.md`,
+   "Host-identity ledger").
 3. **`--exec` headless (optional):** `codex exec resume` writes only rollout JSONL, invisible to
    the Desktop GUI; explicitly not an `/ipc` fallback.
 

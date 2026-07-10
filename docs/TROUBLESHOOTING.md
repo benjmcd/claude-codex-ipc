@@ -43,3 +43,10 @@ adds repo/install-level triage.
 3. Only with explicit operator approval: controlled live re-proof via
    `codex_ipc_write_proof.mjs --thread <id> --marker <unique> --send --ack-live-write
    --allow-any-thread` against a thread you own.
+4. Check **host identity** explicitly: an update may change the GUI process/executable name
+   without changing the package family. Known case (2026-07-09): the GUI became `ChatGPT.exe`
+   under the unchanged `OpenAI.Codex` package family, which broke name-only foreground
+   detection until the identity check became path/package based. `revalidate`'s
+   `desktopVersionHint` reports the package identity and the positively-identified GUI
+   (`guiIdentified:false` means the GUI could not be identified — treat foreground safety as
+   unproven, keep to file-drop, and run the hermetic matrix `tests/test_autoload_matrix.sh`).

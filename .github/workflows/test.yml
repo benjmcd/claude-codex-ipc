@@ -28,6 +28,7 @@ jobs:
           bash -n skills/ipc/scripts/handoff_to_codex.sh
           bash -n skills/ipc/scripts/codex_ipc_replies.sh
           bash -n tests/test_ipc.sh
+          bash -n tests/test_autoload_matrix.sh
           bash -n tests/test_reply_view.sh
           bash -n tests/scan_public_safety.sh
           bash -n install.sh
@@ -55,6 +56,12 @@ jobs:
 
       - name: Hermetic transport tests
         run: bash tests/test_ipc.sh
+
+      - name: Hermetic autoload host-identity matrix
+        # Runs the REAL codex_ipc_autoload.ps1 under -DryRun with mocked foreground
+        # identity; never fires codex:// or touches focus. Self-skips where
+        # powershell.exe is absent (ubuntu leg).
+        run: bash tests/test_autoload_matrix.sh
 
       - name: Hermetic reply-viewer tests
         # GNU find/date required; the windows runner's Git Bash provides them.

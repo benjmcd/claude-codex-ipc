@@ -15,7 +15,10 @@ The stable core is the **file-backed handoff**: a per-dispatch task file plus a 
 file. The **live Codex Desktop IPC delivery route is optional and experimental** — it depends on
 private Codex Desktop internals (a named pipe, `codex://` deep links, window-focus automation) that
 can change without notice in any Codex Desktop update. Treat every live-IPC feature as
-"revalidate after updates", and keep file-drop as default/fallback.
+"revalidate after updates", and keep file-drop as default/fallback. ("Codex Desktop" is this
+skill's stable label for the app hosting these surfaces; since 2026-07-09 that app is the ChatGPT
+desktop app in Codex mode — GUI `ChatGPT.exe` under the unchanged `OpenAI.Codex` package family.
+The technical names `codex://`, `codex-ipc`, `~/.codex`, and the `codex` CLI are unchanged.)
 
 ## Toolkit root
 

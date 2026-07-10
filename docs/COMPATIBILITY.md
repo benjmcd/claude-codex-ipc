@@ -64,7 +64,7 @@ Same dependencies as the inspector for snapshot mode; `--compare` mode is pure J
 |---|---|
 | Supported OS | **Windows only** |
 | Dependencies | `powershell.exe`, Win32 foreground-window APIs, Codex Desktop's `codex://` protocol handler |
-| Stability | **Experimental** — UX-level automation over private behavior; foreground-policy-aware (default `defer` never navigates the visible Codex app; `switch` requires explicit acknowledgement; `restore-if-known` fail-closed; unidentifiable foreground defers) |
+| Stability | **Experimental** — UX-level automation over private behavior; foreground-policy-aware (default `defer` never navigates the visible Codex app; `switch` requires explicit acknowledgement; `restore-if-known` fail-closed; unidentifiable foreground defers). Foreground identity is positive (process name + `WindowsApps\OpenAI.Codex_*` executable path), covering the pre-merge `Codex.exe` GUI and the post-2026-07-09 `ChatGPT.exe` GUI; an ambiguous `ChatGPT`-named foreground (unreadable path) is gated as Codex and defers. Hermetic behavioral matrix: `tests/test_autoload_matrix.sh` |
 | Exit codes | `0` deep-link done (or dry-run), `1` focus restore unverified, `2` deferred, `4` restore unproven, `5` switch unacknowledged — wrapper maps all; unknown codes fail closed |
 | Touches live Desktop state | Yes — loads the target thread (background window on the default path; the VISIBLE window under authorized `switch` — disclosed residue) |
 | Fallback | Wrapper reports `gui-unowned`/`failed-closed` with reason token, manual `codex://threads/<id>` remediation + file-drop line |
@@ -88,3 +88,13 @@ Same dependencies as the inspector for snapshot mode; `--compare` mode is pure J
 | Stability | Stable tooling around experimental surfaces; write-proof live path is gated (`--send --ack-live-write [--allow-any-thread]`) and dry-run by default |
 | Touches live Desktop state | Only the write-proof **live** path (one marker turn); everything else read-only |
 | Fallback | Dry-run/static modes always available |
+
+## Host-identity ledger
+
+Observed Codex Desktop host-identity changes that affect foreground detection and validation.
+"Codex Desktop" remains this project's stable label for the app hosting the private IPC surfaces,
+whatever its current product branding.
+
+| Date | Observed change | IPC consequence |
+|---|---|---|
+| 2026-07-09 | GUI executable renamed `Codex.exe` → `ChatGPT.exe` ("ChatGPT desktop app, Codex mode"); package family unchanged (`OpenAI.Codex_2p2nqsd0c76g0`, observed at 26.707.3563.0); headless `resources\codex.exe` child unchanged; `codex://`, `\\.\pipe\codex-ipc`, router methods, and `~/.codex` state all unchanged | Name-only foreground detection failed open; fixed by positive path/package identity in `codex_ipc_autoload.ps1` (fail-closed on ambiguity) and a package-based `desktopVersionHint` in `codex_ipc_revalidate.mjs`. Transport unchanged — no client/pipe/scheme changes needed |
