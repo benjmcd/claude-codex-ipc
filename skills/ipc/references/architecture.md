@@ -62,7 +62,8 @@ CLI.
 Provenance: this transport was validated against a live Codex Desktop in the private predecessor
 project and re-validated at a point in time (2026-07-08) during this repository's preparation —
 the write-proof harness plus the `defer` and `switch`+ack delivery paths, with delivery confirmed
-out-of-band via the reply loop (the wrapper still reports `confirmation=not-checked` by design).
+out-of-band via the reply loop (the wrapper now also runs one bounded post-acceptance rollout
+observation and reports `confirmation=rollout-hit|rollout-pending|rollout-unavailable`).
 `restore-if-known` remains unvalidated (fail-closed). It rides private Codex Desktop internals, so
 run `codex_ipc_revalidate.mjs` on your own machine before first use and after every Desktop
 update.
@@ -122,9 +123,13 @@ window moved.
 
 Result lines are machine-parseable:
 `RESULT: gui-delivered|gui-unowned|failed-closed -- reason=<token> -- confirmation=<token>`.
-`confirmation=not-checked` on delivery is deliberate honesty: bounded post-send rollout
-observation (and dispatch idempotency markers for automated retry) are a planned follow-up
-milestone; until then, re-inspect the thread tail when delivery certainty matters.
+On an accepted send, `confirmation` carries one bounded rollout-observation token:
+`rollout-hit` (the exact dispatch pickup was observed in a rollout user message — proves
+admission only, never completion or reply-file success), `rollout-pending` (an authoritative
+candidate was readable/parseable but no pickup was observed within the bounded budget), or
+`rollout-unavailable` (observation could not determine a result). Observation failures never
+reclassify an accepted send and never trigger an automatic resend; re-inspect the thread tail
+when delivery certainty matters.
 
 Autoload helper exit codes: `0` deep-link permitted/completed (or dry-run equivalent), `1` link
 fired but focus restore unverified, `2` foreground-Codex (or unidentifiable foreground) deferral,

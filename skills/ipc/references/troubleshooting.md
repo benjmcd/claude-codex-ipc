@@ -22,8 +22,11 @@ Codex; never auto-switched), `foreground-restore-unproven` (restore-if-known is 
 `autoload-incomplete` (poll window expired), `target-not-found`/`target-archived`/
 `target-inspection-ambiguous` (positive proof required before any deep link),
 `router-pipe-failure`, `foreground-switch-unacknowledged`, `invalid-foreground-policy`.
-`confirmation=not-checked` on delivery means rollout observation has not run — re-inspect the
-thread tail when certainty matters.
+On an accepted send the wrapper emits one bounded confirmation token: `rollout-hit` (the exact
+dispatch pickup was observed in a rollout user message — admission only, not completion),
+`rollout-pending` (authoritative candidate readable but no pickup observed within budget — do not
+infer non-delivery), or `rollout-unavailable` (observation could not determine a result). None
+triggers an automatic resend; re-inspect the thread tail when certainty matters.
 
 1. `RESULT: gui-delivered` — done. If the task still does not appear and the target may have been
    mid-turn, re-inspect and confirm the task text is in the thread tail (the router can report
