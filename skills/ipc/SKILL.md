@@ -232,10 +232,16 @@ apply the existing-session send rule. If no candidate or multiple plausible cand
 back to the file-drop handoff and ask the user to select/create the Desktop thread and paste the
 pickup line or provide the session id.
 
-Model and reasoning effort for a Codex thread are controlled by the Desktop thread itself; `/ipc`
-cannot set them through the delivery route. Mention desired model/reasoning in the task text only
-when it matters. For headless `--exec` handoffs, model/reasoning pins are opt-in via the
-`CODEX_MODEL` / `CODEX_REASONING_EFFORT` environment variables and are passed only when set.
+The target thread's own settings — model, reasoning effort, sandbox policy, and approval mode —
+are NEVER changed by `/ipc`: a delegated turn runs under whatever the thread is already set to
+(the router ignores `turnStartParams.model` overrides in any case — verified 2026-07-10). Do not
+attempt to override them through the delivery route, the client flags, or any other mechanism;
+if the inspector preflight shows the thread's stored settings are unsuitable for the handoff
+(e.g. a `managed` sandbox where reply-file writes are needed), pick a suitable thread or ask the
+operator — never mutate. Model/reasoning tier guidance in a task belongs to the thread's
+SUBAGENT deployment instructions, not to the thread itself. For headless `--exec` handoffs,
+model/reasoning pins remain opt-in via the `CODEX_MODEL` / `CODEX_REASONING_EFFORT` environment
+variables (an explicit operator setting, passed only when set).
 
 ## Cross-session context
 
