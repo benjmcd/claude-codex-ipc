@@ -7,10 +7,10 @@
 // isolation evidence. It does not write SQLite, config, or proof artifacts.
 
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { pollRolloutForMarker } from "./codex_ipc_rollout_reader.mjs";
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_TIMEOUT_MS = 9000;
@@ -324,134 +324,6 @@ function sendMarkerTask(opts) {
   return parseJsonCommand(result, "IPC send");
 }
 
-function sleepSync(ms) {
-  const result = spawnSync(process.execPath, ["-e", `setTimeout(()=>{}, ${ms})`], {
-    encoding: "utf8",
-    timeout: ms + 1000,
-    windowsHide: true,
-  });
-  if (result.error) {
-    throw result.error;
-  }
-}
-
-function pollRolloutForMarker(rolloutPath, marker, pollMs, pollAttempts) {
-  const startedAt = new Date().toISOString();
-  const observations = [];
-  for (let attempt = 1; attempt <= pollAttempts; attempt += 1) {
-    const observation = inspectRolloutMarker(rolloutPath, marker);
-    observations.push({ attempt, ...observation });
-    if (observation.agentMarkerSeen && observation.taskCompleteAfterAgentMarker) {
-      return {
-        ok: true,
-        startedAt,
-        finishedAt: new Date().toISOString(),
-        attempts: attempt,
-        rolloutPath,
-        markerSha256: sha256(marker),
-        lastObservation: observation,
-      };
-    }
-    if (attempt < pollAttempts) {
-      sleepSync(pollMs);
-    }
-  }
-  return {
-    ok: false,
-    startedAt,
-    finishedAt: new Date().toISOString(),
-    attempts: pollAttempts,
-    rolloutPath,
-    markerSha256: sha256(marker),
-    lastObservation: observations.at(-1) || null,
-    warnings: [
-      "Marker proof did not reach agent response plus later task_complete within the poll window.",
-      "The turn may still be running; inspect the target rollout before deciding whether to retry.",
-    ],
-  };
-}
-
-function inspectRolloutMarker(rolloutPath, marker) {
-  if (!rolloutPath || !existsSync(rolloutPath)) {
-    return {
-      exists: false,
-      lineCount: 0,
-      agentMarkerSeen: false,
-      taskCompleteAfterAgentMarker: false,
-    };
-  }
-  const lines = readFileSync(rolloutPath, "utf8").split(/\r?\n/).filter(Boolean);
-  let lastAgentMarkerLine = null;
-  let lastUserMarkerLine = null;
-  let lastTaskCompleteLine = null;
-  let parseErrorCount = 0;
-  lines.forEach((line, index) => {
-    let item;
-    try {
-      item = JSON.parse(line);
-    } catch {
-      parseErrorCount += 1;
-      return;
-    }
-    const payload = item.payload || item;
-    const type = payload.type || item.type || null;
-    const role = payload.role || item.role || null;
-    const text = extractText(payload);
-    const lineNumber = index + 1;
-    if (text.includes(marker) && (type === "user_message" || role === "user")) {
-      lastUserMarkerLine = lineNumber;
-    }
-    if (
-      text.includes(marker) &&
-      (type === "agent_message" || role === "assistant" || type === "message")
-    ) {
-      lastAgentMarkerLine = lineNumber;
-    }
-    if (type === "task_complete") {
-      lastTaskCompleteLine = lineNumber;
-    }
-  });
-  return {
-    exists: true,
-    lineCount: lines.length,
-    parseErrorCount,
-    lastUserMarkerLine,
-    lastAgentMarkerLine,
-    lastTaskCompleteLine,
-    agentMarkerSeen: lastAgentMarkerLine !== null,
-    taskCompleteAfterAgentMarker:
-      lastAgentMarkerLine !== null &&
-      lastTaskCompleteLine !== null &&
-      lastTaskCompleteLine > lastAgentMarkerLine,
-  };
-}
-
-function extractText(payload) {
-  if (!payload || typeof payload !== "object") {
-    return "";
-  }
-  if (typeof payload.message === "string") {
-    return payload.message;
-  }
-  if (typeof payload.text === "string") {
-    return payload.text;
-  }
-  if (Array.isArray(payload.content)) {
-    return payload.content
-      .map((part) => {
-        if (typeof part === "string") {
-          return part;
-        }
-        if (part && typeof part.text === "string") {
-          return part.text;
-        }
-        return "";
-      })
-      .join(" ");
-  }
-  return "";
-}
-
 function compareSnapshots(before, after, opts) {
   const beforeHashes = before.db?.threads?.threadRowHashById || {};
   const afterHashes = after.db?.threads?.threadRowHashById || {};
@@ -692,7 +564,7 @@ async function main() {
   const before = snapshot(opts);
   const send = sendMarkerTask(opts);
   const rolloutPath = before.db?.threads?.target?.rolloutPath || inspect.summary.rolloutPath;
-  const rolloutProbe = pollRolloutForMarker(
+  const rolloutProbe = await pollRolloutForMarker(
     rolloutPath,
     opts.marker,
     opts.pollMs,
