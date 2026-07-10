@@ -14,6 +14,7 @@ done
 REAL_FIND="$(command -v find)"; REAL_SORT="$(command -v sort)"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 IPCROOT="$TMP/ipcroot"
+CODEX_IPC_SESSIONS_ROOT="$TMP/sessions"; export CODEX_IPC_SESSIONS_ROOT
 U1="11111111-1111-4111-8111-111111111111"; U2="22222222-2222-4222-8222-222222222222"
 
 PASS=0; FAIL=0

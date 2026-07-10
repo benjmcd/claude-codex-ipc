@@ -7,12 +7,20 @@ import {
   readRolloutFile,
 } from "./codex_ipc_rollout_reader.mjs";
 
-export const DEFAULT_OBSERVE_BUDGET_MS = 8000;
+// Retained-envelope census p90 was 17.78 s on 2026-07-10; keep bounded headroom above it.
+export const DEFAULT_OBSERVE_BUDGET_MS = 20000;
 export const DEFAULT_OBSERVE_INTERVAL_MS = 250;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function defaultSleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function serializeDiagnostic(item) {
+  return JSON.stringify(item).replace(
+    /[\u0000-\u001f\u007f-\u009f]/gu,
+    (character) => `\\u${character.codePointAt(0).toString(16).padStart(4, "0")}`,
+  );
 }
 
 function exactTaskBasename(text, basename) {
@@ -120,7 +128,7 @@ function usage() {
        [--rollout-path <explicit>] [--budget-ms <n>] [--interval-ms <n>]
 
 Environment:
-  CODEX_IPC_OBSERVE_BUDGET_MS    bounded observation budget (default 8000, PROVISIONAL)
+  CODEX_IPC_OBSERVE_BUDGET_MS    bounded observation budget (default 20000, measurement-informed)
   CODEX_IPC_OBSERVE_INTERVAL_MS  positive poll interval (default 250)`;
 }
 
@@ -221,11 +229,11 @@ async function main(argv) {
   try {
     const result = await observeRollout(parsed.options);
     for (const item of result.diagnostics) {
-      console.error(`ROLLOUT_DIAGNOSTIC ${JSON.stringify(item)}`);
+      console.error(`ROLLOUT_DIAGNOSTIC ${serializeDiagnostic(item)}`);
     }
     process.stdout.write(`${result.token}\n`);
   } catch (error) {
-    console.error(`ROLLOUT_DIAGNOSTIC ${JSON.stringify({ code: "observer-error", message: error.message })}`);
+    console.error(`ROLLOUT_DIAGNOSTIC ${serializeDiagnostic({ code: "observer-error", message: error.message })}`);
     process.stdout.write("rollout-unavailable\n");
   }
 }

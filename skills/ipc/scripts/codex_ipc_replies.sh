@@ -249,6 +249,18 @@ for entry in "${ENTRIES[@]}"; do
         printf '%s\t%s\t%s\t%s\t%s\t"%s"\n' "$when" "$thread" "$dispatch" "$bytes" "$path_source" "$(to_win "$p")"
         continue
     fi
+    reply_superseded=0
+    if [[ "$reply_readable" -eq 1 ]] && command -v node >/dev/null 2>&1 \
+        && [[ -f "$HARVESTER" && "$thread" != "filedrop" && -f "$task_path" && ! -L "$task_path" ]]; then
+        harvest_output=""
+        if harvest_output="$(node "$HARVESTER" --thread "$thread" --dispatch "$dispatch" \
+            --reply-path "$reply_path" --max-bytes "$MAX_BYTES" 2>&1)"; then
+            if printf '%s\n' "$harvest_output" \
+                | grep -Eq $'^REPLY_SUPERSEDED_WARNING\t'; then
+                reply_superseded=1
+            fi
+        fi
+    fi
     if [[ "$reply_readable" -eq 0 ]]; then
         source_kind="none"; reason="unavailable"; source_bytes=0; returned_bytes=0
         duplicate_count=0; boundary_mode="-"; body_base64=""
@@ -304,6 +316,9 @@ for entry in "${ENTRIES[@]}"; do
     fi
     echo "=== [$i] ${when} | thread: ${tlabel} | dispatch: ${dispatch} | source=reply-file | ${bytes} B"
     echo "    \"$(to_win "$p")\""
+    if [[ "$reply_superseded" -eq 1 ]]; then
+        echo "    [WARNING: REPLY-SUPERSEDED] Primary reply may be superseded; inspect the dispatch thread before relying on it."
+    fi
     if [[ "$bytes" -eq 0 ]]; then
         echo "    (empty — possibly mid-write or pending; re-run to refresh)"
     else

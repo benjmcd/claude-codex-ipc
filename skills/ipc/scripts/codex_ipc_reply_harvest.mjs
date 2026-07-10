@@ -11,6 +11,13 @@ import {
 const DEFAULT_MAX_BYTES = 4096;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+function serializeDiagnostic(item) {
+  return JSON.stringify(item).replace(
+    /[\u0000-\u001f\u007f-\u009f]/gu,
+    (character) => `\\u${character.codePointAt(0).toString(16).padStart(4, "0")}`,
+  );
+}
+
 function primaryReply(replyPath, maxBytes) {
   if (!replyPath) return null;
   let descriptor;
@@ -51,6 +58,33 @@ function none(reason, diagnostics = []) {
   };
 }
 
+function hasSupersessionMarker(text) {
+  if (typeof text !== "string") return false;
+  const firstLine = text.split("\n", 1)[0];
+  const withoutCr = firstLine.endsWith("\r") ? firstLine.slice(0, -1) : firstLine;
+  return withoutCr.replace(/^[ \t]+|[ \t]+$/gu, "") === "REPLY-SUPERSEDED";
+}
+
+function rolloutSupersedesReply(options) {
+  const threadId = String(options?.threadId || "").toLowerCase();
+  if (!UUID_RE.test(threadId)) return false;
+  const located = locateRollout({
+    threadId,
+    rolloutPath: options?.rolloutPath,
+    sessionsRoot: options?.sessionsRoot,
+  });
+  if (located.status !== "found") return false;
+  const correlator = createDispatchCorrelator(String(options?.dispatchId || ""));
+  const parsed = readRolloutFile(located.path, {
+    maxRecordBytes: options?.maxRecordBytes,
+    retainRecords: false,
+    onRecord: correlator.push,
+  });
+  if (!parsed.ok) return false;
+  const correlated = correlator.finish(parsed);
+  return correlated.status === "complete" && hasSupersessionMarker(correlated.text);
+}
+
 export function harvestDispatch(options) {
   const maxBytes = options?.maxBytes ?? DEFAULT_MAX_BYTES;
   if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0) {
@@ -58,7 +92,9 @@ export function harvestDispatch(options) {
   }
 
   const primary = primaryReply(options?.replyPath, maxBytes);
-  if (primary) return primary;
+  if (primary) {
+    return { ...primary, replySuperseded: rolloutSupersedesReply(options) };
+  }
 
   const threadId = String(options?.threadId || "").toLowerCase();
   if (!UUID_RE.test(threadId)) {
@@ -173,7 +209,7 @@ function parseArgs(argv) {
 
 function emitDiagnostics(items) {
   for (const item of items || []) {
-    console.error(`ROLLOUT_DIAGNOSTIC ${JSON.stringify(item)}`);
+    console.error(`ROLLOUT_DIAGNOSTIC ${serializeDiagnostic(item)}`);
   }
 }
 
@@ -188,6 +224,11 @@ function main(argv) {
     return;
   }
   const result = harvestDispatch(options);
+  if (result.replySuperseded) {
+    console.error(
+      "REPLY_SUPERSEDED_WARNING\tprimary reply may be superseded; inspect the dispatch thread before relying on it.",
+    );
+  }
   emitDiagnostics(result.diagnostics);
   const fields = [
     result.source,
