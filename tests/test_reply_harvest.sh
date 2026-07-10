@@ -362,8 +362,9 @@ OUT="$(CODEX_IPC_ROOT="$IPCROOT" CODEX_IPC_SESSIONS_ROOT="$SESSIONS" \
   CLAUDE_CODE_SESSION_ID="$SID" bash "$VIEWER" 2>&1)"; RC=$?
 after="$(manifest)"
 [[ $RC -eq 0 && "$before" == "$after" && "$OUT" == *"source=rollout-fallback"* \
+  && "$OUT" == *"reply files primary; rollouts are derived fallback"* \
   && "$OUT" == *"latest final"* && ! -e "$IPCROOT/$SID/$THREAD/1000000000-1-abcdef0123456789.reply.md" ]] \
-  && ok "rollout fallback is labeled, rendered, stdout-only, and read-only" \
+  && ok "rollout fallback is labeled, banner-corrected, stdout-only, and read-only" \
   || no "viewer rollout fallback (rc=$RC)"
 printf 'PRIMARY-CONFLICT' > "$IPCROOT/$SID/$THREAD/1000000000-1-abcdef0123456789.reply.md"
 OUT="$(CODEX_IPC_ROOT="$IPCROOT" CODEX_IPC_SESSIONS_ROOT="$SESSIONS" \
