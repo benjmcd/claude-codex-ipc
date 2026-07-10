@@ -32,6 +32,8 @@ jobs:
           bash -n tests/test_reply_view.sh
           bash -n tests/test_rollout_reader.sh
           bash -n tests/test_reply_harvest.sh
+          bash -n tests/test_session_inspect.sh
+          bash -n tests/test_router_contract.sh
           bash -n tests/scan_public_safety.sh
           bash -n install.sh
           bash -n uninstall.sh
@@ -74,6 +76,12 @@ jobs:
 
       - name: Hermetic dual-source reply-harvest tests
         run: bash tests/test_reply_harvest.sh
+
+      - name: Hermetic session-inspect tests
+        run: bash tests/test_session_inspect.sh
+
+      - name: Hermetic router-contract sentinel
+        run: bash tests/test_router_contract.sh
 
       - name: Static contract audit
         run: node skills/ipc/scripts/codex_ipc_contract_audit.mjs

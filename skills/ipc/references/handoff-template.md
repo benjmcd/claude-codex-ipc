@@ -16,7 +16,8 @@ Per the `/ipc` workspace-scoping rule, place the FILLED handoff inside the assoc
 - **Completion contract:** self-verification/self-validation is mandatory and runs BEFORE the
   reply is written; the reply (file and/or final message) is the LAST act of the turn — no work,
   amendment, or re-verification may follow it. If a post-reply amendment ever becomes
-  unavoidable, supersede explicitly: state `REPLY-SUPERSEDED` in a final message and overwrite
+  unavoidable, supersede explicitly: state `REPLY-SUPERSEDED` as the FIRST LINE of a final
+  message (the harvester's marker detection is first-line exact-token by design) and overwrite
   the same dispatch's reply file. KNOWN LIMITATION: reply viewing is file-primary by design, so
   if the overwrite is blocked (e.g. sandboxed turn), the superseding content is visible only via
   thread inspection (the final message), not via the reply viewer — a dispatcher acting on a

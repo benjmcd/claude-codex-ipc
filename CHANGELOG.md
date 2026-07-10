@@ -10,6 +10,37 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+## [0.1.4] — 2026-07-10
+
+Post-v0.1.3 hardening: adversarial-review follow-ups plus the R3 router-contract drift sentinel.
+
+### Added
+- `tests/test_router_contract.sh`: hermetic router-contract drift sentinel — snapshots the
+  `initialize` / `thread-follower-start-turn` request shapes via the client's dry-run CLI and
+  classifies canned `no-client-found` / acceptance / malformed responses through the wrapper's
+  stubbed-transport path, so a Desktop update that drifts the private contract turns CI red
+  before a live failure does. Sentineled vs excluded facets documented in the suite header.
+- `tests/test_session_inspect.sh`: hermetic session-inspector suite (temp fixture state; never
+  touches `~/.codex`; self-skips without `node:sqlite`).
+- Reply viewer/harvester surface a visible advisory when a correlated turn's final message
+  starts with `REPLY-SUPERSEDED` while a readable reply file exists (file stays primary;
+  machine-consumed output shapes unchanged).
+
+### Changed
+- `CODEX_IPC_OBSERVE_BUDGET_MS` default raised `8000` → `20000` ms, informed by a read-only
+  census of real dispatch→pickup latencies (auto-load recoveries dominate the tail; census is
+  same-machine and mostly idle-thread — documented caveat, still a bounded one-shot cap).
+- `codex_ipc_session_inspect.mjs`: `turn_aborted` now has terminal parity wherever
+  `task_complete` was treated as terminal (additive output fields; existing fields unchanged);
+  rollout candidate discovery canonicalizes Windows `\\?\` aliases, dedupes to physical
+  identity, and surfaces genuine multi-candidate ambiguity additively instead of silently
+  selecting the first candidate (DB-designated rollout remains the higher authority).
+- Harvest/observe diagnostics hex-escape C0/C1/ESC bytes before reaching stderr (stdout token
+  and body contracts unchanged).
+
+### Fixed
+- Session-inspector mid-turn inference no longer misreports an aborted turn as still active.
+
 ## [0.1.3] — 2026-07-09
 
 M2 milestone: dual-source reply harvesting and bounded rollout confirmation, built and verified

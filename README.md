@@ -74,7 +74,7 @@ Foreground-policy grammar and full operational rules: [skills/ipc/SKILL.md](skil
 | `CODEX_MODEL` / `CODEX_REASONING_EFFORT` | unset | `--exec` pins; passed only when set |
 | `CODEX_SESSION_ID` | unset | Target session for `--exec`/`--open` |
 | `CODEX_IPC_POLL_DEADLINE_S` / `_INTERVAL_S` | `30` / `2` | Auto-load retry poll (test knobs) |
-| `CODEX_IPC_OBSERVE_BUDGET_MS` | `8000` (provisional) | Hard cap for post-acceptance rollout observation |
+| `CODEX_IPC_OBSERVE_BUDGET_MS` | `20000` (measurement-informed) | Hard cap for post-acceptance rollout observation |
 | `CODEX_IPC_OBSERVE_INTERVAL_MS` | observer default | Positive observation interval override; invalid values warn and fall back |
 | `IPC_TOOLKIT_ROOT` | unset | Manual toolkit-root override (scripts self-locate otherwise) |
 
@@ -121,6 +121,6 @@ process can read and modify them). `--exec` output never appears in the Desktop 
 
 ## Status
 
-v0.1.3 · [MIT](LICENSE.md) · [benjmcd/claude-codex-ipc](https://github.com/benjmcd/claude-codex-ipc).
+v0.1.4 · [MIT](LICENSE.md) · [benjmcd/claude-codex-ipc](https://github.com/benjmcd/claude-codex-ipc).
 Re-run `codex_ipc_revalidate.mjs` after any Codex Desktop update. The live route and its bounded
 rollout observation remain experimental; `restore-if-known` remains fail-closed/unvalidated.
