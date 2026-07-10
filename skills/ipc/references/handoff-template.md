@@ -16,9 +16,18 @@ Per the `/ipc` workspace-scoping rule, place the FILLED handoff inside the assoc
 - **Completion contract:** self-verification/self-validation is mandatory and runs BEFORE the
   reply is written; the reply (file and/or final message) is the LAST act of the turn — no work,
   amendment, or re-verification may follow it. If a post-reply amendment ever becomes
-  unavoidable, supersede explicitly: state `REPLY-SUPERSEDED` in a final message and write a new
-  reply. Dispatcher side: a reply artifact's existence alone is NOT completion — classify the
-  lane finished only when the reply exists AND the thread's latest lifecycle event is a terminal
-  `task_complete` (no newer `task_started`), via read-only inspection. A reply file observed
-  while the turn is still open must be treated as provisional.
+  unavoidable, supersede explicitly: state `REPLY-SUPERSEDED` in a final message and overwrite
+  the same dispatch's reply file. KNOWN LIMITATION: reply viewing is file-primary by design, so
+  if the overwrite is blocked (e.g. sandboxed turn), the superseding content is visible only via
+  thread inspection (the final message), not via the reply viewer — a dispatcher acting on a
+  supersession signal must re-inspect the thread, not re-read the file. Dispatcher side: a reply
+  artifact's existence alone is NOT completion — classify the lane done only when the reply
+  exists AND the dispatch's OWN turn (the turn whose `user_message` carries this dispatch's task
+  marker; correlate by `turn_id` when present) reached `task_complete` without being superseded
+  by a newer `task_started` before its terminal. Never borrow a later, unrelated turn's terminal
+  to certify an earlier dispatch. `turn_aborted` on that turn is terminal-failed regardless of
+  reply existence (surface it, do not wait). Read-only inspection parsing event types (never
+  substring greps). A reply file observed while its turn is still open, or whose turn was
+  superseded, is provisional. One delegation = one reply; app-driven turns after the reply (goal
+  checks and similar) are supersession territory, found by re-inspection.
 - **Context:** the minimum background needed, plus links to prior state/worklog. Keep it minimal but sufficient.

@@ -176,15 +176,24 @@ that no pickup was observed within budget and must not cause an automatic resend
 ### Watch/status mode
 
 For `/ipc <conversationId>` with no task, report status only. For `watch`, repeat read-only
-inspection at a conservative interval and stop when the user-specified condition is met or when a
-clear `task_complete`/idle signal appears. Do not send during watch mode unless the user separately
-requests a send.
+inspection at a conservative interval and stop when the user-specified condition is met, when a
+terminal lifecycle event appears (`task_complete` or `turn_aborted`), or when the watch loop's
+own timeout elapses (a bail-out stop condition, not evidence of completion). Do not send during
+watch mode unless the user separately requests a send.
 
 When waiting for delegated work, a reply file's existence alone is NOT completion: Codex can
-write the reply mid-turn and keep working (e.g. final re-verification). Classify a delegation
-finished only when the reply artifact exists AND the thread's latest lifecycle event is a
-terminal `task_complete` with no newer `task_started` (read-only inspection). Compose handoffs
-with the completion contract in
+write the reply mid-turn and keep working (e.g. final re-verification). Scope the check to the
+dispatch's OWN turn — the turn whose `user_message` carries this dispatch's task marker
+(correlate by `turn_id` when present), not merely the thread's latest event. Classify the
+delegation done only when the reply artifact exists AND that same turn reached `task_complete`
+without being superseded (no newer `task_started` opened before its terminal). A superseded
+turn is provisional/unavailable for this dispatch — never borrow a later, unrelated turn's
+terminal to certify it. `turn_aborted` on the dispatch's own turn is terminal-failed regardless
+of whether a reply was written (stop waiting; surface any reply as unverified, not a hang).
+Read-only inspection only; parse event types, never substring-grep (which also matches inside
+tool output). One delegation produces one reply: app-driven turns after the reply (e.g. goal
+checks) are supersession territory, discovered by re-inspection, not by watching forever.
+Compose handoffs with the completion contract in
 [references/handoff-template.md](references/handoff-template.md): self-verify BEFORE writing the
 reply; the reply is the last act of the turn.
 
