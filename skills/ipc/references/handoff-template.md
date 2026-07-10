@@ -34,4 +34,6 @@ Per the `/ipc` workspace-scoping rule, place the FILLED handoff inside the assoc
   substring greps). A reply file observed while its turn is still open, or whose turn was
   superseded, is provisional. One delegation = one reply; app-driven turns after the reply (goal
   checks and similar) are supersession territory, found by re-inspection.
+  The sanctioned dispatcher-side mechanical check for this prose contract is
+  `scripts/codex_ipc_wait.mjs`.
 - **Context:** the minimum background needed, plus links to prior state/worklog. Keep it minimal but sufficient.
