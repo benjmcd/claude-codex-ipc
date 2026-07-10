@@ -1,0 +1,8 @@
+{"timestamp":"2026-07-09T02:00:00.000Z","type":"session_meta","payload":{"id":"33333333-3333-4333-8333-333333333333"}}
+{"timestamp":"2026-07-09T02:00:01.000Z","type":"event_msg","payload":{"type":"task_started","turn_id":"00000000-0000-4000-8000-000000000000"}}
+{"timestamp":"2026-07-09T02:00:02.000Z","type":"event_msg","payload":{"type":"user_message","message":"read \"C:/synthetic/5000000000-5-abcdef0123456789.task.md\" and proceed"}}
+{"timestamp":"2026-07-09T02:00:03.000Z","type":"event_msg","payload":{"type":"agent_message","message":"must not escape","phase":"final_answer"}}
+{"timestamp":"2026-07-09T02:00:04.000Z","type":"event_msg","payload":{"type":"task_started","turn_id":"00000000-0000-4000-8000-00000000c0de"}}
+{"timestamp":"2026-07-09T02:00:05.000Z","type":"event_msg","payload":{"type":"user_message","message":"ordinary next turn"}}
+{"timestamp":"2026-07-09T02:00:06.000Z","type":"event_msg","payload":{"type":"agent_message","message":"next body","phase":"final_answer"}}
+{"timestamp":"2026-07-09T02:00:07.000Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"00000000-0000-4000-8000-00000000c0de","last_agent_message":"next body"}}

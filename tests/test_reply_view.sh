@@ -36,7 +36,10 @@ reset; RUNARGS=(--session ghost); run CLAUDE_CODE_SESSION_ID=ghost
 
 echo "== T3 tasks-only =="
 reset; mktask s3 filedrop d1; mktask s3 filedrop d2; RUNARGS=(); run CLAUDE_CODE_SESSION_ID=s3
-[[ $RC -eq 0 ]] && printf '%s' "$OUT" | grep -q "Showing 0 of 0" && printf '%s' "$OUT" | grep -q "2 dispatch(es) awaiting" && ok "tasks-only -> 0 replies + 2 awaiting" || no "tasks-only (rc=$RC)"
+[[ $RC -eq 0 ]] && printf '%s' "$OUT" | grep -q "Showing 2 of 2" \
+  && [[ "$(printf '%s' "$OUT" | grep -c 'source=none | reason=unavailable')" -eq 2 ]] \
+  && printf '%s' "$OUT" | grep -q "2 dispatch(es) awaiting primary" \
+  && ok "tasks-only -> 2 visible unavailable fallbacks + 2 awaiting primary" || no "tasks-only (rc=$RC)"
 
 echo "== T4 mtime beats filename order =="
 reset
@@ -58,19 +61,24 @@ printf '%s' "$OUT" | grep -q "FD" && printf '%s' "$OUT" | grep -q "T1" && printf
 
 echo "== T7 -c filter + D4b absent-thread =="
 reset; mkreply s7 "$U1" d1 1000 "ONE"; mkreply s7 "$U2" d2 2000 "TWO"
+mkdir -p "$IPCROOT/s7/$U1/$U2"; printf 'NESTED-OTHER-THREAD' > "$IPCROOT/s7/$U1/$U2/nested.reply.md"
 RUNARGS=(-c "$U1"); run CLAUDE_CODE_SESSION_ID=s7
-printf '%s' "$OUT" | grep -q "ONE" && ! printf '%s' "$OUT" | grep -q "TWO" && ok "-c narrows to one thread" || no "-c filter"
+printf '%s' "$OUT" | grep -q "ONE" && ! printf '%s' "$OUT" | grep -q "TWO" \
+  && ! printf '%s' "$OUT" | grep -q "NESTED-OTHER-THREAD" \
+  && ok "-c narrows to one exact thread depth" || no "-c filter/depth"
 RUNARGS=(-c "$U2"); run CLAUDE_CODE_SESSION_ID=s7; printf '%s' "$OUT" | grep -q "TWO" && ! printf '%s' "$OUT" | grep -q "ONE" && ok "-c filedrop-vs-uuid isolation" || no "-c isolation"
 RUNARGS=(-c not-a-uuid); run CLAUDE_CODE_SESSION_ID=s7; [[ $RC -eq 1 ]] && ok "-c bad token -> exit 1" || no "-c bad token (rc=$RC)"
 RUNARGS=(-c "33333333-3333-4333-8333-333333333333"); run CLAUDE_CODE_SESSION_ID=s7; [[ $RC -eq 0 ]] && printf '%s' "$OUT" | grep -q "No thread" && ok "D4b: -c well-formed-but-absent -> exit 0 + message" || no "D4b (rc=$RC)"
 
-echo "== T8 exclusion: temp sibling, task.md, directory named *.reply.md =="
+echo "== T8 exclusion: temp sibling and directory; retained task remains visible =="
 reset; mkreply s8 filedrop d1 2000 "REAL"
 printf 'partial' > "$IPCROOT/s8/filedrop/d1.reply.md.AbC123"   # atomic_write temp sibling
 mktask s8 filedrop d9
 mkdir -p "$IPCROOT/s8/filedrop/dir.reply.md"                    # a DIRECTORY named *.reply.md (D3)
 RUNARGS=(); run CLAUDE_CODE_SESSION_ID=s8
-[[ $RC -eq 0 ]] && printf '%s' "$OUT" | grep -q "Showing 1 of 1" && ! printf '%s' "$OUT" | grep -q "AbC123" && ok "temp sibling + task.md + *.reply.md dir all excluded" || no "exclusion (rc=$RC)"
+[[ $RC -eq 0 ]] && printf '%s' "$OUT" | grep -q "Showing 2 of 2" \
+  && ! printf '%s' "$OUT" | grep -q "AbC123" && printf '%s' "$OUT" | grep -q "dispatch: d9 | source=none" \
+  && ok "temp sibling + *.reply.md dir excluded; retained task surfaced" || no "exclusion (rc=$RC)"
 
 echo "== T9 zero-byte reply =="
 reset; mkreply s9 filedrop d1 2000 ""
@@ -144,6 +152,10 @@ RUNARGS=(--session "nosid-1-2-abc"); run CLAUDE_CODE_SESSION_ID=envS; printf '%s
 echo "== T18 traversal guard =="
 reset; t18=0; for bad in "../other" "a/b" "." ".."; do RUNARGS=(--session "$bad"); run CLAUDE_CODE_SESSION_ID=x; [[ $RC -eq 1 ]] || { t18=1; echo "    (--session '$bad' gave rc=$RC)"; }; done
 [[ $t18 -eq 0 ]] && ok "traversal/dot-name sessions all -> exit 1" || no "T18 some not rejected"
+mkdir -p "$TMP/outside/filedrop"; printf 'ENV-TRAVERSAL-SENTINEL' > "$TMP/outside/filedrop/d1.reply.md"
+RUNARGS=(); run CLAUDE_CODE_SESSION_ID="../outside"
+[[ $RC -eq 1 ]] && ! printf '%s' "$OUT" | grep -q 'ENV-TRAVERSAL-SENTINEL' \
+  && ok "environment-derived session traversal -> exit 1" || no "T18 environment traversal (rc=$RC)"
 
 echo "== T19 malformed root (newline) =="
 reset; RUNARGS=(--session s1); OUT="$( CODEX_IPC_ROOT="$IPCROOT"$'\n'"x" CLAUDE_CODE_SESSION_ID=s1 bash "$SCRIPT" --session s1 2>&1 )"; RC=$?
@@ -159,12 +171,38 @@ reset; mkreply s21 filedrop d1 2000 "NODEP"
 RUNARGS=(); run CLAUDE_CODE_SESSION_ID=s21 PATH="/usr/bin:/bin"
 [[ $RC -eq 0 ]] && printf '%s' "$OUT" | grep -q "NODEP" && ok "works with minimal PATH (no node/codex)" || no "T21 (rc=$RC)"
 
+echo "== T22 control-byte-safe rendering, including no-Node path =="
+reset; mkdir -p "$IPCROOT/s22/filedrop"
+printf 'SAFE\tUTF8:\342\230\203\nNUL:\000 ESC:\033[31m CR:\r BS:\b C1:\302\205 BAD:\377' > "$IPCROOT/s22/filedrop/d1.reply.md"
+RUNARGS=(); run CLAUDE_CODE_SESSION_ID=s22
+if [[ $RC -eq 0 ]] && printf '%s' "$OUT" | grep -Fq 'SAFE' \
+    && printf '%s' "$OUT" | grep -Fq 'UTF8:' \
+    && printf '%s' "$OUT" | grep -Fq $'UTF8:\342\230\203' \
+    && printf '%s' "$OUT" | grep -Fq '\x00' \
+    && printf '%s' "$OUT" | grep -Fq '\x1B' \
+    && printf '%s' "$OUT" | grep -Fq '\x0D' \
+    && printf '%s' "$OUT" | grep -Fq '\x08' \
+    && printf '%s' "$OUT" | grep -Fq '\u{0085}' \
+    && printf '%s' "$OUT" | grep -Fq '\xFF'; then
+  ok "reply body controls and invalid UTF-8 are visible and inert"
+else no "T22 safe renderer output (rc=$RC)"; fi
+RUNARGS=(); run CLAUDE_CODE_SESSION_ID=s22 PATH="/usr/bin:/bin"
+[[ $RC -eq 0 ]] && printf '%s' "$OUT" | grep -Fq '\x1B' && printf '%s' "$OUT" | grep -Fq '\xFF' \
+  && ok "safe primary rendering still works without Node" || no "T22 no-Node safe renderer (rc=$RC)"
+
 echo "== Static audit: no write/lock idioms =="
 if grep -nE 'mkdir|mktemp|[^-]mv |[^_]rm |touch |-delete|flock|>>?[^&].*IPC_ROOT' "$SCRIPT" | grep -v '^\s*#' >/dev/null 2>&1; then
   no "static audit: found a write/lock idiom (review grep hits)"; grep -nE 'mkdir|mktemp|mv |rm |touch |-delete|flock' "$SCRIPT" | grep -v '^\s*#'
 else ok "static audit: no mkdir/mktemp/mv/rm/touch/-delete/flock in the viewer"; fi
+if grep -nE '^[[:space:]]*head -c .*"\$p"' "$SCRIPT" >/dev/null 2>&1; then
+  no "static audit: raw reply body path still reaches stdout"
+elif grep -q 'codex_ipc_safe_render.sh' "$SCRIPT"; then
+  ok "static audit: reply body is gated by the shared renderer"
+else
+  no "static audit: shared renderer is not wired"
+fi
 
-echo "== T22 FINAL GATE: wrapper untouched + test_ipc green + syntax =="
+echo "== T23 FINAL GATE: wrapper untouched + test_ipc green + syntax =="
 if [[ -f "$DIR/handoff_to_codex.sh.orig" ]]; then :; fi
 bash -n "$SCRIPT" && ok "bash -n codex_ipc_replies.sh clean" || no "syntax error in viewer"
 ( cd "$DIR" && bash test_ipc.sh >/dev/null 2>&1 ) && ok "wrapper harness test_ipc.sh still ALL GREEN" || no "test_ipc.sh regressed"
