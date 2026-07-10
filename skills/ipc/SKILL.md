@@ -180,6 +180,14 @@ inspection at a conservative interval and stop when the user-specified condition
 clear `task_complete`/idle signal appears. Do not send during watch mode unless the user separately
 requests a send.
 
+When waiting for delegated work, a reply file's existence alone is NOT completion: Codex can
+write the reply mid-turn and keep working (e.g. final re-verification). Classify a delegation
+finished only when the reply artifact exists AND the thread's latest lifecycle event is a
+terminal `task_complete` with no newer `task_started` (read-only inspection). Compose handoffs
+with the completion contract in
+[references/handoff-template.md](references/handoff-template.md): self-verify BEFORE writing the
+reply; the reply is the last act of the turn.
+
 ## New-session mode
 
 No UUID means there is not yet a proven IPC target. Resolve the intended workspace first.
