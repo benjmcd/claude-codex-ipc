@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+
+### Changed
+
+### Fixed
+
+## [0.1.3] — 2026-07-09
+
+M2 milestone: dual-source reply harvesting and bounded rollout confirmation, built and verified
+by two isolated implementation lanes against the final verified spec (GO_WITH_CONDITIONS; all
+gating conditions resolved at integration).
+
+### Added
 - Bounded post-acceptance rollout confirmation for both live-send success branches:
   `rollout-hit`, `rollout-pending`, or `rollout-unavailable`. Accepted sends remain
   `gui-delivered`; observation failures map to unavailable without resend.
