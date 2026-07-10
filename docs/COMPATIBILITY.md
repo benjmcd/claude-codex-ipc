@@ -98,3 +98,9 @@ whatever its current product branding.
 | Date | Observed change | IPC consequence |
 |---|---|---|
 | 2026-07-09 | GUI executable renamed `Codex.exe` → `ChatGPT.exe` ("ChatGPT desktop app, Codex mode"); package family unchanged (`OpenAI.Codex_2p2nqsd0c76g0`, observed at 26.707.3563.0); headless `resources\codex.exe` child unchanged; `codex://`, `\\.\pipe\codex-ipc`, router methods, and `~/.codex` state all unchanged | Name-only foreground detection failed open; fixed by positive path/package identity in `codex_ipc_autoload.ps1` (fail-closed on ambiguity) and a package-based `desktopVersionHint` in `codex_ipc_revalidate.mjs`. Transport unchanged — no client/pipe/scheme changes needed |
+
+### Verified live write-proof entries
+
+| Date | Build proven | What was proven | Notes |
+|---|---|---|---|
+| 2026-07-09 | `OpenAI.Codex 26.707.3748.0` (post-merge, post-update), codex-ipc v0.1.2 | Operator-approved single-marker proof against an operator-designated idle thread: validate-only revalidation green; initialize-only router re-proof (uint32le framing, response received); live defer-while-foreground observed on the real code path (merged-host identity, exit 2, nothing fired); wrapper `--ipc` delivery on an unowned thread — `no-client-found` → `codex://` auto-load + focus snapback → `RESULT: gui-delivered -- reason=auto-loaded`; marker task confirmed in the correct thread's rollout, agent echoed the marker verbatim, `task_complete` logged, reply file written back through the correlation channel | `codex_ipc_write_proof.mjs` sends over the pipe directly and has **no unowned-thread auto-load recovery**: on an unloaded thread it fails closed at `no-client-found` (nothing delivered — verified). Load the thread first (wrapper auto-load or manual `codex://threads/<id>`), or use the wrapper for the delivery leg |
