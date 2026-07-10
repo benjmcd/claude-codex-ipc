@@ -5,6 +5,7 @@ import path from "node:path";
 
 export const DEFAULT_MAX_RECORD_BYTES = 24 * 1024 * 1024;
 const READ_CHUNK_BYTES = 256 * 1024;
+const CONTENT_ANCHOR_BYTES = 4096;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const EVENT_TYPES = new Set([
@@ -161,6 +162,22 @@ function fileIdentity(filePath, stat, exactStat) {
   };
 }
 
+function readContentAnchor(descriptor, endOffset) {
+  const length = Math.min(CONTENT_ANCHOR_BYTES, endOffset);
+  const offset = endOffset - length;
+  const buffer = Buffer.allocUnsafe(length);
+  let total = 0;
+  while (total < length) {
+    const bytesRead = fs.readSync(descriptor, buffer, total, length - total, offset + total);
+    if (bytesRead === 0) throw new Error("content anchor became unreadable");
+    total += bytesRead;
+  }
+  return {
+    endOffset,
+    sha256: createHash("sha256").update(buffer).digest("hex"),
+  };
+}
+
 function failure(filePath, reason, diagnostics = [], extra = {}) {
   return {
     ok: false,
@@ -223,6 +240,28 @@ export function readRolloutFile(filePath, options = {}) {
         previousSize: previous.size,
         size: initialStat.size,
       }),
+    ]);
+  }
+
+  let initialAnchor;
+  try {
+    initialAnchor = readContentAnchor(descriptor, initialStat.size);
+    if (previous?.anchorSha256) {
+      const previousAnchor = readContentAnchor(descriptor, previous.anchorEndOffset);
+      if (previousAnchor.sha256 !== previous.anchorSha256) {
+        fs.closeSync(descriptor);
+        return failure(filePath, "file-replaced", [
+          diagnostic("content-anchor-changed", {
+            path: filePath,
+            anchorEndOffset: previous.anchorEndOffset,
+          }),
+        ]);
+      }
+    }
+  } catch (error) {
+    fs.closeSync(descriptor);
+    return failure(filePath, "unreadable", [
+      diagnostic("anchor-read-error", { path: filePath, message: error.message }),
     ]);
   }
 
@@ -348,6 +387,8 @@ export function readRolloutFile(filePath, options = {}) {
   const chunk = Buffer.allocUnsafe(READ_CHUNK_BYTES);
   let fatalResult = null;
   let finalDescriptorStat = null;
+  let finalInitialAnchor = null;
+  let cursorAnchor = null;
   try {
     while (fatalResult === null) {
       if (now() >= deadlineAt) {
@@ -400,6 +441,10 @@ export function readRolloutFile(filePath, options = {}) {
   } finally {
     try {
       finalDescriptorStat = fs.fstatSync(descriptor);
+      if (finalDescriptorStat.size >= initialStat.size && finalDescriptorStat.size >= position) {
+        finalInitialAnchor = readContentAnchor(descriptor, initialStat.size);
+        cursorAnchor = readContentAnchor(descriptor, position);
+      }
     } catch {
       finalDescriptorStat = null;
     }
@@ -420,6 +465,15 @@ export function readRolloutFile(filePath, options = {}) {
         initialSize: initialStat.size,
         finalSize: finalDescriptorStat.size,
         byteOffset: position,
+      }),
+    ], { records, parseErrorCount });
+  }
+  if (!finalInitialAnchor || finalInitialAnchor.sha256 !== initialAnchor.sha256) {
+    return failure(filePath, "file-replaced", [
+      ...diagnostics,
+      diagnostic("content-anchor-changed", {
+        path: filePath,
+        anchorEndOffset: initialAnchor.endOffset,
       }),
     ], { records, parseErrorCount });
   }
@@ -455,6 +509,8 @@ export function readRolloutFile(filePath, options = {}) {
     partialStart: pendingStart,
     lastTimestamp: previousTimestamp,
     firstRecordSeen,
+    anchorEndOffset: cursorAnchor.endOffset,
+    anchorSha256: cursorAnchor.sha256,
   };
   return {
     ok: true,
