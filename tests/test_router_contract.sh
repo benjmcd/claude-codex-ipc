@@ -19,15 +19,24 @@ set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-CLIENT="$ROOT/skills/ipc/scripts/codex_ipc_client.mjs"
-WRAPPER="$ROOT/skills/ipc/scripts/handoff_to_codex.sh"
+# Dual-layout probe: repo layout (tests/ beside skills/ipc/) and installed-skill layout
+# (tests/ inside the skill root, scripts/ as sibling).
+CLIENT=""
+WRAPPER=""
+for _scripts in "$ROOT/skills/ipc/scripts" "$ROOT/scripts"; do
+    if [[ -f "$_scripts/codex_ipc_client.mjs" && -f "$_scripts/handoff_to_codex.sh" ]]; then
+        CLIENT="$_scripts/codex_ipc_client.mjs"
+        WRAPPER="$_scripts/handoff_to_codex.sh"
+        break
+    fi
+done
 NODE_BIN="$(command -v node 2>/dev/null || true)"
 
 if [[ -z "$NODE_BIN" ]]; then
   echo "SKIP: node is unavailable; router-contract sentinel not applicable"
   exit 0
 fi
-if [[ ! -f "$CLIENT" || ! -f "$WRAPPER" ]]; then
+if [[ -z "$CLIENT" || -z "$WRAPPER" ]]; then
   echo "SKIP: client or wrapper is absent; router-contract sentinel not applicable"
   exit 0
 fi
