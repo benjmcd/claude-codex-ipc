@@ -579,7 +579,22 @@ function correlateDispatchWindow(parsed, dispatchId) {
       continue;
     }
     if (record.payloadType === "user_message") {
-      if (current && !current.terminal) current.userMessages.push(record);
+      if (current && !current.terminal) {
+        // A user message whose turn id disagrees with its enclosing turn breaks the correlation
+        // authority: the dispatch marker would be attributed to a turn that never carried it, and
+        // that turn's final answer would be served as this dispatch's reply. Record it as a
+        // boundary error so every consumer refuses rather than guessing.
+        if (current.turnId && record.turnId && current.turnId !== record.turnId) {
+          current.boundaryErrors.push(
+            diagnostic("user-message-turn-id-mismatch", {
+              line: record.line,
+              expectedTurnId: current.turnId,
+              messageTurnId: record.turnId,
+            }),
+          );
+        }
+        current.userMessages.push(record);
+      }
       continue;
     }
     if (record.payloadType === "agent_message") {

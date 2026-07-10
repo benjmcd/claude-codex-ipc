@@ -429,6 +429,26 @@ if (drift.payloadType !== "unknown\u009bshape") process.exit(1);
 NODE
 }
 
+echo "== Wrong-turn final answer is never served as a dispatch reply =="
+# Regression (audit A-05): the shared correlator accepted a user_message whose turn_id disagreed
+# with its enclosing turn, so the harvester attributed THAT turn's final answer to this dispatch.
+# `wait` refused; the viewer did not. Both must refuse.
+MISMATCH="$TMP/rollout-mismatch-33333333-3333-4333-8333-333333333333.jsonl"
+cat >"$MISMATCH" <<'JSONL'
+{"type":"session_meta","payload":{"id":"33333333-3333-4333-8333-333333333333"}}
+{"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-A"}}
+{"type":"event_msg","payload":{"type":"user_message","turn_id":"turn-B","message":"read C:/x/mismatch-dispatch.task.md and proceed"}}
+{"type":"event_msg","payload":{"type":"agent_message","turn_id":"turn-A","phase":"final_answer","message":"WRONG-TURN-FINAL"}}
+{"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-A","last_agent_message":"WRONG-TURN-FINAL"}}
+JSONL
+MM_OUT="$(node "$HARVESTER" --thread 33333333-3333-4333-8333-333333333333 \
+  --dispatch mismatch-dispatch --rollout-path "$MISMATCH" \
+  --reply-path "$TMP/absent-mismatch.md" 2>/dev/null)"; MM_RC=$?
+WRONG_B64="$(printf 'WRONG-TURN-FINAL' | base64 | tr -d '\n=')"
+[[ $MM_RC -eq 0 ]] && [[ "$MM_OUT" == none* ]] && ! printf '%s' "$MM_OUT" | grep -q "$WRONG_B64" \
+  && ok "harvester refuses a final answer from a turn that never carried the dispatch marker" \
+  || no "harvester served a wrong-turn final (rc=$MM_RC out=$(printf '%s' "$MM_OUT" | cut -c1-80))"
+
 echo "== Observer CLI contract =="
 BASIC="$FIXTURES/rollout-basic-11111111-1111-4111-8111-111111111111.jsonl"
 ERR="$TMP/observer.err"

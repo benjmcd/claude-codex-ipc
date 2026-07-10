@@ -239,6 +239,14 @@ fi
 # guess another session's transcript (that was a cross-session cross-talk vector).
 CLAUDE_SID="${CLAUDE_SESSION_ID:-${CLAUDE_CODE_SESSION_ID:-}}"
 if [[ -n "$CLAUDE_SID" ]]; then
+    # Containment: the session id becomes a path segment under the transport root, so it must be
+    # exactly one safe segment. A separator, a dot segment, a drive letter, or a control byte
+    # would place the envelope outside CODEX_IPC_ROOT. Fail closed rather than sanitize: a
+    # rewritten id would silently split one session's channel in two.
+    if [[ "$CLAUDE_SID" == *".."* ]] || [[ ! "$CLAUDE_SID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]; then
+        echo "ERROR: refusing unsafe session id: must be one path segment matching [A-Za-z0-9][A-Za-z0-9._-]{0,127} and contain no '..'." >&2
+        exit 1
+    fi
     SID_INJECTED=1
 else
     SID_INJECTED=0

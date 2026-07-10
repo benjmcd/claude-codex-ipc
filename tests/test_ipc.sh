@@ -408,6 +408,22 @@ fgrun --ipc "$UUIDF" "t29 no observation"
     && ok "failed send remains not-attempted with no observer" || no "observer ran before acceptance (rc=$RC)"
 assert_tax "t29"
 
+echo "== 30. injected session id is contained to one segment under the transport root =="
+# Regression: CLAUDE_SESSION_ID becomes a path segment, so a dot segment or separator wrote the
+# envelope OUTSIDE CODEX_IPC_ROOT (audit A-02). Fail closed; never sanitize silently.
+SIDROOT="$TMP/sidroot"; mkdir -p "$SIDROOT/root"
+sid_run(){ ( cd "$NOREPO" && CODEX_IPC_ROOT="$SIDROOT/root" CLAUDE_SESSION_ID="$1" bash "$SCRIPT" "sid containment" >/dev/null 2>&1 ); }
+esc=0
+for bad in '../escape' '..' 'a/b' 'a\b' '/abs'; do
+    sid_run "$bad" && esc=1
+done
+[[ $esc -eq 0 ]] && ok "unsafe session ids fail closed" || no "an unsafe session id was accepted"
+[[ -z "$(find "$SIDROOT" -name '*.task.md' -not -path "$SIDROOT/root/*" 2>/dev/null)" ]] \
+    && ok "no envelope escaped the transport root" || no "envelope written outside CODEX_IPC_ROOT"
+sid_run "00000000-0000-4000-8000-000000000000" \
+    && [[ -n "$(find "$SIDROOT/root" -name '*.task.md' 2>/dev/null)" ]] \
+    && ok "a normal session id still writes under the root" || no "valid session id rejected"
+
 assert_no_codex_exec_fallback
 
 echo ""
