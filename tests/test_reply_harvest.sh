@@ -212,6 +212,36 @@ await test("observer preserves a hit parsed before hard-deadline expiry", async 
   assert.equal(result.token, "rollout-hit");
 });
 
+await test("observer rejects admission from an integrity-failed read", async () => {
+  const target = path.join(tmp, "rollout-observer-rewrite-11111111-1111-4111-8111-111111111111.jsonl");
+  fs.copyFileSync(basic, target);
+  const originalSize = fs.statSync(target).size;
+  const originalRead = fs.readSync;
+  let injected = false;
+  fs.readSync = function injectedRead(descriptor, ...args) {
+    const bytesRead = originalRead.call(fs, descriptor, ...args);
+    if (!injected && bytesRead > 0 && args[2] > 4096) {
+      injected = true;
+      fs.writeFileSync(target, Buffer.alloc(originalSize, 0x20));
+    }
+    return bytesRead;
+  };
+  let now = 0;
+  let result;
+  try {
+    result = await observeRollout({
+      threadId: "11111111-1111-4111-8111-111111111111",
+      dispatchId: dispatch,
+      rolloutPath: target,
+      budgetMs: 1,
+      intervalMs: 1,
+    }, { now: () => now, sleep: async (ms) => { now += ms; } });
+  } finally {
+    fs.readSync = originalRead;
+  }
+  assert.equal(result.token, "rollout-unavailable");
+});
+
 await test("observer distinguishes pending from unavailable with fake time", async () => {
   let now = 0;
   const deps = {

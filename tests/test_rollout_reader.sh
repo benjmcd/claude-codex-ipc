@@ -213,7 +213,7 @@ test("same-identity shrink during an active read is fail-visible", () => {
   assert.ok(result.diagnostics.some((item) => item.code === "file-truncated"));
 });
 
-test("same-identity truncate and regrow with changed content is fail-visible", () => {
+test("same-identity rewrite at the cursor boundary is fail-visible", () => {
   const target = path.join(tmp, "rollout-midread-regrow-00000000-0000-4000-8000-000000000000.jsonl");
   fs.copyFileSync(basicPath, target);
   const originalSize = fs.statSync(target).size;
@@ -258,6 +258,7 @@ test("reader enforces an injected hard elapsed deadline", () => {
   });
   assert.equal(result.ok, false);
   assert.equal(result.reason, "deadline-exceeded");
+  assert.equal(result.integrityValidated, true);
 });
 
 test("malformed complete line inside a target turn is unparseable", () => {
@@ -516,6 +517,31 @@ await test("poller uses injected in-process time without child sleeps", async ()
   });
   assert.equal(proof.ok, true);
   assert.equal(sleeps, 0);
+});
+
+await test("poller rejects records from an integrity-failed read", async () => {
+  const target = path.join(tmp, "rollout-proof-rewrite-00000000-0000-4000-8000-000000000000.jsonl");
+  fs.copyFileSync(basicPath, target);
+  const originalSize = fs.statSync(target).size;
+  const originalRead = fs.readSync;
+  let injected = false;
+  fs.readSync = function injectedRead(descriptor, ...args) {
+    const bytesRead = originalRead.call(fs, descriptor, ...args);
+    if (!injected && bytesRead > 0 && args[2] > 4096) {
+      injected = true;
+      fs.writeFileSync(target, Buffer.alloc(originalSize, 0x20));
+    }
+    return bytesRead;
+  };
+  let proof;
+  try {
+    proof = await pollRolloutForMarker(target, "latest final", 10, 1);
+  } finally {
+    fs.readSync = originalRead;
+  }
+  assert.equal(proof.ok, false);
+  assert.equal(proof.lastObservation.error, "file-replaced");
+  assert.equal(proof.lastObservation.agentMarkerSeen, false);
 });
 
 await test("poller reads only appended records and stops at its bounded deadline", async () => {

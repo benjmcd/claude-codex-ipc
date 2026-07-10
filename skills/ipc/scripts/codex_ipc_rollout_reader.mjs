@@ -181,6 +181,7 @@ function readContentAnchor(descriptor, endOffset) {
 function failure(filePath, reason, diagnostics = [], extra = {}) {
   return {
     ok: false,
+    integrityValidated: false,
     path: filePath,
     reason,
     records: extra.records || [],
@@ -450,7 +451,7 @@ export function readRolloutFile(filePath, options = {}) {
     }
     fs.closeSync(descriptor);
   }
-  if (fatalResult) return fatalResult;
+  if (fatalResult && fatalResult.reason !== "deadline-exceeded") return fatalResult;
   if (!finalDescriptorStat) {
     return failure(filePath, "unreadable", [
       ...diagnostics,
@@ -499,6 +500,9 @@ export function readRolloutFile(filePath, options = {}) {
       }),
     ], { records, parseErrorCount });
   }
+  if (fatalResult) {
+    return { ...fatalResult, integrityValidated: true };
+  }
   const cursor = {
     identityKey: identity.key,
     canonicalPath: identity.canonicalPath,
@@ -514,6 +518,7 @@ export function readRolloutFile(filePath, options = {}) {
   };
   return {
     ok: true,
+    integrityValidated: true,
     path: filePath,
     records,
     diagnostics,
@@ -1107,17 +1112,28 @@ export async function pollRolloutForMarker(
 
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     if (attempt > 1 && now() >= deadlineAt) break;
+    const attemptMarkerState = { ...markerState };
     const parsed = readRolloutFile(rolloutPath, {
       ...(cursor ? { cursor } : {}),
       deadlineAt,
       now,
       retainRecords: false,
-      onRecord: (item) => applyMarkerRecord(markerState, item, marker),
+      onRecord: (item) => applyMarkerRecord(attemptMarkerState, item, marker),
     });
     attemptsMade = attempt;
-    if (parsed.ok) cursor = parsed.cursor;
+    const trustedRead = parsed.ok || (
+      parsed.reason === "deadline-exceeded" && parsed.integrityValidated
+    );
+    if (trustedRead) {
+      if (parsed.ok) cursor = parsed.cursor;
+      Object.assign(markerState, attemptMarkerState);
+    }
     lastObservation = updateMarkerState(markerState, parsed, marker);
-    if (lastObservation.agentMarkerSeen && lastObservation.taskCompleteAfterAgentMarker) {
+    if (
+      trustedRead &&
+      lastObservation.agentMarkerSeen &&
+      lastObservation.taskCompleteAfterAgentMarker
+    ) {
       return {
         ok: true,
         startedAt,

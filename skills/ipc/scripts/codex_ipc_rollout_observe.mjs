@@ -86,7 +86,10 @@ export async function observeRollout(options, injected = {}) {
         },
       });
       diagnostics.push(...(parsed.diagnostics || []));
-      if (admission) {
+      const trustedRead = parsed.ok || (
+        parsed.reason === "deadline-exceeded" && parsed.integrityValidated
+      );
+      if (trustedRead && admission) {
         return { token: "rollout-hit", diagnostics };
       }
       if (parsed.ok) {
