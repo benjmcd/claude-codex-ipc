@@ -15,15 +15,23 @@
 # CODEX_IPC_WAIT_INTERVAL_MS; flags override env.
 # stdout EXACTLY one line, one token: done | aborted | superseded |
 # reply-missing | pending | unavailable.
-# Semantics: done = reply file exists+readable (regular, non-symlink) AND the
-# dispatch's OWN turn (user_message carrying <dispatchId>.task.md basename;
-# turn_id-primary correlation) reached task_complete un-superseded. aborted =
-# own turn turn_aborted (regardless of reply presence). superseded = own turn
-# superseded (newer task_started before its terminal); a later unrelated turn's
-# terminal must NEVER certify. reply-missing = own turn task_complete
-# un-superseded but reply absent/unreadable. pending = no determination yet at
+# Semantics: done = a readable regular non-symlink reply file (including a
+# zero-byte one) AND the dispatch's OWN turn (user_message carrying
+# <dispatchId>.task.md basename; turn_id-primary correlation) reached
+# task_complete un-superseded. aborted = own turn turn_aborted (regardless of
+# reply presence). superseded = own turn superseded (newer task_started before
+# its terminal); a later unrelated turn's terminal must NEVER certify.
+# reply-missing = own turn task_complete un-superseded but reply
+# absent/unreadable/present-invalid. pending = no determination yet at
 # single-shot or budget expiry. unavailable = no authoritative rollout candidate
 # / ambiguity (rollout or reply scan) / schema failure.
+# D2 opt-in (--accept-rollout-fallback): ONLY when the reply file is genuinely
+# ABSENT does a completed own turn whose verified rollout body matches its
+# terminal certify done from the rollout store (replySource=rollout-fallback,
+# surfaced as one stderr WAIT_DIAGNOSTIC reply-source; stdout stays one token;
+# the recovered body is NEVER emitted). A present-but-invalid reply (symlink,
+# non-regular, unreadable) never falls through. An absent/empty/mismatched body
+# stays reply-missing. Flagless v0.1.6 stays file-primary and byte-identical.
 # Diagnostics stderr only; exit 0 for every determination, nonzero only usage
 # errors; no daemon; import side-effect-free; Node builtins only, node:sqlite
 # forbidden.
@@ -421,6 +429,51 @@ if (( ELAPSED_MS < 3000 )); then
 else
   no "malformed interval fallback exceeded the wall-time bound (${ELAPSED_MS}ms)"
 fi
+
+echo "== 4b. D2 opt-in rollout fallback (--accept-rollout-fallback) =="
+# New fallback fixtures per the A1 test-correctness constraint: an agent_message.phase=final_answer
+# followed by a MATCHING task_complete.last_agent_message. A genuinely-absent reply is
+# fallback-eligible under the flag; the flagless path and a present-invalid reply are not.
+write_done_body(){
+  write_prefix "$1"
+  printf '%s\n' "{\"type\":\"event_msg\",\"payload\":{\"type\":\"agent_message\",\"message\":\"recovered body\",\"phase\":\"final_answer\"}}" >>"$1"
+  printf '%s\n' "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"$OWN_TURN\",\"last_agent_message\":\"recovered body\"}}" >>"$1"
+}
+
+CASE="$TMP/fallback-flagless"; mkdir -p "$CASE"; write_done_body "$CASE/rollout-$THREAD.jsonl"
+run_case "$CASE" --rollout-path "$CASE/rollout-$THREAD.jsonl" --reply-path "$CASE/absent.reply.md"
+assert_token reply-missing "flagless: a verified rollout body does not certify a genuinely-absent reply"
+
+run_case "$CASE" --rollout-path "$CASE/rollout-$THREAD.jsonl" --reply-path "$CASE/absent.reply.md" \
+  --accept-rollout-fallback
+assert_token done "opt-in: a verified rollout body certifies done when the reply is absent"
+if grep -Fxq 'WAIT_DIAGNOSTIC {"code":"reply-source","source":"rollout-fallback"}' "$ERR_FILE"; then
+  ok "opt-in fallback emits exactly one rollout-fallback source diagnostic"
+else
+  no "opt-in fallback source diagnostic missing"; dump_output
+fi
+if ! grep -q "recovered body" "$OUT_FILE" "$ERR_FILE"; then
+  ok "the recovered body is never emitted on stdout or stderr"
+else
+  no "the recovered body leaked into output"; dump_output
+fi
+
+CASE="$TMP/fallback-zerobyte"; mkdir -p "$CASE"; write_done_body "$CASE/rollout-$THREAD.jsonl"
+: >"$CASE/zero.reply.md"
+run_case "$CASE" --rollout-path "$CASE/rollout-$THREAD.jsonl" --reply-path "$CASE/zero.reply.md" \
+  --accept-rollout-fallback
+assert_token done "a readable zero-byte primary reply certifies done"
+if grep -Fxq 'WAIT_DIAGNOSTIC {"code":"reply-source","source":"reply-file"}' "$ERR_FILE"; then
+  ok "a zero-byte primary reports reply-file (not rollout-fallback) as the source"
+else
+  no "zero-byte primary source diagnostic wrong"; dump_output
+fi
+
+CASE="$TMP/fallback-present-invalid"; mkdir -p "$CASE"; write_done_body "$CASE/rollout-$THREAD.jsonl"
+mkdir -p "$CASE/dir.reply.md"
+run_case "$CASE" --rollout-path "$CASE/rollout-$THREAD.jsonl" --reply-path "$CASE/dir.reply.md" \
+  --accept-rollout-fallback
+assert_token reply-missing "a present-invalid reply never falls through to the rollout fallback"
 
 echo "== 5. process, import, and dependency boundaries =="
 OUT_FILE="$TMP/import.stdout"; ERR_FILE="$TMP/import.stderr"

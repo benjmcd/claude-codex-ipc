@@ -394,6 +394,33 @@ function main() {
         ok: contains("scripts/codex_ipc_revalidate.mjs", "scripts/codex_ipc_write_proof.mjs"),
       },
     ], "Live write re-proof still starts a real turn and must remain explicit/operator-approved."),
+    check("REQ-018", "Producer denied-reply protocol: one attempt, no retry, full result in the final agent message.", [
+      {
+        label: "handoff scaffold instructs one attempt, no retry, and the full result in the final message",
+        file: "scripts/handoff_to_codex.sh",
+        ok:
+          contains("scripts/handoff_to_codex.sh", "attempt to write the printed reply path exactly once") &&
+          contains("scripts/handoff_to_codex.sh", "do NOT retry") &&
+          contains("scripts/handoff_to_codex.sh", "the full substantive result") &&
+          contains("scripts/handoff_to_codex.sh", "A one-line denial with no result is a contract violation"),
+      },
+      {
+        label: "SKILL.md documents the denied-reply producer protocol and the opt-in recovery path",
+        file: "SKILL.md",
+        ok:
+          contains("SKILL.md", "Producer denied-reply protocol") &&
+          contains("SKILL.md", "the full substantive result") &&
+          contains("SKILL.md", "--accept-rollout-fallback"),
+      },
+      {
+        label: "handoff template carries the denied-reply completion obligation",
+        file: "references/handoff-template.md",
+        ok:
+          contains("references/handoff-template.md", "Denied reply write") &&
+          contains("references/handoff-template.md", "attempt to write the printed reply path exactly once") &&
+          contains("references/handoff-template.md", "the full substantive result"),
+      },
+    ], "Static prose lock only: it proves the mandatory instruction bytes are present, not that a follower runtime honored them."),
   ];
 
   const ok = Object.values(files).every((item) => item.ok) &&

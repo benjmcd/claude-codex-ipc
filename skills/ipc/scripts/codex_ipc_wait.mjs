@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import {
+  createDispatchCorrelator,
   DEFAULT_MAX_RECORD_BYTES,
   locateRollout,
   readRolloutFile,
@@ -26,177 +27,14 @@ function defaultSleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function exactTaskBasename(text, basename) {
-  if (typeof text !== "string" || !text.includes(basename)) return false;
-  let offset = text.indexOf(basename);
-  while (offset !== -1) {
-    const before = offset === 0 ? "" : text[offset - 1];
-    const after = text[offset + basename.length] || "";
-    if ((before === "" || /[\\/"'\s]/.test(before)) && (after === "" || /["'\s]/.test(after))) {
-      return true;
-    }
-    offset = text.indexOf(basename, offset + 1);
-  }
-  return false;
-}
-
-function makeTurn(record, sequence) {
-  return {
-    sequence,
-    turnId: record.turnId,
-    startLine: record.line,
-    terminal: null,
-    userMessages: [],
-    parseErrors: [],
-    boundaryErrors: [],
-    superseded: false,
-  };
-}
-
-function classifyDispatch(records, parserDiagnostics, dispatchId) {
-  const basename = dispatchId.endsWith(".task.md") ? dispatchId : `${dispatchId}.task.md`;
-  const turns = [];
-  const explicit = new Map();
-  let current = null;
-  let sequence = 0;
-
-  for (const record of records) {
-    if (record.parseError) {
-      if (current && !current.terminal) current.parseErrors.push(record);
-      continue;
-    }
-    if (record.envelopeType !== "event_msg") continue;
-    if (record.payloadType === "task_started") {
-      if (current && !current.terminal) current.superseded = true;
-      const turn = makeTurn(record, sequence++);
-      turns.push(turn);
-      current = turn;
-      if (turn.turnId) explicit.set(turn.turnId, turn);
-      continue;
-    }
-    if (record.payloadType === "user_message") {
-      if (current && !current.terminal) {
-        if (current.turnId && record.turnId && current.turnId !== record.turnId) {
-          current.boundaryErrors.push({
-            code: "user-message-turn-id-mismatch",
-            line: record.line,
-            expectedTurnId: current.turnId,
-            messageTurnId: record.turnId,
-          });
-        }
-        current.userMessages.push(record);
-      }
-      continue;
-    }
-    if (record.payloadType !== "task_complete" && record.payloadType !== "turn_aborted") {
-      continue;
-    }
-
-    let turn;
-    if (record.turnId) {
-      turn = explicit.get(record.turnId);
-      if (!turn && current?.turnId) {
-        current.boundaryErrors.push({
-          code: "terminal-turn-id-mismatch",
-          line: record.line,
-          expectedTurnId: current.turnId,
-          terminalTurnId: record.turnId,
-        });
-      } else if (!turn && current) {
-        current.boundaryErrors.push({
-          code: "terminal-turn-id-unexpected",
-          line: record.line,
-          terminalTurnId: record.turnId,
-        });
-      }
-    } else if (current?.turnId) {
-      current.boundaryErrors.push({
-        code: "terminal-turn-id-missing",
-        line: record.line,
-        expectedTurnId: current.turnId,
-      });
-      continue;
-    } else {
-      turn = current;
-    }
-    if (!turn || turn.terminal) continue;
-    turn.terminal = record;
-    if (current === turn) current = null;
-  }
-
-  const occurrences = [];
-  for (const turn of turns) {
-    const markers = turn.userMessages.filter((item) => exactTaskBasename(item.text, basename));
-    for (const marker of markers) {
-      const laterUsers = turn.userMessages.filter((item) => item.line > marker.line);
-      const inWindowErrors = turn.parseErrors.filter(
-        (item) => item.line > marker.line && (!turn.terminal || item.line < turn.terminal.line),
-      );
-      const inWindowSchemaDrift = parserDiagnostics.filter(
-        (item) =>
-          item.code === "schema-drift" &&
-          item.line > turn.startLine &&
-          (!turn.terminal || item.line < turn.terminal.line),
-      );
-      let outcome;
-      if (turn.superseded) {
-        outcome = {
-          status: "superseded",
-          diagnostics: [{ code: "turn-superseded", line: turn.startLine, turnId: turn.turnId }],
-        };
-      } else if (turn.boundaryErrors.length > 0) {
-        outcome = { status: "unavailable", diagnostics: turn.boundaryErrors };
-      } else if (inWindowErrors.length > 0) {
-        outcome = {
-          status: "unavailable",
-          diagnostics: inWindowErrors.map((item) => ({ code: "malformed-json", ...item })),
-        };
-      } else if (!turn.turnId && laterUsers.length > 0) {
-        // Ambiguity rule of the ORDERED-EVENT FALLBACK only. When the turn carries a turn_id,
-        // its boundaries are already unambiguous, so a later user message inside the same turn
-        // (e.g. the operator typing into the thread while the lane works) is not ambiguity.
-        outcome = {
-          status: "unavailable",
-          diagnostics: [{ code: "intervening-user-message", line: laterUsers[0].line }],
-        };
-      } else if (inWindowSchemaDrift.length > 0) {
-        outcome = { status: "unavailable", diagnostics: inWindowSchemaDrift };
-      } else if (!turn.terminal) {
-        outcome = { status: "pending", diagnostics: [] };
-      } else if (turn.terminal.payloadType === "turn_aborted") {
-        outcome = { status: "aborted", diagnostics: [] };
-      } else {
-        outcome = { status: "complete", diagnostics: [] };
-      }
-      occurrences.push({
-        ...outcome,
-        markerLine: marker.line,
-        terminalLine: turn.terminal?.line || null,
-      });
-    }
-  }
-
-  const completed = occurrences
-    .filter((item) => item.status === "complete")
-    .sort((left, right) => (left.terminalLine || 0) - (right.terminalLine || 0));
-  if (completed.length > 0) return completed.at(-1);
-
-  const unavailable = occurrences.find((item) => item.status === "unavailable");
-  if (unavailable) return unavailable;
-  const pending = occurrences.find((item) => item.status === "pending");
-  if (pending) return pending;
-  if (occurrences.length > 0) {
-    return occurrences.sort((left, right) => left.markerLine - right.markerLine).at(-1);
-  }
-
-  const schemaFailure = records.some((item) => item.parseError) ||
-    parserDiagnostics.some((item) => item.code === "schema-drift");
-  return {
-    status: schemaFailure ? "unavailable" : "pending",
-    diagnostics: schemaFailure
-      ? parserDiagnostics.filter((item) => item.code === "schema-drift" || item.code === "malformed-json")
-      : [],
-  };
+// Wait's dispatch lifecycle is a thin projection over the ONE shared boundary machine: it drives
+// createDispatchCorrelator over the already-located, integrity-validated in-memory record snapshot
+// and reads the correlator's `.lifecycle` (status/diagnostics/certifiable). It reimplements no
+// start/terminal/id/supersession rule — the removed classifyDispatch was that duplicate machine.
+function dispatchLifecycle(records, parserDiagnostics, dispatchId) {
+  const correlator = createDispatchCorrelator(dispatchId);
+  for (const record of records) correlator.push(record);
+  return correlator.finish({ ok: true, diagnostics: parserDiagnostics }).lifecycle;
 }
 
 function replyPathResolution(options) {
@@ -371,10 +209,26 @@ function resolveCompletion(lifecycle, options) {
     }
     return { token: "pending", diagnostics: lifecycle.diagnostics };
   }
+  // lifecycle.status === "complete": the dispatch's own turn reached task_complete un-superseded.
   if (resolution.status === "ambiguous" || resolution.status === "unavailable") {
     return { token: "unavailable", diagnostics };
   }
-  return { token: reply.valid ? "done" : "reply-missing", diagnostics };
+  if (reply.valid) {
+    // Reply file is primary. A readable regular file (including a zero-byte one) certifies done.
+    return { token: "done", replySource: "reply-file", diagnostics };
+  }
+  // A present-but-invalid reply (symlink, non-regular, unreadable, changed) never falls through to
+  // the rollout fallback; only a genuinely-absent reply is fallback-eligible.
+  if (reply.present) {
+    return { token: "reply-missing", diagnostics };
+  }
+  // Reply genuinely absent. Under the D2 opt-in, a same-snapshot verified body certifies done from
+  // the rollout store; flagless v0.1.6 stays file-primary. Absent/empty/mismatched body stays
+  // reply-missing. The recovered body is NEVER emitted.
+  if (options.acceptRolloutFallback && lifecycle.certifiable) {
+    return { token: "done", replySource: "rollout-fallback", diagnostics };
+  }
+  return { token: "reply-missing", diagnostics };
 }
 
 export async function waitForCompletion(options, injected = {}) {
@@ -435,10 +289,14 @@ export async function waitForCompletion(options, injected = {}) {
         cursor = parsed.cursor;
       }
 
-      const lifecycle = classifyDispatch(records, diagnostics, options.dispatchId);
+      const lifecycle = dispatchLifecycle(records, diagnostics, options.dispatchId);
       const resolved = resolveCompletion(lifecycle, options);
       if (lifecycle.status !== "pending" || resolved.token === "unavailable") {
-        return { token: resolved.token, diagnostics: [...diagnostics, ...resolved.diagnostics] };
+        return {
+          token: resolved.token,
+          diagnostics: [...diagnostics, ...resolved.diagnostics],
+          replySource: resolved.replySource,
+        };
       }
       if (!parsed.ok) break;
     }
@@ -455,9 +313,13 @@ export async function waitForCompletion(options, injected = {}) {
   if (!readableCandidate && !deadlineOnlyReadFailure) {
     return { token: "unavailable", diagnostics };
   }
-  const lifecycle = classifyDispatch(records, diagnostics, options.dispatchId);
+  const lifecycle = dispatchLifecycle(records, diagnostics, options.dispatchId);
   const resolved = resolveCompletion(lifecycle, options);
-  return { token: resolved.token, diagnostics: [...diagnostics, ...resolved.diagnostics] };
+  return {
+    token: resolved.token,
+    diagnostics: [...diagnostics, ...resolved.diagnostics],
+    replySource: resolved.replySource,
+  };
 }
 
 function serializeDiagnostic(item) {
@@ -478,6 +340,9 @@ Options:
   --sessions-root <path>    Rollout locator root (default ~/.codex/sessions).
   --budget-ms <n>           0 (default) is single-shot; positive values poll to budget.
   --interval-ms <n>         Positive poll interval (default 250).
+  --accept-rollout-fallback D2 opt-in: when the reply file is genuinely absent, a completed own
+                            turn whose verified rollout body matches its terminal certifies done
+                            (replySource=rollout-fallback). Flagless mode stays file-primary.
 
 Environment:
   CODEX_IPC_WAIT_BUDGET_MS    same validation as --budget-ms; flag wins
@@ -520,11 +385,15 @@ export function parseWaitArgs(argv, env = process.env) {
     sessionsRoot: null,
     budgetMs: undefined,
     intervalMs: undefined,
+    acceptRolloutFallback: false,
   };
 
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     switch (arg) {
+      case "--accept-rollout-fallback":
+        raw.acceptRolloutFallback = true;
+        break;
       case "--thread":
         raw.threadId = takeValue(argv, ++index, arg);
         break;
@@ -594,6 +463,7 @@ export function parseWaitArgs(argv, env = process.env) {
         "wait interval",
         warnings,
       ),
+      acceptRolloutFallback: raw.acceptRolloutFallback,
       maxRecordBytes: DEFAULT_MAX_RECORD_BYTES,
     },
   };
@@ -615,6 +485,14 @@ async function main(argv) {
     const result = await waitForCompletion(parsed.options);
     for (const item of result.diagnostics) {
       console.error(`WAIT_DIAGNOSTIC ${serializeDiagnostic(item)}`);
+    }
+    // Opt-in provenance: in --accept-rollout-fallback mode, surface which source certified a done
+    // (reply-file or rollout-fallback) as exactly one stderr diagnostic. The recovered body is
+    // never emitted; stdout remains exactly the one determination token.
+    if (parsed.options.acceptRolloutFallback && result.replySource) {
+      console.error(
+        `WAIT_DIAGNOSTIC ${serializeDiagnostic({ code: "reply-source", source: result.replySource })}`,
+      );
     }
     process.stdout.write(`${result.token}\n`);
   } catch (error) {

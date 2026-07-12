@@ -29,10 +29,12 @@ const api = await import(pathToFileURL(process.env.MODULE));
 const {
   DEFAULT_MAX_RECORD_BYTES,
   correlateDispatch,
+  createTurnBoundaryAccumulator,
   inspectRolloutMarker,
   locateRollout,
   pollRolloutForMarker,
   readRolloutFile,
+  summarizeThreadActivity,
 } = api;
 
 let passed = 0;
@@ -586,6 +588,166 @@ test("A-05 guard: user-message turn-id mismatch refuses to serve a wrong-turn bo
   assert.equal(result.status, "none");
   assert.equal(result.reason, "unparseable");
   assert.ok(result.diagnostics.some((item) => item.code === "user-message-turn-id-mismatch"));
+});
+
+// ---- A1 transition matrix: exact 8-key snapshots through both adapters -------------------------
+const SNAP_KEYS = [
+  "activity", "boundaryMode", "diagnostics", "sequence",
+  "superseded", "terminalLine", "terminalType", "turnId",
+];
+const meta = { type: "session_meta", payload: { id: "00000000-0000-4000-8000-000000000000" } };
+const ev = (type, extra = {}) => ({ type: "event_msg", payload: { type, ...extra } });
+const writeAndRead = (name, records) => {
+  const target = path.join(tmp, `rollout-tm-${name}-00000000-0000-4000-8000-000000000000.jsonl`);
+  fs.writeFileSync(target, `${records.map((r) => JSON.stringify(r)).join("\n")}\n`);
+  return readRolloutFile(target);
+};
+const snapshotsOf = (parsed) => {
+  const acc = createTurnBoundaryAccumulator();
+  const out = [];
+  for (const record of parsed.records || []) out.push(...acc.push(record).snapshots);
+  out.push(...acc.finish(parsed.diagnostics));
+  return out;
+};
+
+test("transition matrix: explicit-id complete emits one closed 8-key snapshot through both adapters", () => {
+  const records = [
+    meta,
+    ev("task_started", { turn_id: "turn-x" }),
+    ev("user_message", { turn_id: "turn-x", message: "read C:/x/tm1-1-abcdef0123456789.task.md and proceed" }),
+    ev("agent_message", { message: "final body", phase: "final_answer" }),
+    ev("task_complete", { turn_id: "turn-x", last_agent_message: "final body" }),
+  ];
+  const parsed = writeAndRead("complete", records);
+  const snaps = snapshotsOf(parsed);
+  assert.equal(snaps.length, 1);
+  assert.deepEqual(Object.keys(snaps[0]).sort(), SNAP_KEYS);
+  assert.equal(snaps[0].sequence, 0);
+  assert.equal(snaps[0].turnId, "turn-x");
+  assert.equal(snaps[0].boundaryMode, "turn-id");
+  assert.equal(snaps[0].activity, "closed");
+  assert.equal(snaps[0].terminalType, "task_complete");
+  assert.equal(typeof snaps[0].terminalLine, "number");
+  assert.equal(snaps[0].superseded, false);
+  assert.deepEqual(snaps[0].diagnostics, []);
+  assert.equal(correlateDispatch(parsed, "tm1-1-abcdef0123456789").status, "complete");
+  assert.equal(summarizeThreadActivity(snaps.at(-1), "found").turnActivity, "closed");
+});
+
+test("transition matrix: ordered-fallback terminal is closed with ordered-fallback boundaryMode", () => {
+  const records = [
+    meta,
+    ev("task_started"),
+    ev("user_message", { message: "read C:/x/tm2-2-abcdef0123456789.task.md and proceed" }),
+    ev("agent_message", { message: "ordered body", phase: "final_answer" }),
+    ev("task_complete", { last_agent_message: "ordered body" }),
+  ];
+  const parsed = writeAndRead("ordered", records);
+  const snaps = snapshotsOf(parsed);
+  assert.equal(snaps.length, 1);
+  assert.equal(snaps[0].turnId, null);
+  assert.equal(snaps[0].boundaryMode, "ordered-fallback");
+  assert.equal(snaps[0].activity, "closed");
+  assert.equal(correlateDispatch(parsed, "tm2-2-abcdef0123456789").boundaryMode, "ordered-fallback");
+});
+
+test("transition matrix: user turn-id mismatch is an ambiguous snapshot with a boundary diagnostic", () => {
+  const records = [
+    meta,
+    ev("task_started", { turn_id: "turn-a" }),
+    ev("user_message", { turn_id: "turn-b", message: "read C:/x/tm3-3-abcdef0123456789.task.md and proceed" }),
+    ev("task_complete", { turn_id: "turn-a", last_agent_message: null }),
+  ];
+  const parsed = writeAndRead("mismatch", records);
+  const snaps = snapshotsOf(parsed);
+  assert.equal(snaps[0].activity, "ambiguous");
+  assert.ok(snaps[0].diagnostics.some((d) => d.code === "user-message-turn-id-mismatch"));
+  assert.equal(summarizeThreadActivity(snaps.at(-1), "found").turnActivity, "ambiguous");
+  assert.equal(correlateDispatch(parsed, "tm3-3-abcdef0123456789").reason, "unparseable");
+});
+
+test("transition matrix: supersession emits an ambiguous prior turn and an open latest turn", () => {
+  const records = [
+    meta,
+    ev("task_started", { turn_id: "turn-a" }),
+    ev("user_message", { turn_id: "turn-a", message: "read C:/x/tm4-4-abcdef0123456789.task.md and proceed" }),
+    ev("task_started", { turn_id: "turn-b" }),
+    ev("user_message", { turn_id: "turn-b", message: "unrelated" }),
+  ];
+  const snaps = snapshotsOf(writeAndRead("supersede", records));
+  assert.equal(snaps.length, 2);
+  assert.equal(snaps[0].superseded, true);
+  assert.equal(snaps[0].activity, "ambiguous");
+  assert.equal(snaps[1].superseded, false);
+  assert.equal(snaps[1].activity, "open");
+  assert.equal(summarizeThreadActivity(snaps.at(-1), "found").turnActivity, "open");
+});
+
+test("transition matrix: an in-turn parse gap is an ambiguous snapshot", () => {
+  const target = path.join(tmp, "rollout-tm-parsegap-00000000-0000-4000-8000-000000000000.jsonl");
+  const lines = [
+    meta,
+    ev("task_started", { turn_id: "turn-g" }),
+    ev("user_message", { turn_id: "turn-g", message: "read C:/x/tm5-5-abcdef0123456789.task.md and proceed" }),
+  ].map((r) => JSON.stringify(r));
+  fs.writeFileSync(
+    target,
+    `${lines.join("\n")}\n{bad json}\n${JSON.stringify(ev("task_complete", { turn_id: "turn-g", last_agent_message: null }))}\n`,
+  );
+  const snaps = snapshotsOf(readRolloutFile(target));
+  assert.equal(snaps[0].activity, "ambiguous");
+  assert.ok(snaps[0].diagnostics.some((d) => d.code === "malformed-json"));
+});
+
+test("transition matrix: turn_aborted terminal is a closed snapshot with terminalType turn_aborted", () => {
+  const records = [
+    meta,
+    ev("task_started", { turn_id: "turn-x" }),
+    ev("user_message", { turn_id: "turn-x", message: "read C:/x/tm6-6-abcdef0123456789.task.md and proceed" }),
+    ev("turn_aborted", { turn_id: "turn-x" }),
+  ];
+  const snaps = snapshotsOf(writeAndRead("aborted", records));
+  assert.equal(snaps[0].terminalType, "turn_aborted");
+  assert.equal(snaps[0].activity, "closed");
+});
+
+test("zero-snapshot: a found rollout with no emitted boundary maps to ambiguous without null-deref", () => {
+  const records = [meta, { type: "event_msg", payload: { type: "token_count", info: { total: 1 } } }];
+  const snaps = snapshotsOf(writeAndRead("zerosnap", records));
+  assert.equal(snaps.length, 0);
+  assert.equal(summarizeThreadActivity(snaps.at(-1), "found").turnActivity, "ambiguous");
+  assert.equal(summarizeThreadActivity(null, "found").turnActivity, "ambiguous");
+  assert.equal(summarizeThreadActivity({ activity: "closed" }, "unavailable").turnActivity, "ambiguous");
+  assert.equal(summarizeThreadActivity({ activity: "closed" }, "ambiguous").turnActivity, "ambiguous");
+});
+
+// ---- Harvester correlation deltas (RED-before at base b2aec66, GREEN after A1) -----------------
+test("delta: a later same-turn-id user no longer defeats correlation", () => {
+  const records = [
+    meta,
+    ev("task_started", { turn_id: "turn-a" }),
+    ev("user_message", { turn_id: "turn-a", message: "read C:/x/tm7-7-abcdef0123456789.task.md and proceed" }),
+    ev("user_message", { turn_id: "turn-a", message: "one more note" }),
+    ev("agent_message", { message: "same-turn body", phase: "final_answer" }),
+    ev("task_complete", { turn_id: "turn-a", last_agent_message: "same-turn body" }),
+  ];
+  const result = correlateDispatch(writeAndRead("sameturn", records), "tm7-7-abcdef0123456789");
+  assert.equal(result.status, "complete");
+  assert.equal(result.text, "same-turn body");
+});
+
+test("delta: a non-null agent-message turn-id that disagrees fails closed as none", () => {
+  const records = [
+    meta,
+    ev("task_started", { turn_id: "turn-a" }),
+    ev("user_message", { turn_id: "turn-a", message: "read C:/x/tm8-8-abcdef0123456789.task.md and proceed" }),
+    ev("agent_message", { turn_id: "turn-b", message: "wrong-turn body", phase: "final_answer" }),
+    ev("task_complete", { turn_id: "turn-a", last_agent_message: "wrong-turn body" }),
+  ];
+  const result = correlateDispatch(writeAndRead("agentmismatch", records), "tm8-8-abcdef0123456789");
+  assert.equal(result.status, "none");
+  assert.equal(result.reason, "unparseable");
+  assert.ok(result.diagnostics.some((d) => d.code === "agent-message-turn-id-mismatch"));
 });
 
 // ---- Pending RED fixtures (opt-in via IPC_RED_PENDING=1) ----------------------------------

@@ -208,6 +208,16 @@ Compose handoffs with the completion contract in
 [references/handoff-template.md](references/handoff-template.md): self-verify BEFORE writing the
 reply; the reply is the last act of the turn.
 
+Producer denied-reply protocol (a denied reply write is EXPECTED, not an error): the generated
+payload instructs the follower to self-verify, then attempt the printed reply path exactly once. On
+a sandbox/permission denial the follower must NOT retry, debug, request escalation, or substitute
+another file — it states the denial in one line AND puts the full substantive result (not just the
+denial) in its final agent message, then completes. A one-line denial with no result is a contract
+violation. On the dispatcher side, a full final message is recoverable only via the opt-in
+`codex_ipc_wait.mjs --accept-rollout-fallback` path on a known-UUID `--ipc` dispatch (it certifies
+`done` with `replySource=rollout-fallback`); flagless v0.1.6 stays file-primary and filedrop is not
+auto-recoverable. Dispatch never changes the target thread's model, reasoning, sandbox, or approval.
+
 ## New-session mode
 
 No UUID means there is not yet a proven IPC target. Resolve the intended workspace first.

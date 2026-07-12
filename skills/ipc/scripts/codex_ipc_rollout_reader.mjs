@@ -542,66 +542,154 @@ function exactTaskBasename(text, basename) {
   return false;
 }
 
-function makeTurn(record, sequence) {
-  return {
-    sequence,
-    turnId: record.turnId,
-    boundaryMode: record.turnId ? "turn-id" : "ordered-fallback",
-    startLine: record.line,
-    terminal: null,
-    userMessages: [],
-    agentMessages: [],
-    parseErrors: [],
-    boundaryErrors: [],
-    superseded: false,
-  };
+// ---------------------------------------------------------------------------
+// Single shared turn-boundary state machine (A1).
+//
+// createTurnBoundaryAccumulator() is the ONLY boundary machine in the tooling.
+// It is I/O-free and text-free: it consumes normalized records and emits
+// immutable per-turn snapshots carrying EXACTLY the eight boundary fields below
+// and no marker/text/lastAgentMessage/body/reply/source/verdict material. It
+// alone owns start/current-turn selection, explicit-id and ordered-fallback
+// binding, terminal binding, supersession, and parser/schema-gap attribution.
+// Both consumers are thin projections over its snapshots: createDispatchCorrelator
+// (A1 dispatch correlation) and summarizeThreadActivity (A4 thread activity).
+// ---------------------------------------------------------------------------
+
+const BOUNDARY_ERROR_CODES = new Set([
+  "user-message-turn-id-mismatch",
+  "agent-message-turn-id-mismatch",
+  "terminal-turn-id-mismatch",
+  "terminal-turn-id-unexpected",
+  "terminal-turn-id-missing",
+]);
+
+function buildTurnSnapshot(turn) {
+  const diagnostics = [...turn.boundaryErrors];
+  if (turn.superseded) {
+    diagnostics.push(diagnostic("turn-superseded", { line: turn.startLine, turnId: turn.turnId }));
+  }
+  for (const line of turn.parseErrorLines) {
+    diagnostics.push(diagnostic("malformed-json", { line }));
+  }
+  if (turn.schemaGap) {
+    diagnostics.push(diagnostic("schema-drift", { turnId: turn.turnId }));
+  }
+  const parseGap = turn.parseErrorLines.length > 0 || turn.schemaGap;
+  let activity;
+  if (turn.superseded || turn.boundaryErrors.length > 0 || parseGap) {
+    activity = "ambiguous";
+  } else if (turn.terminalType) {
+    activity = "closed";
+  } else {
+    activity = "open";
+  }
+  return Object.freeze({
+    sequence: turn.sequence,
+    turnId: turn.turnId,
+    boundaryMode: turn.boundaryMode,
+    activity,
+    terminalType: turn.terminalType,
+    terminalLine: turn.terminalLine,
+    superseded: turn.superseded,
+    diagnostics: Object.freeze(diagnostics),
+  });
 }
 
-function correlateDispatchWindow(parsed, dispatchId) {
-  const basename = dispatchId.endsWith(".task.md") ? dispatchId : `${dispatchId}.task.md`;
-  const turns = [];
+export function createTurnBoundaryAccumulator() {
   const explicit = new Map();
+  const openTurns = [];
   let current = null;
   let sequence = 0;
 
-  for (const record of parsed.records || []) {
-    if (record.parseError) {
-      if (current && !current.terminal) current.parseErrors.push(record);
-      continue;
-    }
-    if (record.envelopeType !== "event_msg") continue;
-    if (record.payloadType === "task_started") {
-      if (current && !current.terminal) current.superseded = true;
-      const turn = makeTurn(record, sequence++);
-      turns.push(turn);
-      current = turn;
-      if (turn.turnId) explicit.set(turn.turnId, turn);
-      continue;
-    }
-    if (record.payloadType === "user_message") {
-      if (current && !current.terminal) {
-        // A user message whose turn id disagrees with its enclosing turn breaks the correlation
-        // authority: the dispatch marker would be attributed to a turn that never carried it, and
-        // that turn's final answer would be served as this dispatch's reply. Record it as a
-        // boundary error so every consumer refuses rather than guessing.
-        if (current.turnId && record.turnId && current.turnId !== record.turnId) {
-          current.boundaryErrors.push(
-            diagnostic("user-message-turn-id-mismatch", {
-              line: record.line,
-              expectedTurnId: current.turnId,
-              messageTurnId: record.turnId,
-            }),
-          );
+  const finalize = (turn) => {
+    if (turn.emitted) return null;
+    turn.emitted = true;
+    const index = openTurns.indexOf(turn);
+    if (index !== -1) openTurns.splice(index, 1);
+    return buildTurnSnapshot(turn);
+  };
+
+  const startTurn = (record) => {
+    const turn = {
+      sequence: sequence++,
+      turnId: record.turnId,
+      boundaryMode: record.turnId ? "turn-id" : "ordered-fallback",
+      startLine: record.line,
+      terminalType: null,
+      terminalLine: null,
+      superseded: false,
+      boundaryErrors: [],
+      parseErrorLines: [],
+      schemaGap: false,
+      emitted: false,
+    };
+    openTurns.push(turn);
+    if (turn.turnId) explicit.set(turn.turnId, turn);
+    return turn;
+  };
+
+  return {
+    push(record) {
+      if (record.parseError) {
+        if (current && !current.terminalType) {
+          current.parseErrorLines.push(record.line);
+          return { sequence: current.sequence, snapshots: [] };
         }
-        current.userMessages.push(record);
+        return { sequence: null, snapshots: [] };
       }
-      continue;
-    }
-    if (record.payloadType === "agent_message") {
-      if (current && !current.terminal) current.agentMessages.push(record);
-      continue;
-    }
-    if (record.payloadType === "task_complete" || record.payloadType === "turn_aborted") {
+      if (record.envelopeType !== "event_msg") {
+        return { sequence: null, snapshots: [] };
+      }
+      if (record.payloadType === "task_started") {
+        const snapshots = [];
+        if (current && !current.terminalType) {
+          current.superseded = true;
+          const snap = finalize(current);
+          if (snap) snapshots.push(snap);
+        }
+        current = startTurn(record);
+        return { sequence: current.sequence, snapshots };
+      }
+      if (record.payloadType === "user_message") {
+        if (current && !current.terminalType) {
+          // A user message whose turn id disagrees with its enclosing turn breaks correlation
+          // authority: the marker would be attributed to a turn that never carried it, and that
+          // turn's final answer would be served as this dispatch's reply. Fail closed.
+          if (current.turnId && record.turnId && current.turnId !== record.turnId) {
+            current.boundaryErrors.push(
+              diagnostic("user-message-turn-id-mismatch", {
+                line: record.line,
+                expectedTurnId: current.turnId,
+                messageTurnId: record.turnId,
+              }),
+            );
+          }
+          return { sequence: current.sequence, snapshots: [] };
+        }
+        return { sequence: null, snapshots: [] };
+      }
+      if (record.payloadType === "agent_message") {
+        if (current && !current.terminalType) {
+          // A non-null agent-message turn id that disagrees with its enclosing turn is the same
+          // fail-closed class as the user-message guard: refuse rather than certify a body whose
+          // own turn attribution contradicts the turn it appears in.
+          if (current.turnId && record.turnId && current.turnId !== record.turnId) {
+            current.boundaryErrors.push(
+              diagnostic("agent-message-turn-id-mismatch", {
+                line: record.line,
+                expectedTurnId: current.turnId,
+                messageTurnId: record.turnId,
+              }),
+            );
+          }
+          return { sequence: current.sequence, snapshots: [] };
+        }
+        return { sequence: null, snapshots: [] };
+      }
+      if (record.payloadType !== "task_complete" && record.payloadType !== "turn_aborted") {
+        return { sequence: null, snapshots: [] };
+      }
+
       let turn;
       if (record.turnId) {
         turn = explicit.get(record.turnId);
@@ -628,158 +716,291 @@ function correlateDispatchWindow(parsed, dispatchId) {
             expectedTurnId: current.turnId,
           }),
         );
-        continue;
+        return { sequence: current.sequence, snapshots: [] };
       } else {
         turn = current;
       }
-      if (!turn || turn.terminal) continue;
-      turn.terminal = record;
+      if (!turn || turn.terminalType || turn.emitted) {
+        return { sequence: turn && !turn.emitted ? turn.sequence : null, snapshots: [] };
+      }
+      turn.terminalType = record.payloadType;
+      turn.terminalLine = record.line;
       if (current === turn) current = null;
-    }
-  }
-
-  const occurrences = [];
-  for (const turn of turns) {
-    const markers = turn.userMessages.filter((item) => exactTaskBasename(item.text, basename));
-    for (const marker of markers) {
-      const diagnostics = [];
-      const laterUsers = turn.userMessages.filter((item) => item.line > marker.line);
-      const inWindowErrors = turn.parseErrors.filter(
-        (item) => item.line > marker.line && (!turn.terminal || item.line < turn.terminal.line),
-      );
-      let outcome;
-      if (turn.superseded) {
-        diagnostics.push(diagnostic("turn-superseded", { line: turn.startLine, turnId: turn.turnId }));
-        outcome = { status: "none", reason: "unavailable" };
-      } else if (turn.boundaryErrors.length > 0) {
-        diagnostics.push(...turn.boundaryErrors);
-        outcome = { status: "none", reason: "unparseable" };
-      } else if (inWindowErrors.length > 0) {
-        diagnostics.push(...inWindowErrors.map((item) => diagnostic("malformed-json", item)));
-        outcome = { status: "none", reason: "unparseable" };
-      } else if (laterUsers.length > 0) {
-        diagnostics.push(diagnostic("intervening-user-message", { line: laterUsers[0].line }));
-        outcome = { status: "none", reason: "ambiguous" };
-      } else if (!turn.terminal) {
-        outcome = { status: "none", reason: "pending" };
-      } else if (turn.terminal.payloadType === "turn_aborted") {
-        outcome = { status: "none", reason: "unavailable" };
-      } else {
-        let finals = turn.agentMessages.filter((item) => item.phase === "final_answer");
-        if (finals.length === 0 && typeof turn.terminal.lastAgentMessage === "string") {
-          finals = turn.agentMessages.filter((item) => item.text === turn.terminal.lastAgentMessage);
-        }
-        const selected = finals.at(-1) || null;
-        if (!selected) {
-          outcome = { status: "none", reason: "unavailable" };
-        } else {
-          if (
-            typeof turn.terminal.lastAgentMessage === "string" &&
-            turn.terminal.lastAgentMessage !== selected.text
-          ) {
-            diagnostics.push(
-              diagnostic("completion-message-mismatch", {
-                line: turn.terminal.line,
-                turnId: turn.turnId,
-              }),
-            );
-          }
-          outcome = {
-            status: "complete",
-            text: selected.text,
-            finalMessageCount: finals.length,
-          };
+      const snap = finalize(turn);
+      return { sequence: turn.sequence, snapshots: snap ? [snap] : [] };
+    },
+    finish(parserDiagnostics = []) {
+      const drift = [];
+      for (const item of parserDiagnostics || []) {
+        if (item && item.code === "schema-drift" && typeof item.line === "number") {
+          drift.push(item.line);
         }
       }
-      occurrences.push({
-        ...outcome,
-        diagnostics,
-        markerLine: marker.line,
-        terminalLine: turn.terminal?.line || null,
-        turnId: turn.turnId,
-        boundaryMode: turn.boundaryMode,
-      });
-    }
-  }
-
-  const completed = occurrences
-    .filter((item) => item.status === "complete")
-    .sort((left, right) => (left.terminalLine || 0) - (right.terminalLine || 0));
-  if (completed.length > 0) {
-    return { ...completed.at(-1), duplicateCount: occurrences.length };
-  }
-  const reasonOrder = ["unparseable", "ambiguous", "pending", "unavailable"];
-  const reason = reasonOrder.find((item) => occurrences.some((entry) => entry.reason === item));
-  const matching = occurrences.find((item) => item.reason === reason) || null;
-  return {
-    status: "none",
-    reason: reason || (parsed.ok ? "pending" : "unparseable"),
-    duplicateCount: occurrences.length,
-    diagnostics: matching?.diagnostics || parsed.diagnostics || [],
-    turnId: matching?.turnId || null,
-    boundaryMode: matching?.boundaryMode || null,
+      // Attribute schema gaps to every still-open turn's window before finalizing it. Turns
+      // already finalized during push are emitted; the dispatch adapter enforces their schema-gap
+      // integrity separately over the same parser diagnostics.
+      for (const turn of openTurns) {
+        for (const line of drift) {
+          if (line > turn.startLine && (turn.terminalLine === null || line < turn.terminalLine)) {
+            turn.schemaGap = true;
+            break;
+          }
+        }
+      }
+      const snapshots = [];
+      for (const turn of [...openTurns]) {
+        const snap = finalize(turn);
+        if (snap) snapshots.push(snap);
+      }
+      current = null;
+      return snapshots;
+    },
   };
 }
 
-export function createDispatchCorrelator(dispatchId) {
-  let currentRecords = [];
-  let currentTurnId = null;
-  let bestCompleted = null;
-  let duplicateCount = 0;
-  const reasonDiagnostics = new Map();
+function computeOccurrence(snapshot, bucket, marker) {
+  const laterUsers = bucket.userMessages.filter((u) => u.line > marker.line);
+  const disqualifying = laterUsers.find(
+    (u) => !(snapshot.turnId && u.turnId && u.turnId === snapshot.turnId),
+  );
+  const inWindowErrors = bucket.parseErrors.filter(
+    (item) =>
+      item.line > marker.line &&
+      (snapshot.terminalLine === null || item.line < snapshot.terminalLine),
+  );
+  const boundaryErrors = snapshot.diagnostics.filter((d) => BOUNDARY_ERROR_CODES.has(d.code));
 
-  const consumeWindow = () => {
-    if (currentRecords.length === 0) return;
-    const result = correlateDispatchWindow({ ok: true, records: currentRecords }, dispatchId);
-    currentRecords = [];
-    currentTurnId = null;
-    if (!result.duplicateCount) return;
-    duplicateCount += result.duplicateCount;
-    if (result.status === "complete") {
-      bestCompleted = result;
-    } else if (!reasonDiagnostics.has(result.reason)) {
-      reasonDiagnostics.set(result.reason, result);
+  const base = {
+    markerLine: marker.line,
+    startLine: bucket.startLine,
+    terminalLine: snapshot.terminalLine,
+    turnId: snapshot.turnId,
+    boundaryMode: snapshot.boundaryMode,
+    certifiable: false,
+    text: null,
+    finalMessageCount: 0,
+  };
+
+  if (snapshot.superseded) {
+    return {
+      ...base,
+      waitStatus: "superseded",
+      harvestStatus: "none",
+      harvestReason: "unavailable",
+      diagnostics: [diagnostic("turn-superseded", { line: bucket.startLine, turnId: snapshot.turnId })],
+    };
+  }
+  if (boundaryErrors.length > 0) {
+    return { ...base, waitStatus: "unavailable", harvestStatus: "none", harvestReason: "unparseable", diagnostics: boundaryErrors };
+  }
+  if (inWindowErrors.length > 0) {
+    return {
+      ...base,
+      waitStatus: "unavailable",
+      harvestStatus: "none",
+      harvestReason: "unparseable",
+      diagnostics: inWindowErrors.map((item) => diagnostic("malformed-json", item)),
+    };
+  }
+  if (disqualifying) {
+    return {
+      ...base,
+      waitStatus: "unavailable",
+      harvestStatus: "none",
+      harvestReason: "ambiguous",
+      diagnostics: [diagnostic("intervening-user-message", { line: disqualifying.line })],
+    };
+  }
+  if (!snapshot.terminalType) {
+    return { ...base, waitStatus: "pending", harvestStatus: "none", harvestReason: "pending", diagnostics: [] };
+  }
+  if (snapshot.terminalType === "turn_aborted") {
+    return { ...base, waitStatus: "aborted", harvestStatus: "none", harvestReason: "unavailable", diagnostics: [] };
+  }
+
+  // task_complete: select the presentation body (harvester) and the wait-verified body (certification).
+  const lam = bucket.terminal ? bucket.terminal.lastAgentMessage : undefined;
+  const finalAnswers = bucket.agentMessages.filter((a) => a.phase === "final_answer");
+  let presentationFinals = finalAnswers;
+  if (presentationFinals.length === 0 && typeof lam === "string") {
+    presentationFinals = bucket.agentMessages.filter((a) => a.text === lam);
+  }
+  const selected = presentationFinals.at(-1) || null;
+  let certifiable = false;
+  if (typeof lam === "string" && lam.length > 0) {
+    // An exact, non-empty terminal copy among the same-turn candidates certifies the body.
+    certifiable = bucket.agentMessages.some((a) => a.text === lam);
+  } else if (lam === null || lam === undefined) {
+    // No terminal copy: the latest non-empty explicit final answer remains eligible.
+    const latestFinal = finalAnswers.at(-1) || null;
+    certifiable = Boolean(latestFinal && latestFinal.text.length > 0);
+  }
+  const diagnostics = [];
+  if (selected && typeof lam === "string" && lam !== selected.text) {
+    diagnostics.push(diagnostic("completion-message-mismatch", { line: snapshot.terminalLine, turnId: snapshot.turnId }));
+  }
+  return {
+    ...base,
+    waitStatus: "complete",
+    harvestStatus: selected ? "complete" : "none",
+    harvestReason: selected ? null : "unavailable",
+    certifiable,
+    text: selected ? selected.text : null,
+    finalMessageCount: presentationFinals.length,
+    diagnostics,
+  };
+}
+
+function projectHarvest(occurrences, parsed) {
+  const duplicateCount = occurrences.length;
+  const completed = occurrences
+    .filter((o) => o.harvestStatus === "complete")
+    .sort((left, right) => (left.terminalLine || 0) - (right.terminalLine || 0));
+  if (completed.length > 0) {
+    const win = completed.at(-1);
+    return {
+      status: "complete",
+      reason: null,
+      text: win.text,
+      finalMessageCount: win.finalMessageCount,
+      duplicateCount,
+      turnId: win.turnId,
+      boundaryMode: win.boundaryMode,
+      diagnostics: win.diagnostics,
+    };
+  }
+  const reasonOrder = ["unparseable", "ambiguous", "pending", "unavailable"];
+  const reason = reasonOrder.find((item) => occurrences.some((o) => o.harvestReason === item));
+  const matching = occurrences.find((o) => o.harvestReason === reason) || null;
+  return {
+    status: "none",
+    reason: reason || (parsed.ok ? "pending" : "unparseable"),
+    text: null,
+    finalMessageCount: 0,
+    duplicateCount,
+    turnId: matching?.turnId || null,
+    boundaryMode: matching?.boundaryMode || null,
+    diagnostics: matching?.diagnostics || parsed.diagnostics || [],
+  };
+}
+
+function projectLifecycle(occurrences, parserDiagnostics, sawParseError, parsed) {
+  // The wait lifecycle applies schema-drift-in-window as a certification integrity gate: a
+  // schema gap inside a would-be complete / pending / aborted turn window forces `unavailable`.
+  const withSchema = occurrences.map((occ) => {
+    if (
+      (occ.waitStatus === "complete" || occ.waitStatus === "pending" || occ.waitStatus === "aborted") &&
+      occ.startLine !== null
+    ) {
+      const drift = (parserDiagnostics || []).filter(
+        (d) =>
+          d.code === "schema-drift" &&
+          typeof d.line === "number" &&
+          d.line > occ.startLine &&
+          (occ.terminalLine === null || d.line < occ.terminalLine),
+      );
+      if (drift.length > 0) {
+        return { ...occ, waitStatus: "unavailable", waitDiagnostics: drift };
+      }
+    }
+    return occ;
+  });
+
+  const completed = withSchema
+    .filter((o) => o.waitStatus === "complete")
+    .sort((left, right) => (left.terminalLine || 0) - (right.terminalLine || 0));
+  if (completed.length > 0) {
+    const win = completed.at(-1);
+    return { status: "complete", diagnostics: win.diagnostics, certifiable: win.certifiable };
+  }
+  const unavailable = withSchema.find((o) => o.waitStatus === "unavailable");
+  if (unavailable) {
+    return { status: "unavailable", diagnostics: unavailable.waitDiagnostics || unavailable.diagnostics, certifiable: false };
+  }
+  const pending = withSchema.find((o) => o.waitStatus === "pending");
+  if (pending) {
+    return { status: "pending", diagnostics: pending.diagnostics, certifiable: false };
+  }
+  if (withSchema.length > 0) {
+    const last = [...withSchema].sort((left, right) => left.markerLine - right.markerLine).at(-1);
+    return { status: last.waitStatus, diagnostics: last.diagnostics, certifiable: last.certifiable };
+  }
+  const schemaFailure =
+    sawParseError || (parserDiagnostics || []).some((d) => d.code === "schema-drift");
+  return {
+    status: schemaFailure ? "unavailable" : "pending",
+    diagnostics: schemaFailure
+      ? (parserDiagnostics || []).filter((d) => d.code === "schema-drift" || d.code === "malformed-json")
+      : [],
+    certifiable: false,
+  };
+}
+
+// A1 dispatch adapter: the ONLY dispatch correlation surface. It pairs each normalized record with
+// the snapshots emitted by the same createTurnBoundaryAccumulator() call, owns marker selection and
+// presentation / wait-body integrity, and projects BOTH the harvester public shape (top level) and
+// the wait lifecycle (`.lifecycle`). It reimplements no start/terminal/id/supersession rule.
+export function createDispatchCorrelator(dispatchId) {
+  const basename = String(dispatchId).endsWith(".task.md")
+    ? String(dispatchId)
+    : `${dispatchId}.task.md`;
+  const accumulator = createTurnBoundaryAccumulator();
+  const buckets = new Map();
+  const occurrences = [];
+  let sawParseError = false;
+
+  const bucketFor = (seq) => {
+    let bucket = buckets.get(seq);
+    if (!bucket) {
+      bucket = { startLine: null, userMessages: [], agentMessages: [], parseErrors: [], terminal: null };
+      buckets.set(seq, bucket);
+    }
+    return bucket;
+  };
+
+  const ingest = (record, seq) => {
+    if (seq === null || seq === undefined) return;
+    const bucket = bucketFor(seq);
+    if (record.parseError) {
+      bucket.parseErrors.push(record);
+      return;
+    }
+    if (record.envelopeType !== "event_msg") return;
+    if (record.payloadType === "task_started") {
+      bucket.startLine = record.line;
+    } else if (record.payloadType === "user_message") {
+      bucket.userMessages.push(record);
+    } else if (record.payloadType === "agent_message") {
+      bucket.agentMessages.push(record);
+    } else if (record.payloadType === "task_complete" || record.payloadType === "turn_aborted") {
+      bucket.terminal = record;
+    }
+  };
+
+  const processSnapshot = (snapshot) => {
+    const bucket = buckets.get(snapshot.sequence);
+    buckets.delete(snapshot.sequence);
+    if (!bucket) return;
+    const markers = bucket.userMessages.filter((item) => exactTaskBasename(item.text, basename));
+    for (const marker of markers) {
+      occurrences.push(computeOccurrence(snapshot, bucket, marker));
     }
   };
 
   return {
     push(record) {
-      if (record.parseError) {
-        if (currentRecords.length > 0) currentRecords.push(record);
-        return;
-      }
-      if (record.envelopeType !== "event_msg") return;
-      if (record.payloadType === "task_started") {
-        if (currentRecords.length > 0) {
-          currentRecords.push(record);
-          consumeWindow();
-        }
-        currentRecords = [record];
-        currentTurnId = record.turnId;
-        return;
-      }
-      if (currentRecords.length === 0) return;
-      currentRecords.push(record);
-      if (record.payloadType !== "task_complete" && record.payloadType !== "turn_aborted") return;
-      const matchingTerminal = currentTurnId
-        ? record.turnId === currentTurnId
-        : record.turnId === null;
-      if (matchingTerminal) consumeWindow();
+      if (record.parseError) sawParseError = true;
+      const { sequence, snapshots } = accumulator.push(record);
+      ingest(record, sequence);
+      for (const snapshot of snapshots) processSnapshot(snapshot);
     },
     finish(parsed = { ok: true, diagnostics: [] }) {
-      consumeWindow();
-      if (bestCompleted) return { ...bestCompleted, duplicateCount };
-      const reasonOrder = ["unparseable", "ambiguous", "pending", "unavailable"];
-      const reason = reasonOrder.find((item) => reasonDiagnostics.has(item));
-      const selected = reason ? reasonDiagnostics.get(reason) : null;
-      return {
-        status: "none",
-        reason: reason || (parsed.ok ? "pending" : "unparseable"),
-        duplicateCount,
-        diagnostics: selected?.diagnostics || parsed.diagnostics || [],
-        turnId: selected?.turnId || null,
-        boundaryMode: selected?.boundaryMode || null,
-      };
+      const parserDiagnostics = parsed?.diagnostics || [];
+      const snapshots = accumulator.finish(parserDiagnostics);
+      for (const snapshot of snapshots) processSnapshot(snapshot);
+      const harvest = projectHarvest(occurrences, parsed);
+      const lifecycle = projectLifecycle(occurrences, parserDiagnostics, sawParseError, parsed);
+      return { ...harvest, lifecycle };
     },
   };
 }
@@ -788,6 +1009,15 @@ export function correlateDispatch(parsed, dispatchId) {
   const correlator = createDispatchCorrelator(dispatchId);
   for (const record of parsed.records || []) correlator.push(record);
   return correlator.finish(parsed);
+}
+
+// A4 thread-activity projection (pure). Consumed in Phase 3; built here so both adapters remain
+// thin projections over the one boundary machine. Returns ONLY turnActivity.
+export function summarizeThreadActivity(boundarySnapshot, rolloutStatus) {
+  return {
+    turnActivity:
+      rolloutStatus === "found" && boundarySnapshot ? boundarySnapshot.activity : "ambiguous",
+  };
 }
 
 function readFirstRecord(filePath, maxRecordBytes = DEFAULT_MAX_RECORD_BYTES) {

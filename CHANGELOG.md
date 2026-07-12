@@ -5,8 +5,26 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- One shared turn-boundary state machine, `createTurnBoundaryAccumulator()`, in
+  `codex_ipc_rollout_reader.mjs`: an I/O-free, text-free accumulator that emits immutable per-turn
+  snapshots (eight boundary fields) and alone owns start/terminal/id binding, supersession, and
+  parser/schema-gap attribution. `createDispatchCorrelator` (A1 dispatch correlation) and
+  `summarizeThreadActivity` (A4 thread activity, consumed later) are thin projections over it.
+- `codex_ipc_wait.mjs` opt-in `--accept-rollout-fallback` (D2): when the reply file is genuinely
+  absent, a completed own turn whose verified rollout body matches its terminal certifies `done`
+  with `replySource=rollout-fallback` (one stderr `WAIT_DIAGNOSTIC reply-source`; stdout stays one
+  token; the recovered body is never emitted). Flagless v0.1.6 stays file-primary and byte-identical.
 
 ### Changed
+- Consolidated the two duplicated correlation reducers onto the single boundary machine: removed
+  `correlateDispatchWindow` (reader) and `classifyDispatch` (wait). Correlation now also allows a
+  later same-`turn_id` user message (ordered fallback stays ambiguous) and rejects a non-null
+  `agent_message.turn_id` that disagrees with its enclosing turn — extending the A-05 fail-closed
+  class without reopening it.
+- Producer denied-reply protocol (A5): the handoff scaffold, `SKILL.md`, `handoff-template.md`, and
+  the example payload now state that a denied reply write is expected — self-verify, attempt the
+  reply once, and on denial put the full substantive result in the final agent message (no
+  retry/escalation). `codex_ipc_contract_audit.mjs` locks these bytes.
 
 ### Fixed
 - `tests/test_wait_contract.sh` probed only the repo layout, so from an installed skill root it

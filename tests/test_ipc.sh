@@ -424,6 +424,35 @@ sid_run "00000000-0000-4000-8000-000000000000" \
     && [[ -n "$(find "$SIDROOT/root" -name '*.task.md' 2>/dev/null)" ]] \
     && ok "a normal session id still writes under the root" || no "valid session id rejected"
 
+echo "== 31. A5 producer denied-reply protocol lands in the generated payload (E1 fixture) =="
+# E1 (sanitized): a managed-sandbox reply write is denied. The generated payload must instruct the
+# follower to attempt the printed reply path exactly once, not retry, and put the FULL substantive
+# result in its final agent message. Assert the branch is present in BOTH a filedrop and an --ipc
+# envelope (both share the one PAYLOAD scaffold).
+run "$REPO" "sessE1" "review the sandboxed change and reply"
+E1_FD=$(find "$IPCROOT/sessE1/filedrop" -name '*.task.md' 2>/dev/null | head -1)
+if [[ -n "$E1_FD" ]] \
+  && grep -q "attempt to write the printed reply path exactly once" "$E1_FD" \
+  && grep -q "do NOT retry" "$E1_FD" \
+  && grep -q "the full substantive result" "$E1_FD" \
+  && grep -q "A one-line denial with no result is a contract violation" "$E1_FD"; then
+  ok "filedrop payload carries the one-attempt / no-retry / full-final-result branch"
+else
+  no "filedrop payload missing the denied-reply protocol"
+fi
+
+: > "$TMP/nodeargs.log"
+run "$REPO" "sessE1ipc" --ipc "$UUID" --allow-any-thread "review the sandboxed change and reply"
+E1_IPC=$(find "$IPCROOT/sessE1ipc/$UUID" -name '*.task.md' 2>/dev/null | head -1)
+if [[ -n "$E1_IPC" ]] \
+  && grep -q "attempt to write the printed reply path exactly once" "$E1_IPC" \
+  && grep -q "do NOT retry" "$E1_IPC" \
+  && grep -q "the full substantive result" "$E1_IPC"; then
+  ok "--ipc envelope carries the denied-reply protocol"
+else
+  no "--ipc payload missing the denied-reply protocol"
+fi
+
 assert_no_codex_exec_fallback
 
 echo ""

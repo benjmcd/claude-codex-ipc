@@ -13,6 +13,14 @@ When finished, write your reply/result to this per-dispatch reply file (create i
 Use that absolute path exactly. It is unique to this handoff, so your reply is
 correlated to this task with no ambiguity even if other handoffs are in flight.
 
+Reply-write policy (a denied write is EXPECTED, not an error): first self-verify your result, then
+attempt to write the printed reply path exactly once. If that write is denied by a sandbox or
+permission boundary, do NOT retry, debug, request escalation, or substitute another file. Instead,
+state the denial in one line AND put the full substantive result (not just the denial) in your final
+agent message, then complete the turn. A one-line denial with no result is a contract violation; the
+dispatcher recovers a full final message only via the opt-in codex_ipc_wait.mjs
+--accept-rollout-fallback path.
+
 ## Branch
 feature/example  (merge target: main)
 

@@ -22,7 +22,14 @@ Per the `/ipc` workspace-scoping rule, place the FILLED handoff inside the assoc
   co-author attribution; current phase (audit / plan / implement).
 - **Completion contract:** self-verification/self-validation is mandatory and runs BEFORE the
   reply is written; the reply (file and/or final message) is the LAST act of the turn — no work,
-  amendment, or re-verification may follow it. If a post-reply amendment ever becomes
+  amendment, or re-verification may follow it. **Denied reply write (EXPECTED, not an error):**
+  after self-verifying, attempt to write the printed reply path exactly once. If that write is
+  denied by a sandbox or permission boundary, do NOT retry, debug, request escalation, or substitute
+  another file — state the denial in one line AND put the full substantive result (not just the
+  denial) in your final agent message, then complete. A one-line denial with no result is a contract
+  violation. The dispatcher recovers that final message only via the opt-in `codex_ipc_wait.mjs
+  --accept-rollout-fallback` path (a known UUID `--ipc` dispatch); flagless and filedrop do not
+  recover it automatically. If a post-reply amendment ever becomes
   unavoidable, supersede explicitly: state `REPLY-SUPERSEDED` as the FIRST LINE of a final
   message (the harvester's marker detection is first-line exact-token by design) and overwrite
   the same dispatch's reply file. KNOWN LIMITATION: reply viewing is file-primary by design, so
