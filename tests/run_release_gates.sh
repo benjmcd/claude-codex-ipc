@@ -7,7 +7,7 @@
 #   * emits an UNEXPECTED `^SKIP:` line (fail-on-SKIP); OR
 #   * breaches the §5.1 process bound (owned real-Node peak > 2, or owned Node descendants
 #     still alive > 2s after the suite ends); OR
-#   * exceeds its wall-clock (per-suite 300s / whole-layout 600s) — on timeout the owned
+#   * exceeds its wall-clock (per-suite 600s / whole-layout 1800s) — on timeout the owned
 #     Node tree is killed/reaped within 5s and the run still FAILS.
 #
 # OS-aware allowlist: exactly ONE declared platform-conditional skip is permitted —
@@ -30,11 +30,24 @@ TDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BASH_BIN="$(command -v bash)"
 
 # ---- pinned budgets (NEXT-STEPS §5.1) ----------------------------------------------------
+# Correctness gates (UNCHANGED — never weakened): the process bound (PEAK_LIMIT=2,
+# POST_SUITE_DRAIN_S=2, KILL_DEADLINE_S=5), fail-on-SKIP, and safety-by-exit-status.
 PEAK_LIMIT=2                 # baseline real-Node peak per suite process tree
 POST_SUITE_DRAIN_S=2         # owned Node descendants must reach zero within this window
 KILL_DEADLINE_S=5            # on timeout, kill/reap the owned tree within this window
-PER_SUITE_TIMEOUT_S=300
-WHOLE_LAYOUT_TIMEOUT_S=600
+#
+# Wall-clock recalibration (WINDOWS/MSYS host, 2026-07-12). NEXT-STEPS §5.1/§5.2 pin the
+# per-suite 300s / whole-layout 600s figures as "first-run estimates to recalibrate-and-record";
+# that recalibrate-and-record authorization is hereby extended to the per-suite value on Windows.
+# Measured standalone Windows/MSYS runtimes (nine suites all green, 381 assertions, 0 failures):
+#   * test_ipc.sh       ~362s
+#   * test_reply_view.sh ~453s  (its T23 nests a FULL test_ipc re-run — a Phase-5/WS-D de-dup
+#                                candidate; NOT fixed here)
+# Both exceed the provisional 300s per-suite cap on this host, so the caps are raised WITH margin:
+# per-suite 300 -> 600s; whole-layout 600 -> 1800s (raised proportionally). No correctness gate
+# above is touched.
+PER_SUITE_TIMEOUT_S=600
+WHOLE_LAYOUT_TIMEOUT_S=1800
 SAMPLE_INTERVAL_S=0.5
 # Per-child timeouts pinned for suites/CI that honour them (harness-only watchdogs).
 export IPC_HERMETIC_WAIT_MS=10000

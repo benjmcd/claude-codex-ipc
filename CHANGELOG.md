@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.1.6] — 2026-07-12
+
 ### Added
 - One shared turn-boundary state machine, `createTurnBoundaryAccumulator()`, in
   `codex_ipc_rollout_reader.mjs`: an I/O-free, text-free accumulator that emits immutable per-turn
@@ -64,7 +66,16 @@ All notable changes to this project will be documented in this file.
 ### Fixed
 - `tests/test_wait_contract.sh` probed only the repo layout, so from an installed skill root it
   reported `SKIP: codex_ipc_wait.mjs absent` and exited 0 while the tool sat one directory away.
-  It now uses the dual-layout probe every other suite uses (landed after the v0.1.5 tag).
+  It now uses the dual-layout probe every other suite uses (landed after the v0.1.5 tag; `fc54ce1`).
+- Transport-root containment (A-02) and wrong-turn reply attribution (A-05), fixed post-v0.1.5 at
+  `0fbd517` and first shipped in this release. A-02: `CLAUDE_SESSION_ID` became a path segment
+  under `CODEX_IPC_ROOT`, so a `../escape` id wrote the envelope outside the transport root and
+  still exited 0; the wrapper now requires one safe segment and fails closed rather than sanitizing
+  a rewritten id (which would silently split a session's channel in two). A-05: the shared
+  correlator accepted a `user_message` whose `turn_id` disagreed with its enclosing turn, so the
+  harvester/viewer could serve that turn's final answer for this dispatch; the guard that
+  `codex_ipc_wait` already applied now lives in the shared correlation authority so every consumer
+  refuses.
 
 ## [0.1.5] — 2026-07-10
 
