@@ -248,8 +248,18 @@ function inspectTarget(opts) {
   if (thread?.archived) {
     failures.push("target thread is archived");
   }
-  if (activity.maybeMidTurn && !opts.allowMidTurn) {
-    failures.push("target appears mid-turn; pass --allow-mid-turn only with explicit operator intent");
+  // A4: gate on the authoritative turnActivity (open/closed/ambiguous), not the historical
+  // maybeMidTurn tail heuristic. A send requires a CLOSED latest turn; --allow-mid-turn may
+  // override an OPEN turn only, never an AMBIGUOUS one (fail closed on ambiguity).
+  const turnActivity = activity.turnActivity;
+  if (turnActivity !== "closed") {
+    if (turnActivity === "open" && opts.allowMidTurn) {
+      // permitted mid-turn override
+    } else if (turnActivity === "open") {
+      failures.push("target turn is open (mid-turn); pass --allow-mid-turn only with explicit operator intent");
+    } else {
+      failures.push("target turn activity is ambiguous; refusing to send (not overridable by --allow-mid-turn)");
+    }
   }
   return {
     ok: failures.length === 0,
@@ -276,6 +286,7 @@ function summarizeInspect(inspect) {
     newestRolloutLine: activity.newestRolloutLine || null,
     lastTaskCompleteLine: activity.lastTaskCompleteLine || null,
     maybeMidTurn: Boolean(activity.maybeMidTurn),
+    turnActivity: activity.turnActivity || null,
     activityConclusion: activity.conclusion || null,
   };
 }

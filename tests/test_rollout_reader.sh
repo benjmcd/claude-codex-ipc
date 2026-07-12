@@ -634,6 +634,22 @@ test("transition matrix: explicit-id complete emits one closed 8-key snapshot th
   assert.equal(summarizeThreadActivity(snaps.at(-1), "found").turnActivity, "closed");
 });
 
+test("transition matrix: emitted snapshots are frozen and reject mutation", () => {
+  const records = [
+    meta,
+    ev("task_started", { turn_id: "turn-f" }),
+    ev("user_message", { turn_id: "turn-f", message: "read C:/x/tmf-1-abcdef0123456789.task.md and proceed" }),
+    ev("task_complete", { turn_id: "turn-f", last_agent_message: null }),
+  ];
+  const snaps = snapshotsOf(writeAndRead("frozen", records));
+  assert.equal(snaps.length, 1);
+  assert.ok(Object.isFrozen(snaps[0]), "boundary snapshot must be frozen");
+  assert.ok(Object.isFrozen(snaps[0].diagnostics), "snapshot diagnostics must be frozen");
+  assert.throws(() => {
+    snaps[0].activity = "open";
+  }, TypeError);
+});
+
 test("transition matrix: ordered-fallback terminal is closed with ordered-fallback boundaryMode", () => {
   const records = [
     meta,
@@ -750,42 +766,56 @@ test("delta: a non-null agent-message turn-id that disagrees fails closed as non
   assert.ok(result.diagnostics.some((d) => d.code === "agent-message-turn-id-mismatch"));
 });
 
-// ---- Pending RED fixtures (opt-in via IPC_RED_PENDING=1) ----------------------------------
-// RED-first v0.1.6 fixtures. They assert the DESIRED post-fix behavior and therefore FAIL
-// against current code (the defect reproduces). Gated OFF by default so the release runner's
-// green battery is unaffected; un-gated (promoted to always-run) when the owning fix lands:
-// A-06 in Phase 2 (A1 shared correlator), A-04 in Phase 3 (A4 marker-proof turn-binding).
-// Observe RED with:  IPC_RED_PENDING=1 bash tests/test_rollout_reader.sh
-if (process.env.IPC_RED_PENDING === "1") {
-  test("A-06 (RED, pending A1/Phase-2): same-turn-id later user must still correlate complete", () => {
-    const a06 = path.join(
-      fixtures,
-      "rollout-a06-sameturn-11111111-1111-4111-8111-111111111111.jsonl",
-    );
-    const result = correlateDispatch(readRolloutFile(a06), "1600000000-6-abcdef0123456789");
-    // DESIRED: same-turn-id exemption -> complete. CURRENT wrong output: none / ambiguous.
-    assert.equal(result.status, "complete");
-    assert.equal(result.text, "a06 correlated final answer");
-  });
+// ---- A-06 (GREEN after A1/Phase-2): same-turn-id later user still correlates complete ----------
+test("A-06: a same-turn-id later user message still correlates the dispatch complete", () => {
+  const a06 = path.join(
+    fixtures,
+    "rollout-a06-sameturn-11111111-1111-4111-8111-111111111111.jsonl",
+  );
+  const result = correlateDispatch(readRolloutFile(a06), "1600000000-6-abcdef0123456789");
+  assert.equal(result.status, "complete");
+  assert.equal(result.text, "a06 correlated final answer");
+});
 
-  await test("A-04 (RED, pending A4/Phase-3): cross-turn marker proof must be ok:false", async () => {
-    const a04 = path.join(
-      fixtures,
-      "rollout-a04-crossturn-22222222-2222-4222-8222-222222222222.jsonl",
-    );
-    // Agent marker in turn-1 (no terminal there); task_complete only in turn-2 (marker absent).
-    const proof = await pollRolloutForMarker(a04, "A04_PROOF_MARKER", 10, 1, {
-      now: () => 0,
-      sleep: async () => {},
-    });
-    // DESIRED: turn-id-bound proof -> ok:false. CURRENT wrong output: ok:true (cross-turn).
-    assert.equal(proof.ok, false);
-    assert.equal(
-      inspectRolloutMarker(a04, "A04_PROOF_MARKER").taskCompleteAfterAgentMarker,
-      false,
-    );
+// ---- A-04 (GREEN after A4/Phase-3): the marker proof is turn-id-bound, not pure line order ------
+// Cross-turn: agent marker in turn-1 (no terminal there) + task_complete only in turn-2 (marker
+// absent) MUST NOT prove completion. Same-turn: agent marker then a matching task_complete in the
+// SAME turn MUST prove completion.
+await test("A-04: a cross-turn marker proof is ok:false (turn-id-bound completion)", async () => {
+  const a04 = path.join(
+    fixtures,
+    "rollout-a04-crossturn-22222222-2222-4222-8222-222222222222.jsonl",
+  );
+  const proof = await pollRolloutForMarker(a04, "A04_PROOF_MARKER", 10, 1, {
+    now: () => 0,
+    sleep: async () => {},
   });
-}
+  assert.equal(proof.ok, false);
+  assert.equal(
+    inspectRolloutMarker(a04, "A04_PROOF_MARKER").taskCompleteAfterAgentMarker,
+    false,
+  );
+});
+
+await test("A-04: a same-turn agent marker plus its matching task_complete is ok:true", async () => {
+  const target = path.join(tmp, "rollout-a04-sameturn-22222222-2222-4222-8222-222222222222.jsonl");
+  fs.writeFileSync(
+    target,
+    [
+      { type: "session_meta", payload: { id: "22222222-2222-4222-8222-222222222222" } },
+      ev("task_started", { turn_id: "turn-1" }),
+      ev("user_message", { turn_id: "turn-1", message: "read C:/x/1400000000-4-abcdef0123456789.task.md and proceed" }),
+      ev("agent_message", { message: "A04_PROOF_MARKER completed in turn one", phase: "final_answer" }),
+      ev("task_complete", { turn_id: "turn-1", last_agent_message: "A04_PROOF_MARKER completed in turn one" }),
+    ].map((r) => JSON.stringify(r)).join("\n") + "\n",
+  );
+  const proof = await pollRolloutForMarker(target, "A04_PROOF_MARKER", 10, 1, {
+    now: () => 0,
+    sleep: async () => {},
+  });
+  assert.equal(proof.ok, true);
+  assert.equal(inspectRolloutMarker(target, "A04_PROOF_MARKER").taskCompleteAfterAgentMarker, true);
+});
 
 console.log(`RESULT: ${passed} passed, 0 failed`);
 NODE

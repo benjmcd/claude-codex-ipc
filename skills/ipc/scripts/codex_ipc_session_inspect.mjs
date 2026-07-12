@@ -9,6 +9,11 @@ import { createReadStream } from "node:fs";
 import { existsSync, readdirSync, realpathSync, statSync } from "node:fs";
 import path from "node:path";
 import readline from "node:readline";
+import {
+  createTurnBoundaryAccumulator,
+  normalizeRolloutRecord,
+  summarizeThreadActivity,
+} from "./codex_ipc_rollout_reader.mjs";
 
 // node:sqlite is optional at the repo level: file-drop handoff works without it.
 let DatabaseSync;
@@ -177,7 +182,7 @@ async function inspectSession(opts) {
         aliasCount: rolloutSelection.aliasCount,
       },
     },
-    activitySignals: inferActivitySignals(dbThread.thread, rolloutSummary),
+    activitySignals: inferActivitySignals(dbThread.thread, rolloutSummary, rolloutSelection.status),
     warnings: [
       "Read-only evidence only: no IPC connection, no Desktop message send, and no SQLite write were attempted.",
       "DB row and rollout presence do not prove the owning Desktop renderer is currently open.",
@@ -454,6 +459,12 @@ async function parseRollout(filePath, tailEvents, maxTextChars) {
   let lineCount = 0;
   let parsedCount = 0;
   let sessionMeta = null;
+  // A4: feed the FULL parse stream (not the clipped display tail) into the ONE shared boundary
+  // machine (createTurnBoundaryAccumulator). Its final emitted snapshot drives turnActivity via
+  // the pure summarizeThreadActivity projection; the inspector keeps its own parse/count/display.
+  const accumulator = createTurnBoundaryAccumulator();
+  const boundarySnapshots = [];
+  const boundaryDiagnostics = [];
 
   const rl = readline.createInterface({
     input: createReadStream(filePath, { encoding: "utf8" }),
@@ -473,10 +484,16 @@ async function parseRollout(filePath, tailEvents, maxTextChars) {
       if (parseErrors.length < 5) {
         parseErrors.push({ line: lineCount, error: error.message });
       }
+      boundarySnapshots.push(...accumulator.push({ parseError: true, line: lineCount }).snapshots);
       continue;
     }
 
     parsedCount += 1;
+    const normalized = normalizeRolloutRecord(parsed, { line: lineCount });
+    boundarySnapshots.push(...accumulator.push(normalized).snapshots);
+    if (!normalized.knownPair) {
+      boundaryDiagnostics.push({ code: "schema-drift", line: lineCount });
+    }
     const item = summarizeJsonlItem(parsed, lineCount, maxTextChars);
     increment(countsByEnvelopeType, item.envelopeType || "unknown");
     increment(countsByPayloadType, item.payloadType || "unknown");
@@ -488,6 +505,11 @@ async function parseRollout(filePath, tailEvents, maxTextChars) {
       recentItems.shift();
     }
   }
+  boundarySnapshots.push(...accumulator.finish(boundaryDiagnostics));
+  const boundarySnapshot = boundarySnapshots.reduce(
+    (latest, snap) => (latest === null || snap.sequence > latest.sequence ? snap : latest),
+    null,
+  );
 
   return {
     parsedOk: parsedCount > 0,
@@ -501,6 +523,7 @@ async function parseRollout(filePath, tailEvents, maxTextChars) {
     countsByPayloadType,
     sessionMeta,
     recentItems,
+    boundarySnapshot,
   };
 }
 
@@ -520,6 +543,12 @@ function summarizeJsonlItem(item, line, maxTextChars) {
     payload.output?.role ||
     null;
   const text = truncate(extractText(payload), maxTextChars);
+  const turnId =
+    typeof payload.turn_id === "string"
+      ? payload.turn_id
+      : typeof payload.item?.turn_id === "string"
+        ? payload.item.turn_id
+        : null;
 
   return {
     line,
@@ -527,6 +556,7 @@ function summarizeJsonlItem(item, line, maxTextChars) {
     envelopeType,
     payloadType,
     role,
+    turnId,
     text,
   };
 }
@@ -568,7 +598,7 @@ function collectText(value, found, depth) {
   }
 }
 
-function inferActivitySignals(thread, rollout) {
+function inferActivitySignals(thread, rollout, rolloutStatus) {
   const recent = rollout?.recentItems || [];
   const lastItem = recent.at(-1) || null;
   const lastTaskComplete = lastOfType(recent, ["task_complete"]);
@@ -585,6 +615,14 @@ function inferActivitySignals(thread, rollout) {
     typeof lastUserLine === "number" &&
     (typeof lastTerminalLine !== "number" || lastUserLine > lastTerminalLine) &&
     (!lastAgentMessage || lastAgentMessage.line < lastUserLine);
+
+  // A4: turnActivity is the authoritative open/closed/ambiguous signal from the shared boundary
+  // machine over the FULL parse stream; maybeMidTurn is preserved byte-compatibly (historical
+  // tail heuristic) and the conclusion now derives from turnActivity, not maybeMidTurn.
+  const { turnActivity } = summarizeThreadActivity(
+    rollout?.boundarySnapshot || null,
+    rolloutStatus || "unavailable",
+  );
 
   return {
     dbUpdatedAt: thread?.updatedAt || null,
@@ -607,10 +645,13 @@ function inferActivitySignals(thread, rollout) {
     hasTurnAbortedInTail: Boolean(lastTurnAborted),
     hasTerminalInTail: Boolean(lastTerminal),
     maybeMidTurn,
+    turnActivity,
     conclusion:
-      maybeMidTurn
-        ? "tail suggests a user turn may not yet have a following agent message/terminal event"
-        : "no mid-turn condition inferred from the requested tail",
+      turnActivity === "open"
+        ? "latest turn boundary is open: a start/user turn has no matching terminal (mid-turn)"
+        : turnActivity === "closed"
+          ? "latest turn boundary is closed: the latest turn reached its terminal"
+          : "latest turn boundary is ambiguous: turn activity could not be determined from the rollout",
   };
 }
 

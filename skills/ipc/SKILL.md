@@ -118,8 +118,14 @@ may differ from the effective turn, and MUST NOT gate the dispatch or be read as
 reply-writability prediction. A blocked reply write is expected, not an error, and is recovered
 via `codex_ipc_wait --accept-rollout-fallback` (a known-UUID `--ipc` dispatch), never a policy
 gate; the latest
-user/agent/task-complete signals; whether the tail suggests the session may be mid-turn; and
-whether the instruction is a handoff, oversight request, status check, continuation, review,
+user/agent/task-complete signals; and `activitySignals.turnActivity` — the authoritative
+open/closed/ambiguous read of the latest turn boundary from the shared turn-boundary machine over
+the FULL rollout stream (`open` = a start/user turn with no matching terminal; `closed` = the
+latest turn reached its terminal; `ambiguous` = boundary/rollout ambiguity — fail closed). Prefer
+`turnActivity` over the historical `maybeMidTurn` tail heuristic; `terminalState` and a per-dispatch
+wait `done` both describe past turns and never prove current idleness. The pre-send write-proof gate
+requires `turnActivity==="closed"`; `--allow-mid-turn` overrides `open` only, never `ambiguous`. Also
+note whether the instruction is a handoff, oversight request, status check, continuation, review,
 wait/watch request, or management request. If the inspector
 is ambiguous, read the referenced rollout JSONL directly with targeted grep/tail before asking the
 user. Ask one concise question only when sending would risk interrupting or misdirecting the wrong

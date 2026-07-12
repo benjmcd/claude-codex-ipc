@@ -363,23 +363,171 @@ else
   no "bundled troubleshooting missing the advisory denied-write row"
 fi
 
-# ---- A-08 mid-turn (RED, pending A4/Phase-3) --------------------------------------------
-# start -> user -> agent with NO terminal. CURRENT: maybeMidTurn=false, no turnActivity
-# field, conclusion "no mid-turn condition inferred". DESIRED (A4): turnActivity=="open".
-# Gated OFF by default so the release runner's green battery is unaffected; observe RED with:
-#   IPC_RED_PENDING=1 bash tests/test_session_inspect.sh
-if [[ "${IPC_RED_PENDING:-0}" == "1" ]]; then
-  echo "== A-08 mid-turn: start->user->agent, no terminal is open (RED, pending A4/Phase-3) =="
-  CASE="$TMP/a08-midturn"; mkdir -p "$CASE/sessions"
-  ROLLOUT="$CASE/sessions/rollout-a08-$THREAD.jsonl"
-  cp "$TDIR/fixtures/rollout/rollout-a08-midturn-$THREAD.jsonl" "$ROLLOUT"
-  make_db "$CASE/state.sqlite" "$ROLLOUT"
-  run_inspect "$CASE/state.sqlite" "$CASE/sessions"
-  if [[ $RC -eq 0 ]] && printf '%s' "$OUT" | "$NODE_BIN" -e 'const v=JSON.parse(require("node:fs").readFileSync(0,"utf8"));process.exit(v.activitySignals.turnActivity==="open"?0:1);' >/dev/null 2>&1; then
-    ok "A-08 mid-turn start->user->agent is classified open"
-  else
-    no "A-08 mid-turn start->user->agent is classified open (RED: pending A4/Phase-3)"
+# ---- A4 turnActivity (open/closed/ambiguous) over the FULL parse stream -------------------
+assert_turn_activity(){
+  local expected="$1" label="$2"
+  local got=""
+  if [[ $RC -eq 0 ]]; then
+    got="$(printf '%s' "$OUT" | "$NODE_BIN" -e 'const v=JSON.parse(require("node:fs").readFileSync(0,"utf8"));process.stdout.write(String(v.activitySignals.turnActivity));' 2>/dev/null)"
   fi
+  if [[ "$got" == "$expected" ]]; then
+    ok "$label"
+  else
+    no "$label (rc=$RC, turnActivity=$got want=$expected)"
+  fi
+}
+
+run_turn_activity_case(){
+  local rollout="$1"
+  local case_dir; case_dir="$(dirname "$rollout")"
+  make_db "$case_dir/../state.sqlite" "$rollout"
+  run_inspect "$case_dir/../state.sqlite" "$case_dir"
+}
+
+write_open_no_terminal(){   # start(A) -> user(A) -> agent(A), no terminal
+  cat > "$1" <<EOF
+{"type":"session_meta","payload":{"id":"$THREAD"}}
+{"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-a"}}
+{"type":"event_msg","payload":{"type":"user_message","turn_id":"turn-a","message":"do the task"}}
+{"type":"event_msg","payload":{"type":"agent_message","message":"working on it","phase":"commentary"}}
+EOF
+}
+
+write_closed_same_turn(){   # start(A) -> user(A) -> agent(A) -> task_complete(A)
+  write_open_no_terminal "$1"
+  printf '%s\n' "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"turn-a\",\"last_agent_message\":\"done\"}}" >> "$1"
+}
+
+write_mismatched_terminal(){  # start(A) -> user(A) -> agent(A) -> task_complete(B)
+  write_open_no_terminal "$1"
+  printf '%s\n' "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"turn-b\",\"last_agent_message\":\"done\"}}" >> "$1"
+}
+
+write_completed_then_open(){  # closed turn-a, then a fresh open turn-b (terminalState=completed, activity=open)
+  write_closed_same_turn "$1"
+  cat >> "$1" <<EOF
+{"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-b"}}
+{"type":"event_msg","payload":{"type":"user_message","turn_id":"turn-b","message":"a fresh follow-up"}}
+{"type":"event_msg","payload":{"type":"agent_message","message":"picking it up","phase":"commentary"}}
+EOF
+}
+
+write_clipped_closed(){  # a long tail whose latest same-turn boundary is complete
+  {
+    printf '%s\n' "{\"type\":\"session_meta\",\"payload\":{\"id\":\"$THREAD\"}}"
+    printf '%s\n' "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"turn-a\"}}"
+    printf '%s\n' "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"turn_id\":\"turn-a\",\"message\":\"do the long task\"}}"
+    for i in $(seq 1 30); do
+      printf '%s\n' "{\"type\":\"event_msg\",\"payload\":{\"type\":\"agent_message\",\"message\":\"progress $i\",\"phase\":\"commentary\"}}"
+    done
+    printf '%s\n' "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"turn-a\",\"last_agent_message\":\"done\"}}"
+  } > "$1"
+}
+
+write_no_boundary(){  # a found, parseable rollout with no turn boundary at all
+  cat > "$1" <<EOF
+{"type":"session_meta","payload":{"id":"$THREAD"}}
+{"type":"event_msg","payload":{"type":"token_count","info":{"total":1}}}
+EOF
+}
+
+echo "== 11. A4 turnActivity: start->user->agent (no terminal) is open =="
+CASE="$TMP/ta-open"; mkdir -p "$CASE/sessions"
+write_open_no_terminal "$CASE/sessions/rollout-open-$THREAD.jsonl"
+run_turn_activity_case "$CASE/sessions/rollout-open-$THREAD.jsonl"
+assert_turn_activity open "start->user->agent with no terminal is open"
+
+echo "== 12. A4 turnActivity: A-08 fixture (start->user->agent) is open =="
+CASE="$TMP/ta-a08"; mkdir -p "$CASE/sessions"
+cp "$TDIR/fixtures/rollout/rollout-a08-midturn-$THREAD.jsonl" "$CASE/sessions/rollout-a08-$THREAD.jsonl"
+run_turn_activity_case "$CASE/sessions/rollout-a08-$THREAD.jsonl"
+assert_turn_activity open "committed A-08 mid-turn fixture is open"
+
+echo "== 13. A4 turnActivity: +task_complete(A) is closed =="
+CASE="$TMP/ta-closed"; mkdir -p "$CASE/sessions"
+write_closed_same_turn "$CASE/sessions/rollout-closed-$THREAD.jsonl"
+run_turn_activity_case "$CASE/sessions/rollout-closed-$THREAD.jsonl"
+assert_turn_activity closed "start->user->agent->task_complete(A) is closed"
+
+echo "== 14. A4 turnActivity: +only task_complete(B) is ambiguous =="
+CASE="$TMP/ta-ambiguous"; mkdir -p "$CASE/sessions"
+write_mismatched_terminal "$CASE/sessions/rollout-ambig-$THREAD.jsonl"
+run_turn_activity_case "$CASE/sessions/rollout-ambig-$THREAD.jsonl"
+assert_turn_activity ambiguous "a mismatched-id terminal is ambiguous"
+
+echo "== 15. A4 turnActivity: task_complete(A)->start(B)->agent(B) is open while terminalState stays completed =="
+CASE="$TMP/ta-reopen"; mkdir -p "$CASE/sessions"
+write_completed_then_open "$CASE/sessions/rollout-reopen-$THREAD.jsonl"
+run_turn_activity_case "$CASE/sessions/rollout-reopen-$THREAD.jsonl"
+assert_turn_activity open "a fresh open turn after a completed one is open"
+if [[ $RC -eq 0 ]] && printf '%s' "$OUT" | "$NODE_BIN" -e 'const v=JSON.parse(require("node:fs").readFileSync(0,"utf8"));process.exit(v.activitySignals.terminalState==="completed"?0:1);' >/dev/null 2>&1; then
+  ok "historical terminalState remains completed independent of turnActivity"
+else
+  no "terminalState should remain completed"
+fi
+
+echo "== 16. A4 turnActivity: a long clipped display tail with a complete latest boundary is closed =="
+CASE="$TMP/ta-clipped"; mkdir -p "$CASE/sessions"
+write_clipped_closed "$CASE/sessions/rollout-clipped-$THREAD.jsonl"
+run_turn_activity_case "$CASE/sessions/rollout-clipped-$THREAD.jsonl"
+assert_turn_activity closed "display-tail truncation is not ambiguity when the full stream retained the boundary"
+
+echo "== 17. A4 turnActivity: a found rollout with no boundary snapshot is ambiguous (no throw) =="
+CASE="$TMP/ta-noboundary"; mkdir -p "$CASE/sessions"
+write_no_boundary "$CASE/sessions/rollout-noboundary-$THREAD.jsonl"
+run_turn_activity_case "$CASE/sessions/rollout-noboundary-$THREAD.jsonl"
+assert_turn_activity ambiguous "a found rollout with no emitted boundary is ambiguous"
+
+# ---- A4 write-proof pre-send gate: require closed; --allow-mid-turn overrides open only ----
+WRITE_PROOF=""
+for candidate in \
+  "$TDIR/../skills/ipc/scripts/codex_ipc_write_proof.mjs" \
+  "$TDIR/../scripts/codex_ipc_write_proof.mjs"; do
+  [[ -f "$candidate" ]] && WRITE_PROOF="$candidate" && break
+done
+
+wp_home_setup(){  # $1=home  $2=rollout writer function
+  local home="$1" writer="$2"
+  rm -rf "$home"; mkdir -p "$home/.codex/sessions"
+  local rollout="$home/.codex/sessions/rollout-wp-$THREAD.jsonl"
+  "$writer" "$rollout"
+  "$NODE_BIN" "$DB_BUILDER" "$home/.codex/state_5.sqlite" "$THREAD" "$rollout" >/dev/null 2>&1
+}
+
+WPOUT=""; WPRC=0
+wp_dryrun(){  # $1=home  ...extra write-proof args
+  local home="$1"; shift
+  WPOUT="$(USERPROFILE="$home" HOME="$home" "$NODE_BIN" "$WRITE_PROOF" --thread "$THREAD" "$@" 2>/dev/null)"; WPRC=$?
+}
+wp_field(){  # $1=js predicate over parsed dry-run object `v`
+  printf '%s' "$WPOUT" | "$NODE_BIN" -e "const v=JSON.parse(require('node:fs').readFileSync(0,'utf8'));process.exit(($1)?0:1);" >/dev/null 2>&1
+}
+
+if [[ -n "$WRITE_PROOF" ]]; then
+  echo "== 18. A4 write-proof dry-run: an open turn is rejected without --allow-mid-turn =="
+  wp_home_setup "$TMP/wp-open" write_open_no_terminal
+  wp_dryrun "$TMP/wp-open"
+  wp_field 'v.dryRun===true && v.ok===false && v.failures.some(f=>f.includes("open (mid-turn)"))' \
+    && ok "open turn rejected as mid-turn (dry-run ok:false)" || no "open turn not rejected (rc=$WPRC)"
+
+  echo "== 19. A4 write-proof dry-run: --allow-mid-turn overrides an open turn =="
+  wp_dryrun "$TMP/wp-open" --allow-mid-turn
+  wp_field 'v.dryRun===true && v.ok===true' \
+    && ok "--allow-mid-turn permits an open turn" || no "--allow-mid-turn did not permit open (rc=$WPRC)"
+
+  echo "== 20. A4 write-proof dry-run: an ambiguous turn is never overridable =="
+  wp_home_setup "$TMP/wp-ambiguous" write_mismatched_terminal
+  wp_dryrun "$TMP/wp-ambiguous" --allow-mid-turn
+  wp_field 'v.ok===false && v.failures.some(f=>f.includes("ambiguous"))' \
+    && ok "ambiguous turn rejected even with --allow-mid-turn" || no "ambiguous override behavior wrong (rc=$WPRC)"
+
+  echo "== 21. A4 write-proof dry-run: a closed turn passes the pre-send gate =="
+  wp_home_setup "$TMP/wp-closed" write_closed_same_turn
+  wp_dryrun "$TMP/wp-closed"
+  wp_field 'v.ok===true && v.targetInspection.turnActivity==="closed"' \
+    && ok "a closed turn is send-ready" || no "closed turn not send-ready (rc=$WPRC)"
+else
+  echo "  NOTE: codex_ipc_write_proof.mjs not found; skipping write-proof gate checks"
 fi
 
 echo ""

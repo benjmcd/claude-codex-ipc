@@ -14,6 +14,11 @@ All notable changes to this project will be documented in this file.
   absent, a completed own turn whose verified rollout body matches its terminal certifies `done`
   with `replySource=rollout-fallback` (one stderr `WAIT_DIAGNOSTIC reply-source`; stdout stays one
   token; the recovered body is never emitted). Flagless v0.1.6 stays file-primary and byte-identical.
+- Inspector `turnActivity` (A4): `codex_ipc_session_inspect.mjs` feeds the FULL rollout parse stream
+  (not the clipped display tail) into the shared `createTurnBoundaryAccumulator` and adds an additive
+  `activitySignals.turnActivity` (`open`/`closed`/`ambiguous`) via the pure `summarizeThreadActivity`
+  projection. Summarized lifecycle items gain an additive `turnId`. `maybeMidTurn` values/fields are
+  byte-compatible; the `conclusion` now derives from `turnActivity`; `terminalState` stays historical.
 
 ### Changed
 - Consolidated the two duplicated correlation reducers onto the single boundary machine: removed
@@ -25,6 +30,13 @@ All notable changes to this project will be documented in this file.
   the example payload now state that a denied reply write is expected — self-verify, attempt the
   reply once, and on denial put the full substantive result in the final agent message (no
   retry/escalation). `codex_ipc_contract_audit.mjs` locks these bytes.
+- Marker-proof completion is turn-scoped (A4, fixes A-04): the `codex_ipc_rollout_reader.mjs`
+  marker proof (`pollRolloutForMarker`/`inspectRolloutMarker`) migrated onto the shared
+  turn-boundary accumulator as a named consumer, so a `task_complete` certifies the agent marker
+  only when it closes the SAME turn that carried it. The old pure line-order relation returned a
+  cross-turn false-positive proof (agent marker in turn 1, `task_complete` in turn 2).
+- Write-proof pre-send gate (A4): `codex_ipc_write_proof.mjs` now requires `turnActivity==="closed"`;
+  `--allow-mid-turn` overrides an `open` turn only, never `ambiguous` (fail closed on ambiguity).
 - Stored-policy preflight demoted to advisory (A2): `codex_ipc_session_inspect.mjs` now emits an
   additive `permissionProfileAdvisory` sibling of `approvalMode`/`sandboxPolicy` (names/values
   unchanged) marking the stored `threads.sandbox_policy`/`threads.approval_mode` columns as

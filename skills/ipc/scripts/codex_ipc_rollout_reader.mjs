@@ -1269,50 +1269,19 @@ export function locateRollout(options) {
   };
 }
 
-function applyMarkerRecord(state, item, marker) {
-  if (item.parseError) return;
-  if (
-    item.text.includes(marker) &&
-    item.envelopeType === "event_msg" &&
-    item.payloadType === "user_message"
-  ) {
-    state.lastUserMarkerLine = item.line;
-  }
-  if (
-    item.text.includes(marker) &&
-    !item.interAgent &&
-    item.envelopeType === "event_msg" &&
-    item.payloadType === "agent_message"
-  ) {
-    state.lastAgentMarkerLine = item.line;
-  }
-  if (item.envelopeType === "event_msg" && item.payloadType === "task_complete") {
-    state.lastTaskCompleteLine = item.line;
-  }
-}
-
-function updateMarkerState(state, parsed, marker) {
-  for (const item of parsed.records || []) applyMarkerRecord(state, item, marker);
-  state.exists ||= parsed.reason !== "missing";
-  state.lineCount = Math.max(
-    state.lineCount,
-    parsed.cursor?.lineNumber || parsed.records?.at(-1)?.line || 0,
-  );
-  state.parseErrorCount += parsed.parseErrorCount || 0;
-  state.partialTail = parsed.partialTail || false;
-  state.error = parsed.ok ? null : parsed.reason;
-  return {
-    ...state,
-    agentMarkerSeen: state.lastAgentMarkerLine !== null,
-    taskCompleteAfterAgentMarker:
-      state.lastAgentMarkerLine !== null &&
-      state.lastTaskCompleteLine !== null &&
-      state.lastTaskCompleteLine > state.lastAgentMarkerLine,
-  };
-}
-
-function emptyMarkerState() {
-  return {
+// A4 marker-proof consumer: a NAMED consumer over the ONE shared createTurnBoundaryAccumulator (no
+// third boundary machine). Completion is turn-scoped / turnId-bound: a task_complete certifies the
+// agent marker only when it CLOSES the SAME turn that carried that marker. This replaces the old
+// pure line-order `lastTaskCompleteLine > lastAgentMarkerLine` relation, whose cross-turn blind spot
+// returned a false-positive proof (agent marker in turn 1, task_complete in turn 2 → wrongly ok).
+function createMarkerProofConsumer(marker) {
+  const accumulator = createTurnBoundaryAccumulator();
+  const markerTurnSequences = new Set();
+  // A marker seen with no enclosing task_started-opened turn (ordered / degenerate rollout tail)
+  // stays certifiable by a following same-region task_complete until a new task_started ends it.
+  let looseAgentMarkerPending = false;
+  let completedAfterAgentMarker = false;
+  const state = {
     exists: false,
     lineCount: 0,
     parseErrorCount: 0,
@@ -1322,10 +1291,89 @@ function emptyMarkerState() {
     partialTail: false,
     error: null,
   };
+
+  const processSnapshot = (snapshot) => {
+    if (
+      markerTurnSequences.has(snapshot.sequence) &&
+      snapshot.activity === "closed" &&
+      snapshot.terminalType === "task_complete"
+    ) {
+      completedAfterAgentMarker = true;
+    }
+    markerTurnSequences.delete(snapshot.sequence);
+  };
+
+  return {
+    push(item) {
+      if (item.parseError) {
+        accumulator.push(item);
+        return;
+      }
+      const hasMarker = typeof item.text === "string" && item.text.includes(marker);
+      if (
+        hasMarker &&
+        item.envelopeType === "event_msg" &&
+        item.payloadType === "user_message"
+      ) {
+        state.lastUserMarkerLine = item.line;
+      }
+      const isAgentMarker =
+        hasMarker &&
+        !item.interAgent &&
+        item.envelopeType === "event_msg" &&
+        item.payloadType === "agent_message";
+      const isTaskComplete =
+        item.envelopeType === "event_msg" && item.payloadType === "task_complete";
+      if (item.envelopeType === "event_msg" && item.payloadType === "task_started") {
+        looseAgentMarkerPending = false;
+      }
+      const { sequence, snapshots } = accumulator.push(item);
+      if (isAgentMarker) {
+        state.lastAgentMarkerLine = item.line;
+        if (sequence !== null && sequence !== undefined) {
+          markerTurnSequences.add(sequence);
+        } else {
+          looseAgentMarkerPending = true;
+        }
+      }
+      if (isTaskComplete) {
+        state.lastTaskCompleteLine = item.line;
+        if ((sequence === null || sequence === undefined) && looseAgentMarkerPending) {
+          completedAfterAgentMarker = true;
+        }
+      }
+      for (const snapshot of snapshots) processSnapshot(snapshot);
+    },
+    finish(parsed) {
+      const snapshots = accumulator.finish(parsed?.diagnostics || []);
+      for (const snapshot of snapshots) processSnapshot(snapshot);
+    },
+    observe(parsed) {
+      if (parsed) {
+        state.exists ||= parsed.reason !== "missing";
+        state.lineCount = Math.max(
+          state.lineCount,
+          parsed.cursor?.lineNumber || parsed.records?.at(-1)?.line || 0,
+        );
+        state.parseErrorCount += parsed.parseErrorCount || 0;
+        state.partialTail = parsed.partialTail || false;
+        state.error = parsed.ok ? null : parsed.reason;
+      }
+      return {
+        ...state,
+        agentMarkerSeen: state.lastAgentMarkerLine !== null,
+        taskCompleteAfterAgentMarker: completedAfterAgentMarker,
+      };
+    },
+  };
 }
 
 export function inspectRolloutMarker(rolloutPath, marker) {
-  return updateMarkerState(emptyMarkerState(), readRolloutFile(rolloutPath), marker);
+  const consumer = createMarkerProofConsumer(marker);
+  const parsed = readRolloutFile(rolloutPath);
+  for (const item of parsed.records || []) consumer.push(item);
+  consumer.finish(parsed);
+  return consumer.observe(parsed);
 }
 
 function sha256(value) {
@@ -1351,19 +1399,22 @@ export async function pollRolloutForMarker(
   const interval = Number.isFinite(pollMs) && pollMs > 0 ? pollMs : 1;
   const deadlineAt = startedAtMs + interval * attempts;
   let cursor = null;
-  const markerState = emptyMarkerState();
+  const consumer = createMarkerProofConsumer(marker);
   let lastObservation = null;
   let attemptsMade = 0;
 
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     if (attempt > 1 && now() >= deadlineAt) break;
-    const attemptMarkerState = { ...markerState };
+    // Collect this attempt's streamed records, but only feed them into the shared turn-scoped
+    // accumulator once the read is trusted, so an integrity-failed read never advances the
+    // boundary machine and a re-read from the retained cursor cannot double-push records.
+    const attemptRecords = [];
     const parsed = readRolloutFile(rolloutPath, {
       ...(cursor ? { cursor } : {}),
       deadlineAt,
       now,
       retainRecords: false,
-      onRecord: (item) => applyMarkerRecord(attemptMarkerState, item, marker),
+      onRecord: (item) => attemptRecords.push(item),
     });
     attemptsMade = attempt;
     const trustedRead = parsed.ok || (
@@ -1371,9 +1422,9 @@ export async function pollRolloutForMarker(
     );
     if (trustedRead) {
       if (parsed.ok) cursor = parsed.cursor;
-      Object.assign(markerState, attemptMarkerState);
+      for (const item of attemptRecords) consumer.push(item);
     }
-    lastObservation = updateMarkerState(markerState, parsed, marker);
+    lastObservation = consumer.observe(parsed);
     if (
       trustedRead &&
       lastObservation.agentMarkerSeen &&
