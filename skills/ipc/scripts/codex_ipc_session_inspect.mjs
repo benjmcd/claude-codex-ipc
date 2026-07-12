@@ -264,10 +264,21 @@ function summarizeThread(row) {
     title: row.title || null,
     model: row.model || null,
     reasoningEffort: row.reasoning_effort || null,
-    // Per-thread agent settings (GUI-controlled, mutable): injected follower turns run
-    // under these — preflight them before delegating when reply-file writes matter.
+    // `approvalMode`/`sandboxPolicy` are the parsed snapshot of the stored `threads.approval_mode`
+    // / `threads.sandbox_policy` columns (permission-profile-shaped: observed `disabled`/`managed`).
+    // They are the stored thread row, NOT the effective next-turn `turn_context.sandbox_policy`, so
+    // they may differ from the turn that actually runs and MUST NOT gate a dispatch or be read as a
+    // reply-writability prediction. A blocked reply write is a non-event recovered via
+    // `codex_ipc_wait --accept-rollout-fallback` (A1), never a policy gate. Completion-time
+    // re-stamping was observed evidence, not a stable timing contract.
     approvalMode: row.approval_mode || null,
     sandboxPolicy: parseJsonColumn(row.sandbox_policy),
+    permissionProfileAdvisory: {
+      source: "stored-thread-row",
+      mayDifferFromEffectiveTurn: true,
+      mustNotGateDispatch: true,
+      predictsReplyWritability: false,
+    },
     tokensUsed: row.tokens_used ?? null,
     archived: row.archived ?? null,
     threadSource: row.thread_source || null,

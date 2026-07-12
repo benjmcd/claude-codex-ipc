@@ -112,10 +112,12 @@ node "${CLAUDE_SKILL_DIR}/scripts/codex_ipc_write_proof.mjs" --thread <conversat
 ```
 
 Use the inspector output to identify: the target title, cwd/project, model, reasoning effort,
-archived flag, and rollout path; the thread's stored `approvalMode` and `sandboxPolicy` —
-injected turns run under these, so when the handoff needs reply-file writes outside the thread
-workspace, prefer a `sandboxPolicy.type=disabled` thread (a `managed` thread hard-fails such
-writes under `approval_mode=never`, or prompts the operator under `on-request`); the latest
+archived flag, and rollout path; the thread's stored `approvalMode`/`sandboxPolicy` (carried
+alongside `permissionProfileAdvisory`) — advisory context only: they are the stored thread row,
+may differ from the effective turn, and MUST NOT gate the dispatch or be read as a
+reply-writability prediction. A blocked reply write is expected, not an error, and is recovered
+via `codex_ipc_wait --accept-rollout-fallback` (a known-UUID `--ipc` dispatch), never a policy
+gate; the latest
 user/agent/task-complete signals; whether the tail suggests the session may be mid-turn; and
 whether the instruction is a handoff, oversight request, status check, continuation, review,
 wait/watch request, or management request. If the inspector

@@ -25,6 +25,15 @@ All notable changes to this project will be documented in this file.
   the example payload now state that a denied reply write is expected — self-verify, attempt the
   reply once, and on denial put the full substantive result in the final agent message (no
   retry/escalation). `codex_ipc_contract_audit.mjs` locks these bytes.
+- Stored-policy preflight demoted to advisory (A2): `codex_ipc_session_inspect.mjs` now emits an
+  additive `permissionProfileAdvisory` sibling of `approvalMode`/`sandboxPolicy` (names/values
+  unchanged) marking the stored `threads.sandbox_policy`/`threads.approval_mode` columns as
+  `source:"stored-thread-row"`, `mayDifferFromEffectiveTurn:true`, `mustNotGateDispatch:true`,
+  `predictsReplyWritability:false`. The false "these predict whether an injected turn can write its
+  reply file / preflight before delegating" guidance is corrected across `SKILL.md` and both
+  troubleshooting surfaces (which gain a denied-reply-write row pointing to
+  `codex_ipc_wait --accept-rollout-fallback`); a dated correction is appended to the
+  `docs/COMPATIBILITY.md` host-identity/permission ledger without rewriting the historical rows.
 
 ### Fixed
 - `tests/test_wait_contract.sh` probed only the repo layout, so from an installed skill root it

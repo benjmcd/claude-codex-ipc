@@ -46,11 +46,20 @@ try {
   db.exec(
     "create table threads (" +
       "id text primary key, rollout_path text, updated_at text, " +
-      "updated_at_ms integer, archived integer)",
+      "updated_at_ms integer, archived integer, sandbox_policy text, approval_mode text)",
   );
   db.prepare(
-    "insert into threads (id, rollout_path, updated_at, updated_at_ms, archived) values (?, ?, ?, ?, ?)",
-  ).run(threadId, rolloutPath || null, "2026-07-10T00:00:00Z", 1783641600000, 0);
+    "insert into threads (id, rollout_path, updated_at, updated_at_ms, archived, sandbox_policy, approval_mode) " +
+      "values (?, ?, ?, ?, ?, ?, ?)",
+  ).run(
+    threadId,
+    rolloutPath || null,
+    "2026-07-10T00:00:00Z",
+    1783641600000,
+    0,
+    '{"type":"disabled"}',
+    "never",
+  );
 } finally {
   db.close();
 }
@@ -178,6 +187,27 @@ switch (testCase) {
     assert(value.rollout.primary?.parsedOk === false, "malformed DB rollout validity was hidden");
     assert(value.rollout.primary?.parseErrors?.length === 1, "malformed DB parse error missing");
     break;
+  case "advisory": {
+    // A2: stored approvalMode/sandboxPolicy names+values are preserved byte-for-byte, and the
+    // exact additive permissionProfileAdvisory sibling demotes them to non-gating advisory context.
+    const thread = value.dbThread.thread;
+    assert(thread.approvalMode === "never", "stored approvalMode value changed");
+    assert(
+      JSON.stringify(thread.sandboxPolicy) === JSON.stringify({ type: "disabled" }),
+      "stored sandboxPolicy value changed",
+    );
+    assert(
+      JSON.stringify(thread.permissionProfileAdvisory) ===
+        JSON.stringify({
+          source: "stored-thread-row",
+          mayDifferFromEffectiveTurn: true,
+          mustNotGateDispatch: true,
+          predictsReplyWritability: false,
+        }),
+      "permissionProfileAdvisory object is not the exact advisory shape",
+    );
+    break;
+  }
   default:
     throw new Error("unknown assertion case: " + testCase);
 }
@@ -303,6 +333,35 @@ write_user_complete "$CASE/sessions/b/rollout-other-$THREAD.jsonl"
 make_db "$CASE/state.sqlite" "$DB_ROLLOUT"
 run_inspect "$CASE/state.sqlite" "$CASE/sessions"
 assert_case malformed-db-authority "DB path remains authoritative while parse invalidity stays explicit"
+
+echo "== 9. A2: stored policy is preserved byte-for-byte and demoted to advisory =="
+CASE="$TMP/advisory"; mkdir -p "$CASE/sessions"
+write_user_complete "$CASE/sessions/rollout-advisory-$THREAD.jsonl"
+make_db "$CASE/state.sqlite" "$CASE/sessions/rollout-advisory-$THREAD.jsonl"
+run_inspect "$CASE/state.sqlite" "$CASE/sessions"
+assert_case advisory "approvalMode/sandboxPolicy unchanged plus the exact permissionProfileAdvisory sibling"
+
+echo "== 10. A2: predictive stored-policy claims are gone from active guidance =="
+SKILL_ROOT="$(cd "$(dirname "$(dirname "$INSPECT")")" && pwd)"
+GUIDANCE=("$INSPECT" "$SKILL_ROOT/SKILL.md" "$SKILL_ROOT/references/troubleshooting.md")
+NEG_OK=1
+for surface in "${GUIDANCE[@]}"; do
+  [[ -f "$surface" ]] || continue
+  if grep -q "injected turns run under these" "$surface" \
+    || grep -q "injected follower turns run" "$surface" \
+    || grep -q "will be able to write its reply file" "$surface"; then
+    NEG_OK=0
+    echo "    predictive claim still present in: $surface"
+  fi
+done
+[[ $NEG_OK -eq 1 ]] && ok "no predictive stored-policy claim remains in active guidance" \
+  || no "a predictive stored-policy claim remains in active guidance"
+if grep -q "permissionProfileAdvisory" "$SKILL_ROOT/references/troubleshooting.md" 2>/dev/null \
+  && grep -q -- "--accept-rollout-fallback" "$SKILL_ROOT/references/troubleshooting.md" 2>/dev/null; then
+  ok "bundled troubleshooting carries the advisory denied-write row"
+else
+  no "bundled troubleshooting missing the advisory denied-write row"
+fi
 
 # ---- A-08 mid-turn (RED, pending A4/Phase-3) --------------------------------------------
 # start -> user -> agent with NO terminal. CURRENT: maybeMidTurn=false, no turnActivity

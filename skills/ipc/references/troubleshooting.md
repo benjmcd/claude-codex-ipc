@@ -50,6 +50,16 @@ If drift is confirmed and a live re-proof is genuinely needed, use
 (`--send --ack-live-write --allow-any-thread`). It sends exactly one marker task to exactly one
 explicit conversationId and compares before/after isolation evidence.
 
+## Reply file never written (permission/sandbox denial)
+
+Expected, not an error. The injected follower turn can run under a sandbox that blocks the
+per-dispatch `.reply.md` write. The producer states the denial in one line and puts the full
+substantive result in its final agent message; recover it with
+`codex_ipc_wait --accept-rollout-fallback` on a known-UUID `--ipc` dispatch (flagless and filedrop
+do not auto-recover). The inspector's stored `sandboxPolicy`/`approvalMode` are advisory only
+(`permissionProfileAdvisory`): they may differ from the effective turn and never predict
+reply-writability.
+
 ## Reply viewer
 
 - Exit 0 with "No IPC transport root": nothing has been dispatched yet — not an error.

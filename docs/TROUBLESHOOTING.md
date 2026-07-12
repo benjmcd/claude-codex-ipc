@@ -30,6 +30,7 @@ adds repo/install-level triage.
 | Reply viewer exit 2 | No session id resolvable. Pass `--session <sid>` (the printed listing shows what exists). |
 | Reply viewer exit 1 on `--since` | Malformed `find -newermt` spec — the viewer fails closed rather than reporting a false "0 replies". |
 | Old envelopes disappeared | Retention pruning (`CODEX_IPC_RETENTION_DAYS`, default 7) ran on a later dispatch. Set `0` to disable. |
+| Reply file never written (permission/sandbox denial) | Expected, not an error: the injected turn can run under a sandbox that blocks the per-dispatch `.reply.md` write. The producer states the denial and puts the full result in its final agent message; recover it with `codex_ipc_wait --accept-rollout-fallback` on a known-UUID `--ipc` dispatch (flagless/filedrop do not auto-recover). The inspector's stored `sandboxPolicy`/`approvalMode` are advisory only (`permissionProfileAdvisory`) and never predict reply-writability. |
 
 ## Test issues
 
