@@ -44,7 +44,21 @@ skills/ipc/scripts/handoff_to_codex.sh --ipc <conversation-id> "run the failing 
 
 # 3. Replies (read-only, newest first)
 skills/ipc/scripts/codex_ipc_replies.sh
+
+# 4. Wait for a NAMED dispatch to complete (bounded; opt-in rollout fallback)
+node skills/ipc/scripts/codex_ipc_wait.mjs --thread <conversation-id> --dispatch <dispatchId> \
+  --reply-path <printed .reply.md path> --accept-rollout-fallback --budget-ms 1800000 --interval-ms 1000
 ```
+
+`codex_ipc_wait` prints exactly one of six tokens on stdout — `done`, `aborted`, `superseded`,
+`reply-missing`, `pending`, `unavailable`. `done` certifies that the **named dispatch's own turn**
+completed; it is never proof that the thread is idle now. With `--accept-rollout-fallback`,
+`reply-missing` means the waiter already exhausted **both** body sources (reply file and rollout
+store): inspect its diagnostics/thread rather than re-harvesting or hand-rolling a poll. On
+`reply-missing`/`aborted`:
+resuming the goal in a fresh, unmarked turn will NOT re-certify the original dispatch id; machine re-certification requires a NEW dispatch with a new marker.
+After an accepted live `--ipc` send the wrapper prints a ready-to-run `WAIT:` line before its final
+`RESULT:` line. Flagless (no `--accept-rollout-fallback`) is the legacy file-primary contract.
 
 The wrapper always writes the file-drop before any live attempt, so a failed delivery still
 leaves a working pickup line. Live results are machine-parseable:

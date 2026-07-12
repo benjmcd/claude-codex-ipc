@@ -421,6 +421,45 @@ function main() {
           contains("references/handoff-template.md", "the full substantive result"),
       },
     ], "Static prose lock only: it proves the mandatory instruction bytes are present, not that a follower runtime honored them."),
+    check("REQ-019", "The completion waiter is on every easy-path surface with the OQ-4 re-certification caveat.", [
+      {
+        label: "SKILL.md teaches the bounded codex_ipc_wait with the D2 fallback flag",
+        file: "SKILL.md",
+        ok:
+          contains("SKILL.md", "codex_ipc_wait") &&
+          contains("SKILL.md", "--accept-rollout-fallback"),
+      },
+      {
+        label: "bundled quickstart shows a runnable codex_ipc_wait",
+        file: "examples/quickstart.md",
+        ok: contains("examples/quickstart.md", "codex_ipc_wait.mjs"),
+      },
+      {
+        label: "bundled troubleshooting carries the six-token wait triage and codex_ipc_wait",
+        file: "references/troubleshooting.md",
+        ok: contains("references/troubleshooting.md", "codex_ipc_wait"),
+      },
+      {
+        label: "the OQ-4 re-certification caveat is present verbatim on the recovery surfaces",
+        file: "references/troubleshooting.md",
+        ok:
+          contains(
+            "references/troubleshooting.md",
+            "resuming the goal in a fresh, unmarked turn will NOT re-certify the original dispatch id; machine re-certification requires a NEW dispatch with a new marker.",
+          ) &&
+          contains(
+            "SKILL.md",
+            "resuming the goal in a fresh, unmarked turn will NOT re-certify the original dispatch id; machine re-certification requires a NEW dispatch with a new marker.",
+          ),
+      },
+      {
+        label: "the wrapper prints the runnable WAIT: hint only on accepted live --ipc success",
+        file: "scripts/handoff_to_codex.sh",
+        ok:
+          contains("scripts/handoff_to_codex.sh", "print_wait_hint") &&
+          contains("scripts/handoff_to_codex.sh", "--accept-rollout-fallback --budget-ms 1800000 --interval-ms 1000"),
+      },
+    ], "Static easy-path/reference lock only: it proves the wait references and OQ-4 caveat bytes are present, not their runtime effect."),
   ];
 
   const ok = Object.values(files).every((item) => item.ok) &&

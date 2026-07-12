@@ -455,6 +455,80 @@ fi
 
 assert_no_codex_exec_fallback
 
+# --- A3 wrapper wait-hint (D3) + easy-path OQ-4 gate --------------------------------------
+fgrun_stdout(){ # like fgrun but captures stdout ONLY (stderr discarded) to test WAIT/RESULT ordering
+  OUT="$( cd "$REPO" && CODEX_IPC_ROOT="$IPCROOT" CLAUDE_CODE_SESSION_ID="fgsess" \
+      CODEX_IPC_POLL_DEADLINE_S=2 CODEX_IPC_POLL_INTERVAL_S=1 \
+      PATH="$BIN2:$PATH" bash "$SCRIPT" "$@" 2>/dev/null )"; RC=$?
+}
+
+assert_wait_hint_then_result(){ # $1 label
+  local label="$1"
+  local wcount rcount wln rln last
+  wcount="$(printf '%s\n' "$OUT" | grep -c '^WAIT: node ')"
+  rcount="$(printf '%s\n' "$OUT" | grep -c '^RESULT:')"
+  last="$(printf '%s\n' "$OUT" | tail -n1)"
+  wln="$(printf '%s\n' "$OUT" | grep -n '^WAIT:' | head -1 | cut -d: -f1)"
+  rln="$(printf '%s\n' "$OUT" | grep -n '^RESULT:' | head -1 | cut -d: -f1)"
+  [[ "$wcount" == "1" ]] && ok "$label: exactly one runnable WAIT: hint" || no "$label: WAIT hint count=$wcount"
+  printf '%s\n' "$OUT" | grep -q 'codex_ipc_wait.mjs' \
+    && printf '%s\n' "$OUT" | grep -q -- '--accept-rollout-fallback --budget-ms 1800000 --interval-ms 1000' \
+    && printf '%s\n' "$OUT" | grep -q -- '--reply-path ' \
+    && ok "$label: WAIT hint is runnable (wait tool + D2 flag + budget + reply-path)" || no "$label: WAIT hint content wrong"
+  [[ "$rcount" == "1" ]] && ok "$label: exactly one RESULT line on stdout" || no "$label: RESULT count=$rcount"
+  [[ "$last" == RESULT:* ]] && ok "$label: RESULT is the final stdout line" || no "$label: RESULT not final ($last)"
+  [[ -n "$wln" && -n "$rln" && "$wln" -lt "$rln" ]] && ok "$label: WAIT precedes RESULT" || no "$label: WAIT/RESULT order (w=$wln r=$rln)"
+}
+
+echo "== 32. A3 wait hint: renderer-owned success prints WAIT: before the final RESULT =="
+fgreset always-ok ok 0 rollout-hit
+fgrun_stdout --ipc "$UUIDF" "t32 renderer wait hint"
+assert_wait_hint_then_result "renderer-owned"
+
+echo "== 33. A3 wait hint: auto-loaded success prints WAIT: before the final RESULT =="
+fgreset fail-then-ok ok 0 rollout-hit
+fgrun_stdout --ipc "$UUIDF" "t33 autoloaded wait hint"
+assert_wait_hint_then_result "auto-loaded"
+
+echo "== 34. A3 wait hint: file-drop and failed sends print NO WAIT: hint =="
+FD_OUT="$( cd "$REPO" && CODEX_IPC_ROOT="$IPCROOT" CLAUDE_CODE_SESSION_ID="sessNoHint" \
+    PATH="$BIN:$PATH" bash "$SCRIPT" "plain filedrop task" 2>/dev/null )"
+! printf '%s\n' "$FD_OUT" | grep -q '^WAIT:' && ok "file-drop prints no WAIT hint" || no "file-drop leaked a WAIT hint"
+fgreset always-fail ok 2 rollout-hit
+fgrun_stdout --ipc "$UUIDF" "t34 deferred failed"
+! printf '%s\n' "$OUT" | grep -q '^WAIT:' && ok "a deferred (gui-unowned) send prints no WAIT hint" || no "failed send leaked a WAIT hint"
+fgreset always-fail ok 0 rollout-hit
+fgrun_stdout --ipc "$UUIDF" --foreground-policy switch -- "t34 switch no ack"
+! printf '%s\n' "$OUT" | grep -q '^WAIT:' && ok "a switch-no-ack failed-closed send prints no WAIT hint" || no "failed-closed leaked a WAIT hint"
+
+echo "== 35. A3 easy path: codex_ipc_wait + the verbatim OQ-4 caveat on every recovery surface =="
+OQ4='resuming the goal in a fresh, unmarked turn will NOT re-certify the original dispatch id; machine re-certification requires a NEW dispatch with a new marker.'
+SURFACES=(
+  "$TDIR/../README.md"
+  "$TDIR/../docs/TROUBLESHOOTING.md"
+  "$TDIR/../skills/ipc/references/troubleshooting.md"
+  "$TDIR/../skills/ipc/examples/quickstart.md"
+  "$TDIR/../skills/ipc/SKILL.md"
+)
+gate_ok=1
+for s in "${SURFACES[@]}"; do
+  [[ -f "$s" ]] || continue
+  grep -q "codex_ipc_wait" "$s" || { gate_ok=0; echo "    missing codex_ipc_wait: $s"; }
+  grep -Fq "$OQ4" "$s" || { gate_ok=0; echo "    missing verbatim OQ-4 caveat: $s"; }
+done
+[[ $gate_ok -eq 1 ]] && ok "every recovery surface references codex_ipc_wait and carries the verbatim OQ-4 caveat" \
+  || no "a recovery surface is missing codex_ipc_wait or the OQ-4 caveat"
+for s in "$TDIR/../docs/TROUBLESHOOTING.md" "$TDIR/../skills/ipc/references/troubleshooting.md"; do
+  [[ -f "$s" ]] || continue
+  [[ "$(grep -Fc "$OQ4" "$s")" -ge 2 ]] \
+    && ok "$(basename "$s") carries OQ-4 in both the reply-missing and aborted rows" \
+    || no "$(basename "$s") missing an OQ-4 row"
+done
+existing_surfaces=(); for s in "${SURFACES[@]}"; do [[ -f "$s" ]] && existing_surfaces+=("$s"); done
+resume_bad="$(grep -Fl "resume the same goal" "${existing_surfaces[@]}" 2>/dev/null || true)"
+[[ -z "$resume_bad" ]] && ok "no recovery surface says 'resume the same goal' without the caveat" \
+  || no "a recovery surface says 'resume the same goal': $resume_bad"
+
 echo ""
 echo "RESULT: $PASS passed, $FAIL failed"
 [[ $FAIL -eq 0 ]] && echo "ALL GREEN" || echo "FAILURES PRESENT"

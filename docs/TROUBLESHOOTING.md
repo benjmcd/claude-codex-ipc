@@ -32,6 +32,24 @@ adds repo/install-level triage.
 | Old envelopes disappeared | Retention pruning (`CODEX_IPC_RETENTION_DAYS`, default 7) ran on a later dispatch. Set `0` to disable. |
 | Reply file never written (permission/sandbox denial) | Expected, not an error: the injected turn can run under a sandbox that blocks the per-dispatch `.reply.md` write. The producer states the denial and puts the full result in its final agent message; recover it with `codex_ipc_wait --accept-rollout-fallback` on a known-UUID `--ipc` dispatch (flagless/filedrop do not auto-recover). The inspector's stored `sandboxPolicy`/`approvalMode` are advisory only (`permissionProfileAdvisory`) and never predict reply-writability. |
 
+## Completion / wait triage (`codex_ipc_wait`)
+
+`codex_ipc_wait` prints exactly one of six tokens on stdout: `done`, `aborted`, `superseded`,
+`reply-missing`, `pending`, `unavailable`. A bounded wait is
+`node skills/ipc/scripts/codex_ipc_wait.mjs --thread <uuid> --dispatch <dispatchId> --reply-path
+<path> --accept-rollout-fallback --budget-ms 1800000 --interval-ms 1000`. `done` certifies the
+**named dispatch's own turn**, never current thread idleness. Flagless (no
+`--accept-rollout-fallback`) is the legacy file-primary contract.
+
+| Token | Cause / remediation |
+|---|---|
+| `done` | The named dispatch's own turn reached `task_complete`. This is named-dispatch completion, NOT proof the thread is idle now. Source-aware callers read `replySource` / the `reply-source` diagnostic, or open the dual-source viewer; an opt-in `done` is never proof the reply path exists. |
+| `pending` | No determination yet (single-shot, or budget expired with the turn still open). Wait longer or re-inspect; do not resend. |
+| `reply-missing` | Under `--accept-rollout-fallback` the waiter already exhausted BOTH body sources (reply file and rollout store). Inspect its diagnostics/thread; do not re-harvest, auto-resend, or hand-roll rollout/report-file polling. resuming the goal in a fresh, unmarked turn will NOT re-certify the original dispatch id; machine re-certification requires a NEW dispatch with a new marker. |
+| `aborted` | The dispatch's own turn ended in `turn_aborted` (any reply is unverified). Surface it; do not wait. resuming the goal in a fresh, unmarked turn will NOT re-certify the original dispatch id; machine re-certification requires a NEW dispatch with a new marker. |
+| `superseded` | A newer `task_started` opened before the dispatch turn's terminal. A later, unrelated terminal never certifies it; issue a NEW dispatch if the goal still matters. |
+| `unavailable` | No authoritative rollout candidate, or rollout/reply-scan ambiguity / schema failure. Re-inspect the thread; never infer non-delivery or auto-resend. |
+
 ## Test issues
 
 | Symptom | Cause / fix |

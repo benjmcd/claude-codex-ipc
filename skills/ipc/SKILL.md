@@ -212,6 +212,16 @@ Rollout identity precondition: an explicit `--rollout-path` must name a `<thread
 file whose first record is a matching `session_meta` — the shared reader validates identity even
 for explicit paths, so a renamed or copied rollout yields `unavailable` with an identity-mismatch
 diagnostic rather than reading the wrong thread.
+A bounded example (30-minute budget, opt-in rollout fallback):
+`node scripts/codex_ipc_wait.mjs --thread <uuid> --dispatch <dispatchId> --reply-path <path>
+--accept-rollout-fallback --budget-ms 1800000 --interval-ms 1000`. A `done` token is
+**named-dispatch completion, never current thread idleness** — `terminalState` and a per-dispatch
+`done` both describe past turns. With `--accept-rollout-fallback`, `reply-missing` means the waiter
+already exhausted **both** body sources (reply file and rollout store): inspect its
+diagnostics/thread; do not re-harvest, auto-resend, or hand-roll rollout/report-file polling. On
+`reply-missing`/`aborted`:
+resuming the goal in a fresh, unmarked turn will NOT re-certify the original dispatch id; machine re-certification requires a NEW dispatch with a new marker.
+Flagless (no `--accept-rollout-fallback`) is the legacy file-primary contract.
 Compose handoffs with the completion contract in
 [references/handoff-template.md](references/handoff-template.md): self-verify BEFORE writing the
 reply; the reply is the last act of the turn.

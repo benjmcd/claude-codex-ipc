@@ -60,6 +60,31 @@ do not auto-recover). The inspector's stored `sandboxPolicy`/`approvalMode` are 
 (`permissionProfileAdvisory`): they may differ from the effective turn and never predict
 reply-writability.
 
+## Completion / wait triage (`codex_ipc_wait`)
+
+`codex_ipc_wait` prints exactly one of six tokens on stdout: `done`, `aborted`, `superseded`,
+`reply-missing`, `pending`, `unavailable`. Bounded example:
+`node "${CLAUDE_SKILL_DIR}/scripts/codex_ipc_wait.mjs" --thread <uuid> --dispatch <dispatchId>
+--reply-path <path> --accept-rollout-fallback --budget-ms 1800000 --interval-ms 1000`. `done`
+certifies the **named dispatch's own turn**, never current thread idleness. Flagless (no
+`--accept-rollout-fallback`) is the legacy file-primary contract.
+
+- `done`: the named dispatch's own turn completed — named-dispatch completion, not thread
+  idleness. Source-aware callers read `replySource` / the `reply-source` diagnostic or the
+  dual-source viewer; an opt-in `done` never proves the reply path exists.
+- `pending`: no determination yet — wait longer or re-inspect; do not resend.
+- `reply-missing`: under `--accept-rollout-fallback` the waiter already exhausted BOTH body
+  sources (reply file and rollout store). Inspect its diagnostics/thread; do not re-harvest,
+  auto-resend, or hand-roll rollout/report-file polling. Recovery caveat:
+  resuming the goal in a fresh, unmarked turn will NOT re-certify the original dispatch id; machine re-certification requires a NEW dispatch with a new marker.
+- `aborted`: the dispatch's own turn ended in `turn_aborted` (any reply is unverified) — surface
+  it, do not wait. Recovery caveat:
+  resuming the goal in a fresh, unmarked turn will NOT re-certify the original dispatch id; machine re-certification requires a NEW dispatch with a new marker.
+- `superseded`: a newer `task_started` opened before the terminal; a later unrelated terminal
+  never certifies it. Issue a NEW dispatch if the goal still matters.
+- `unavailable`: no authoritative rollout candidate or rollout/reply-scan ambiguity — re-inspect;
+  never infer non-delivery or auto-resend.
+
 ## Reply viewer
 
 - Exit 0 with "No IPC transport root": nothing has been dispatched yet — not an error.

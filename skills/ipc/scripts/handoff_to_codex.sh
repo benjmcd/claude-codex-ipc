@@ -453,12 +453,20 @@ if [[ "$MODE" == "ipc" ]]; then
         fi
         printf '%s\n' "rollout-unavailable"
     }
+    # D3 wait hint: ONLY the two accepted live --ipc success branches print one POSIX-escaped,
+    # runnable WAIT: line (exact thread/dispatch/--reply-path + the D2 flag and 30-minute budget)
+    # BEFORE the single final RESULT: line. File-drop, exec, and every failure branch must not.
+    print_wait_hint() {
+        printf 'WAIT: node %q --thread %q --dispatch %q --reply-path %q --accept-rollout-fallback --budget-ms 1800000 --interval-ms 1000\n' \
+            "${SCRIPT_DIR}/codex_ipc_wait.mjs" "$IPC_CID" "$DISPATCH_ID" "$INBOUND"
+    }
     echo "Injecting pickup line into live Desktop thread ${IPC_CID} via IPC router..."
     if send_live; then
         CONFIRMATION=$(observe_rollout)
         echo "[ Delivered into live thread ${IPC_CID}. It should appear in your Codex Desktop GUI. ]"
-        echo "RESULT: gui-delivered -- reason=renderer-owned -- confirmation=${CONFIRMATION}"
         echo "Codex's reply will be written to ${INBOUND} (Claude Code reads it)."
+        print_wait_hint
+        echo "RESULT: gui-delivered -- reason=renderer-owned -- confirmation=${CONFIRMATION}"
         exit 0
     fi
     if ! printf '%s' "$IPC_OUTPUT" | grep -q '"error": *"no-client-found"'; then
@@ -561,10 +569,11 @@ if [[ "$MODE" == "ipc" ]]; then
             [[ "$FOREGROUND_POLICY" == "switch" ]] && DELIVER_REASON="foreground-switched"
             CONFIRMATION=$(observe_rollout)
             echo "[ Delivered into live thread ${IPC_CID}. It should appear in your Codex Desktop GUI. ]"
-            echo "RESULT: gui-delivered -- reason=${DELIVER_REASON} -- confirmation=${CONFIRMATION}"
+            echo "Codex's reply will be written to ${INBOUND} (Claude Code reads it)."
             echo "(Rollout confirmation reflects bounded pickup observation only; it does not confirm" >&2
             echo " completion or reply-file success.)" >&2
-            echo "Codex's reply will be written to ${INBOUND} (Claude Code reads it)."
+            print_wait_hint
+            echo "RESULT: gui-delivered -- reason=${DELIVER_REASON} -- confirmation=${CONFIRMATION}"
             exit 0
         fi
     done

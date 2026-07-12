@@ -37,6 +37,15 @@ All notable changes to this project will be documented in this file.
   cross-turn false-positive proof (agent marker in turn 1, `task_complete` in turn 2).
 - Write-proof pre-send gate (A4): `codex_ipc_write_proof.mjs` now requires `turnActivity==="closed"`;
   `--allow-mid-turn` overrides an `open` turn only, never `ambiguous` (fail closed on ambiguity).
+- Completion waiter on every easy path (A3): README Quickstart, `skills/ipc/examples/quickstart.md`,
+  `docs/TROUBLESHOOTING.md`, `skills/ipc/references/troubleshooting.md`, and `SKILL.md` now show a
+  bounded `codex_ipc_wait --accept-rollout-fallback` with all six tokens and the named-dispatch-
+  completion-vs-thread-idleness distinction, and carry the verbatim OQ-4 caveat ("resuming the goal
+  in a fresh, unmarked turn will NOT re-certify the original dispatch id; machine re-certification
+  requires a NEW dispatch with a new marker.") on every recovery surface. The `handoff_to_codex.sh`
+  wrapper prints one POSIX-escaped `WAIT:` line before the final `RESULT:` on the two accepted live
+  `--ipc` success branches only (D3); file-drop/exec/failure never print it. `codex_ipc_contract_audit.mjs`
+  gains REQ-019 enforcing the easy-path references and the verbatim OQ-4 caveat.
 - Stored-policy preflight demoted to advisory (A2): `codex_ipc_session_inspect.mjs` now emits an
   additive `permissionProfileAdvisory` sibling of `approvalMode`/`sandboxPolicy` (names/values
   unchanged) marking the stored `threads.sandbox_policy`/`threads.approval_mode` columns as
