@@ -1,0 +1,6 @@
+{"type":"session_meta","payload":{"id":"11111111-1111-4111-8111-111111111111"}}
+{"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-a"}}
+{"type":"event_msg","payload":{"type":"user_message","turn_id":"turn-a","message":"read \"C:/synthetic/1600000000-6-abcdef0123456789.task.md\" and proceed"}}
+{"type":"event_msg","payload":{"type":"user_message","turn_id":"turn-a","message":"one more note: keep the summary concise"}}
+{"type":"event_msg","payload":{"type":"agent_message","message":"a06 correlated final answer","phase":"final_answer"}}
+{"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-a","last_agent_message":"a06 correlated final answer"}}

@@ -1,0 +1,5 @@
+{"type":"session_meta","payload":{"id":"33333333-3333-4333-8333-333333333333"}}
+{"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-a"}}
+{"type":"event_msg","payload":{"type":"user_message","turn_id":"turn-b","message":"read \"C:/synthetic/1500000000-5-abcdef0123456789.task.md\" and proceed"}}
+{"type":"event_msg","payload":{"type":"agent_message","message":"body from a mismatched turn must not be served","phase":"final_answer"}}
+{"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-a","last_agent_message":"body from a mismatched turn must not be served"}}

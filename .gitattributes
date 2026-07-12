@@ -13,3 +13,10 @@
 
 # PowerShell tolerates LF; keep it explicit so Windows editors don't reintroduce CRLF churn.
 *.ps1 text eol=lf
+
+# Release manifests are byte-exact artifacts verified by tests/gen_release_manifest.sh
+# --check (which diffs the frozen file against freshly generated LF output) and by
+# sha256sum -c against release/manifests/MANIFEST-SHA256SUMS.txt. Pin LF so a Windows
+# checkout cannot rewrite them to CRLF and break verification.
+release/manifests/*.manifest text eol=lf
+release/manifests/MANIFEST-SHA256SUMS.txt text eol=lf

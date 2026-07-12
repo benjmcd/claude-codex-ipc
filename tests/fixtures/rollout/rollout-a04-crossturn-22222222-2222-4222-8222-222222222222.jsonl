@@ -1,0 +1,8 @@
+{"type":"session_meta","payload":{"id":"22222222-2222-4222-8222-222222222222"}}
+{"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-1"}}
+{"type":"event_msg","payload":{"type":"user_message","turn_id":"turn-1","message":"read \"C:/synthetic/1400000000-4-abcdef0123456789.task.md\" and proceed"}}
+{"type":"event_msg","payload":{"type":"agent_message","message":"A04_PROOF_MARKER completed in turn one","phase":"final_answer"}}
+{"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-2"}}
+{"type":"event_msg","payload":{"type":"user_message","turn_id":"turn-2","message":"now do an unrelated follow-up task"}}
+{"type":"event_msg","payload":{"type":"agent_message","message":"turn two output without the marker","phase":"final_answer"}}
+{"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-2","last_agent_message":"turn two output without the marker"}}

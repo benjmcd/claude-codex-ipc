@@ -573,5 +573,57 @@ await test("poller reads only appended records and stops at its bounded deadline
   assert.ok(now <= 6);
 });
 
+// ---- A-05 regression guard (GREEN): a wrong-turn user-message stays fail-closed ----------
+// The already-fixed wrong-turn-reply defect (fixed at base 0fbd517). Must remain GREEN: a
+// user_message whose turn_id disagrees with its enclosing turn must never serve that turn's
+// body. Fixture: rollout-a05-wrongturn-33333333-3333-4333-8333-333333333333.jsonl.
+test("A-05 guard: user-message turn-id mismatch refuses to serve a wrong-turn body", () => {
+  const a05 = path.join(
+    fixtures,
+    "rollout-a05-wrongturn-33333333-3333-4333-8333-333333333333.jsonl",
+  );
+  const result = correlateDispatch(readRolloutFile(a05), "1500000000-5-abcdef0123456789");
+  assert.equal(result.status, "none");
+  assert.equal(result.reason, "unparseable");
+  assert.ok(result.diagnostics.some((item) => item.code === "user-message-turn-id-mismatch"));
+});
+
+// ---- Pending RED fixtures (opt-in via IPC_RED_PENDING=1) ----------------------------------
+// RED-first v0.1.6 fixtures. They assert the DESIRED post-fix behavior and therefore FAIL
+// against current code (the defect reproduces). Gated OFF by default so the release runner's
+// green battery is unaffected; un-gated (promoted to always-run) when the owning fix lands:
+// A-06 in Phase 2 (A1 shared correlator), A-04 in Phase 3 (A4 marker-proof turn-binding).
+// Observe RED with:  IPC_RED_PENDING=1 bash tests/test_rollout_reader.sh
+if (process.env.IPC_RED_PENDING === "1") {
+  test("A-06 (RED, pending A1/Phase-2): same-turn-id later user must still correlate complete", () => {
+    const a06 = path.join(
+      fixtures,
+      "rollout-a06-sameturn-11111111-1111-4111-8111-111111111111.jsonl",
+    );
+    const result = correlateDispatch(readRolloutFile(a06), "1600000000-6-abcdef0123456789");
+    // DESIRED: same-turn-id exemption -> complete. CURRENT wrong output: none / ambiguous.
+    assert.equal(result.status, "complete");
+    assert.equal(result.text, "a06 correlated final answer");
+  });
+
+  await test("A-04 (RED, pending A4/Phase-3): cross-turn marker proof must be ok:false", async () => {
+    const a04 = path.join(
+      fixtures,
+      "rollout-a04-crossturn-22222222-2222-4222-8222-222222222222.jsonl",
+    );
+    // Agent marker in turn-1 (no terminal there); task_complete only in turn-2 (marker absent).
+    const proof = await pollRolloutForMarker(a04, "A04_PROOF_MARKER", 10, 1, {
+      now: () => 0,
+      sleep: async () => {},
+    });
+    // DESIRED: turn-id-bound proof -> ok:false. CURRENT wrong output: ok:true (cross-turn).
+    assert.equal(proof.ok, false);
+    assert.equal(
+      inspectRolloutMarker(a04, "A04_PROOF_MARKER").taskCompleteAfterAgentMarker,
+      false,
+    );
+  });
+}
+
 console.log(`RESULT: ${passed} passed, 0 failed`);
 NODE

@@ -304,6 +304,25 @@ make_db "$CASE/state.sqlite" "$DB_ROLLOUT"
 run_inspect "$CASE/state.sqlite" "$CASE/sessions"
 assert_case malformed-db-authority "DB path remains authoritative while parse invalidity stays explicit"
 
+# ---- A-08 mid-turn (RED, pending A4/Phase-3) --------------------------------------------
+# start -> user -> agent with NO terminal. CURRENT: maybeMidTurn=false, no turnActivity
+# field, conclusion "no mid-turn condition inferred". DESIRED (A4): turnActivity=="open".
+# Gated OFF by default so the release runner's green battery is unaffected; observe RED with:
+#   IPC_RED_PENDING=1 bash tests/test_session_inspect.sh
+if [[ "${IPC_RED_PENDING:-0}" == "1" ]]; then
+  echo "== A-08 mid-turn: start->user->agent, no terminal is open (RED, pending A4/Phase-3) =="
+  CASE="$TMP/a08-midturn"; mkdir -p "$CASE/sessions"
+  ROLLOUT="$CASE/sessions/rollout-a08-$THREAD.jsonl"
+  cp "$TDIR/fixtures/rollout/rollout-a08-midturn-$THREAD.jsonl" "$ROLLOUT"
+  make_db "$CASE/state.sqlite" "$ROLLOUT"
+  run_inspect "$CASE/state.sqlite" "$CASE/sessions"
+  if [[ $RC -eq 0 ]] && printf '%s' "$OUT" | "$NODE_BIN" -e 'const v=JSON.parse(require("node:fs").readFileSync(0,"utf8"));process.exit(v.activitySignals.turnActivity==="open"?0:1);' >/dev/null 2>&1; then
+    ok "A-08 mid-turn start->user->agent is classified open"
+  else
+    no "A-08 mid-turn start->user->agent is classified open (RED: pending A4/Phase-3)"
+  fi
+fi
+
 echo ""
 echo "RESULT: $PASS passed, $FAIL failed"
 [[ $FAIL -eq 0 ]] && echo "ALL GREEN" || echo "FAILURES PRESENT"
