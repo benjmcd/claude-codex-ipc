@@ -32,9 +32,13 @@
 # the recovered body is NEVER emitted). A present-but-invalid reply (symlink,
 # non-regular, unreadable) never falls through. An absent/empty/mismatched body
 # stays reply-missing. Flagless v0.1.6 stays file-primary and byte-identical.
-# Diagnostics stderr only; exit 0 for every determination, nonzero only usage
-# errors; no daemon; import side-effect-free; Node builtins only, node:sqlite
-# forbidden.
+# Diagnostics stderr only. FLAGLESS: exit 0 for every determination, nonzero
+# only usage errors (byte-identical to prior releases). A6 opt-in
+# --status-exit-codes maps the determination to a frozen exit code
+# (done=0, pending=2, aborted=3, superseded=4, reply-missing=5, unavailable=6);
+# usage errors stay exit 1 with no determination token in either mode; the token
+# stays the sole stdout line. No daemon; import side-effect-free; Node builtins
+# only, node:sqlite forbidden.
 
 set -uo pipefail
 
@@ -551,6 +555,56 @@ else
   no "missing --dispatch exited zero"
   dump_output
 fi
+
+echo "== 6. A6 opt-in --status-exit-codes: frozen token/exit matrix (flag AND flagless) =="
+assert_token_exit(){ # expected_token expected_exit label
+  local expected="$1" code="$2" label="$3"
+  if [[ $RC -eq "$code" ]] && printf '%s\n' "$expected" | cmp -s - "$OUT_FILE"; then
+    ok "$label"
+  else
+    no "$label (want token=$expected exit=$code; got exit=$RC)"
+    dump_output
+  fi
+}
+
+CASE="$TMP/a6-done"; mkdir -p "$CASE"; write_done "$CASE/rollout-$THREAD.jsonl"; make_reply "$CASE/reply.md"
+run_case "$CASE" --rollout-path "$CASE/rollout-$THREAD.jsonl" --reply-path "$CASE/reply.md"
+assert_token_exit done 0 "flagless done exits 0"
+run_case "$CASE" --rollout-path "$CASE/rollout-$THREAD.jsonl" --reply-path "$CASE/reply.md" --status-exit-codes
+assert_token_exit done 0 "flag done exits 0"
+run_case "$CASE" --rollout-path "$CASE/rollout-$THREAD.jsonl" --reply-path "$CASE/absent.md"
+assert_token_exit reply-missing 0 "flagless reply-missing exits 0"
+run_case "$CASE" --rollout-path "$CASE/rollout-$THREAD.jsonl" --reply-path "$CASE/absent.md" --status-exit-codes
+assert_token_exit reply-missing 5 "flag reply-missing exits 5"
+
+CASE="$TMP/a6-pending"; mkdir -p "$CASE"; write_pending "$CASE/rollout-$THREAD.jsonl"
+run_case "$CASE" --rollout-path "$CASE/rollout-$THREAD.jsonl" --reply-path "$CASE/absent.md"
+assert_token_exit pending 0 "flagless pending exits 0"
+run_case "$CASE" --rollout-path "$CASE/rollout-$THREAD.jsonl" --reply-path "$CASE/absent.md" --status-exit-codes
+assert_token_exit pending 2 "flag pending exits 2"
+
+CASE="$TMP/a6-aborted"; mkdir -p "$CASE"; write_aborted "$CASE/rollout-$THREAD.jsonl"; make_reply "$CASE/reply.md"
+run_case "$CASE" --rollout-path "$CASE/rollout-$THREAD.jsonl" --reply-path "$CASE/reply.md"
+assert_token_exit aborted 0 "flagless aborted exits 0"
+run_case "$CASE" --rollout-path "$CASE/rollout-$THREAD.jsonl" --reply-path "$CASE/reply.md" --status-exit-codes
+assert_token_exit aborted 3 "flag aborted exits 3"
+
+CASE="$TMP/a6-superseded"; mkdir -p "$CASE"; write_superseded "$CASE/rollout-$THREAD.jsonl"; make_reply "$CASE/reply.md"
+run_case "$CASE" --rollout-path "$CASE/rollout-$THREAD.jsonl" --reply-path "$CASE/reply.md"
+assert_token_exit superseded 0 "flagless superseded exits 0"
+run_case "$CASE" --rollout-path "$CASE/rollout-$THREAD.jsonl" --reply-path "$CASE/reply.md" --status-exit-codes
+assert_token_exit superseded 4 "flag superseded exits 4"
+
+CASE="$TMP/a6-unavailable"; mkdir -p "$CASE/sessions"; make_reply "$CASE/reply.md"
+run_case "$CASE" --reply-path "$CASE/reply.md"
+assert_token_exit unavailable 0 "flagless unavailable exits 0"
+run_case "$CASE" --reply-path "$CASE/reply.md" --status-exit-codes
+assert_token_exit unavailable 6 "flag unavailable exits 6"
+
+run_wait --thread "$THREAD" --status-exit-codes
+if [[ $RC -eq 1 && ! -s "$OUT_FILE" ]]; then ok "usage error under the flag exits 1 with no token"; else no "usage error under flag (rc=$RC)"; dump_output; fi
+run_wait --thread "$THREAD"
+if [[ $RC -eq 1 && ! -s "$OUT_FILE" ]]; then ok "usage error flagless exits 1 with no token"; else no "usage error flagless (rc=$RC)"; dump_output; fi
 
 echo
 echo "RESULT: $PASS passed, $FAIL failed"

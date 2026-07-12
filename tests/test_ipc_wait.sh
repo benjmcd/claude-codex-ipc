@@ -747,5 +747,94 @@ await test("positive-budget CLI exits within its bound without a lingering proce
   assert.ok(elapsed < 1500, `bounded process took ${elapsed} ms`);
 });
 
+function assertTokenExit(result, token, code) {
+  assert.equal(result.signal, null);
+  assert.equal(result.stdout, `${token}\n`, `stdout token for ${token}: got ${JSON.stringify(result.stdout)}`);
+  assert.equal(result.status, code, `exit code for ${token}: ${result.stderr}`);
+}
+
+await test("A6: --status-exit-codes maps every determination; flagless stays all-exit-0", () => {
+  const root = caseDir("a6-matrix");
+  const base = (rollout, reply, extra = []) => [
+    "--thread", thread, "--dispatch", dispatch, "--rollout-path", rollout, "--reply-path", reply, ...extra,
+  ];
+
+  // done = 0 in both modes
+  const doneRollout = writeRollout(path.join(root, "done"), [...ownOpenRecords(), event("task_complete", ownTurn)]);
+  const doneReply = writeReply(path.join(root, "done", `${dispatch}.reply.md`));
+  assertTokenExit(cli(base(doneRollout, doneReply)), "done", 0);
+  assertTokenExit(cli(base(doneRollout, doneReply, ["--status-exit-codes"])), "done", 0);
+
+  // reply-missing: flagless 0, flag 5
+  const missReply = path.join(root, "done", "missing.md");
+  assertTokenExit(cli(base(doneRollout, missReply)), "reply-missing", 0);
+  assertTokenExit(cli(base(doneRollout, missReply, ["--status-exit-codes"])), "reply-missing", 5);
+
+  // pending: flagless 0, flag 2
+  const pendRollout = writeRollout(path.join(root, "pending"), ownOpenRecords());
+  const pendReply = path.join(root, "pending", "missing.md");
+  assertTokenExit(cli(base(pendRollout, pendReply)), "pending", 0);
+  assertTokenExit(cli(base(pendRollout, pendReply, ["--status-exit-codes"])), "pending", 2);
+
+  // aborted: flagless 0, flag 3
+  const abRollout = writeRollout(path.join(root, "aborted"), [...ownOpenRecords(), event("turn_aborted", ownTurn)]);
+  const abReply = writeReply(path.join(root, "aborted", `${dispatch}.reply.md`));
+  assertTokenExit(cli(base(abRollout, abReply)), "aborted", 0);
+  assertTokenExit(cli(base(abRollout, abReply, ["--status-exit-codes"])), "aborted", 3);
+
+  // superseded: flagless 0, flag 4
+  const supRollout = writeRollout(path.join(root, "superseded"), [
+    ...ownOpenRecords(),
+    event("task_started", otherTurn),
+    event("user_message", otherTurn, { message: "unrelated" }),
+    event("task_complete", otherTurn),
+  ]);
+  const supReply = writeReply(path.join(root, "superseded", `${dispatch}.reply.md`));
+  assertTokenExit(cli(base(supRollout, supReply)), "superseded", 0);
+  assertTokenExit(cli(base(supRollout, supReply, ["--status-exit-codes"])), "superseded", 4);
+
+  // unavailable: flagless 0, flag 6 (no authoritative rollout candidate)
+  const unavArgs = [
+    "--thread", thread, "--dispatch", dispatch,
+    "--sessions-root", path.join(root, "no-sessions"), "--transport-root", path.join(root, "transport"),
+  ];
+  assertTokenExit(cli(unavArgs), "unavailable", 0);
+  assertTokenExit(cli([...unavArgs, "--status-exit-codes"]), "unavailable", 6);
+
+  // usage error: exit 1, no determination token, in BOTH modes
+  const badFlagless = cli(["--thread", thread]);
+  assert.equal(badFlagless.stdout, "");
+  assert.equal(badFlagless.status, 1);
+  const badFlag = cli(["--thread", thread, "--status-exit-codes"]);
+  assert.equal(badFlag.stdout, "");
+  assert.equal(badFlag.status, 1);
+});
+
+await test("single-shot wait validates one snapshot: no second locator/full-file read", async () => {
+  // Phase-2 verifier gap (i): prove the single-shot path opens the rollout exactly twice — once for
+  // the locator's first-record identity check and once for the single validated full-file read —
+  // with no re-locate or second full read after lifecycle classification.
+  const root = caseDir("read-count-spy");
+  const rollout = writeRollout(root, [...ownOpenRecords(), event("task_complete", ownTurn)]);
+  const reply = writeReply(path.join(root, `${dispatch}.reply.md`));
+  const rolloutResolved = path.resolve(rollout);
+  const originalOpen = fs.openSync;
+  let rolloutOpens = 0;
+  fs.openSync = (target, ...args) => {
+    try {
+      if (typeof target === "string" && path.resolve(target) === rolloutResolved) rolloutOpens += 1;
+    } catch {}
+    return originalOpen(target, ...args);
+  };
+  let result;
+  try {
+    result = await waitForCompletion(directOptions(root, rollout, reply));
+  } finally {
+    fs.openSync = originalOpen;
+  }
+  assert.equal(result.token, "done");
+  assert.equal(rolloutOpens, 2);
+});
+
 console.log(`RESULT: ${passed} passed, 0 failed`);
 NODE

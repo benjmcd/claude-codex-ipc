@@ -222,6 +222,10 @@ diagnostics/thread; do not re-harvest, auto-resend, or hand-roll rollout/report-
 `reply-missing`/`aborted`:
 resuming the goal in a fresh, unmarked turn will NOT re-certify the original dispatch id; machine re-certification requires a NEW dispatch with a new marker.
 Flagless (no `--accept-rollout-fallback`) is the legacy file-primary contract.
+Exit-code-driven callers may add the opt-in `--status-exit-codes`, which maps the determination to
+`done=0`, `pending=2`, `aborted=3`, `superseded=4`, `reply-missing=5`, `unavailable=6` (usage errors
+stay exit 1 with no token); the token remains the sole stdout line. Without the flag every
+determination exits 0.
 Compose handoffs with the completion contract in
 [references/handoff-template.md](references/handoff-template.md): self-verify BEFORE writing the
 reply; the reply is the last act of the turn.

@@ -67,7 +67,10 @@ reply-writability.
 `node "${CLAUDE_SKILL_DIR}/scripts/codex_ipc_wait.mjs" --thread <uuid> --dispatch <dispatchId>
 --reply-path <path> --accept-rollout-fallback --budget-ms 1800000 --interval-ms 1000`. `done`
 certifies the **named dispatch's own turn**, never current thread idleness. Flagless (no
-`--accept-rollout-fallback`) is the legacy file-primary contract.
+`--accept-rollout-fallback`) is the legacy file-primary contract. Exit-code-driven callers may add
+the opt-in `--status-exit-codes` (`done=0`, `pending=2`, `aborted=3`, `superseded=4`,
+`reply-missing=5`, `unavailable=6`; usage errors stay exit 1 with no token); without it every
+determination exits 0.
 
 - `done`: the named dispatch's own turn completed — named-dispatch completion, not thread
   idleness. Source-aware callers read `replySource` / the `reply-source` diagnostic or the

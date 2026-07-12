@@ -14,6 +14,11 @@ All notable changes to this project will be documented in this file.
   absent, a completed own turn whose verified rollout body matches its terminal certifies `done`
   with `replySource=rollout-fallback` (one stderr `WAIT_DIAGNOSTIC reply-source`; stdout stays one
   token; the recovered body is never emitted). Flagless v0.1.6 stays file-primary and byte-identical.
+- `codex_ipc_wait.mjs` opt-in `--status-exit-codes` (A6, D4): maps the determination to a frozen
+  exit code (`done=0`, `pending=2`, `aborted=3`, `superseded=4`, `reply-missing=5`, `unavailable=6`;
+  usage errors stay exit 1 with no token). The token stays the sole stdout line. Flagless mode is
+  unchanged and byte-identical: every determination exits 0. Documented in `SKILL.md` and both
+  troubleshooting surfaces.
 - Inspector `turnActivity` (A4): `codex_ipc_session_inspect.mjs` feeds the FULL rollout parse stream
   (not the clipped display tail) into the shared `createTurnBoundaryAccumulator` and adds an additive
   `activitySignals.turnActivity` (`open`/`closed`/`ambiguous`) via the pure `summarizeThreadActivity`

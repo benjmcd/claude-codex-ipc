@@ -21,6 +21,18 @@ export const WAIT_TOKENS = Object.freeze([
   "unavailable",
 ]);
 
+// A6 (D4): opt-in --status-exit-codes maps each determination token to a frozen exit code. Usage
+// errors stay exit 1 with no token (handled before this map is consulted). Flagless mode never
+// consults this map — every determination exits 0, byte-identically to prior releases.
+export const STATUS_EXIT_CODES = Object.freeze({
+  done: 0,
+  pending: 2,
+  aborted: 3,
+  superseded: 4,
+  "reply-missing": 5,
+  unavailable: 6,
+});
+
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function defaultSleep(ms) {
@@ -343,6 +355,9 @@ Options:
   --accept-rollout-fallback D2 opt-in: when the reply file is genuinely absent, a completed own
                             turn whose verified rollout body matches its terminal certifies done
                             (replySource=rollout-fallback). Flagless mode stays file-primary.
+  --status-exit-codes       D4 opt-in: map the determination to an exit code (done=0, pending=2,
+                            aborted=3, superseded=4, reply-missing=5, unavailable=6). Usage errors
+                            stay exit 1 with no token. Flagless stays all-determinations-exit-0.
 
 Environment:
   CODEX_IPC_WAIT_BUDGET_MS    same validation as --budget-ms; flag wins
@@ -386,6 +401,7 @@ export function parseWaitArgs(argv, env = process.env) {
     budgetMs: undefined,
     intervalMs: undefined,
     acceptRolloutFallback: false,
+    statusExitCodes: false,
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -393,6 +409,9 @@ export function parseWaitArgs(argv, env = process.env) {
     switch (arg) {
       case "--accept-rollout-fallback":
         raw.acceptRolloutFallback = true;
+        break;
+      case "--status-exit-codes":
+        raw.statusExitCodes = true;
         break;
       case "--thread":
         raw.threadId = takeValue(argv, ++index, arg);
@@ -464,6 +483,7 @@ export function parseWaitArgs(argv, env = process.env) {
         warnings,
       ),
       acceptRolloutFallback: raw.acceptRolloutFallback,
+      statusExitCodes: raw.statusExitCodes,
       maxRecordBytes: DEFAULT_MAX_RECORD_BYTES,
     },
   };
@@ -495,11 +515,19 @@ async function main(argv) {
       );
     }
     process.stdout.write(`${result.token}\n`);
+    // A6: opt-in only. Flagless leaves process.exitCode unset (0), byte-identical to prior releases.
+    if (parsed.options.statusExitCodes) {
+      process.exitCode = STATUS_EXIT_CODES[result.token] ?? STATUS_EXIT_CODES.unavailable;
+    }
   } catch (error) {
     console.error(
       `WAIT_DIAGNOSTIC ${serializeDiagnostic({ code: "wait-error", message: error.message })}`,
     );
     process.stdout.write("unavailable\n");
+    // A caught runtime authority failure is an unavailable determination; map it under the flag.
+    if (parsed.options.statusExitCodes) {
+      process.exitCode = STATUS_EXIT_CODES.unavailable;
+    }
   }
 }
 
