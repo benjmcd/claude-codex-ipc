@@ -343,8 +343,11 @@ fi
 
 echo "== 4. bounded re-evaluation and option precedence =="
 CASE="$TMP/single-shot"; mkdir -p "$CASE"; write_pending "$CASE/rollout-$THREAD.jsonl"; make_reply "$CASE/reply.md"
+# Fuse must outlast run_case's spawn/assert overhead under full-battery load, not just
+# the waiter's own sub-second wall (which the ELAPSED_MS bound below asserts separately);
+# a 2s fuse raced that overhead and flaked the kill -0 liveness probe under contention.
 (
-  sleep 2
+  sleep 15
   printf '%s\n' "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"$OWN_TURN\",\"last_agent_message\":\"complete\"}}" >>"$CASE/rollout-$THREAD.jsonl"
 ) &
 WRITER_PID=$!
