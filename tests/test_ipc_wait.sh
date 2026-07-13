@@ -106,7 +106,11 @@ function directOptions(root, rolloutPath, replyPath, extra = {}) {
   };
 }
 
-function cli(args, env = {}, timeout = 3000) {
+// The spawn timeout is a hang kill-switch, not a performance bound: correct = child node
+// cold-start (2-3s under battery load) + sub-second tool work; wrong = a lingering/hung child,
+// which still surfaces as a spawn error at the kill floor. 15000 is >=3x the worst loaded
+// correct path (~4s) so load can never masquerade as a hang.
+function cli(args, env = {}, timeout = 15000) {
   return spawnSync(process.execPath, [waitPath, ...args], {
     cwd: tmp,
     encoding: "utf8",
@@ -136,7 +140,8 @@ await test("module exports side-effect-free wait API and documented defaults", (
   const imported = spawnSync(
     process.execPath,
     ["--input-type=module", "-e", `await import(${JSON.stringify(pathToFileURL(waitPath).href)})`],
-    { encoding: "utf8", timeout: 2000 },
+    // Kill-switch only (hang vs silent import); a loaded cold-start alone can cost 2-3s.
+    { encoding: "utf8", timeout: 15000 },
   );
   assert.equal(imported.status, 0, imported.stderr);
   assert.equal(imported.stdout, "");
@@ -727,7 +732,9 @@ await test("single-shot CLI exits cleanly without a lingering process", () => {
   const result = cli([
     "--thread", thread, "--dispatch", dispatch,
     "--rollout-path", rollout, "--reply-path", path.join(root, "missing.md"),
-  ], {}, 2000);
+  ]);
+  // The default 15000 spawn timeout is the lingering-process discriminator: a hung child is
+  // killed there and fails result.error; a loaded correct run (2-3s cold-start) passes freely.
   assertToken(result, "pending");
   assert.equal(result.error, undefined);
 });
@@ -740,11 +747,13 @@ await test("positive-budget CLI exits within its bound without a lingering proce
     "--sessions-root", path.join(root, "missing-sessions"),
     "--transport-root", path.join(root, "transport"),
     "--budget-ms", "25", "--interval-ms", "10",
-  ], {}, 2000);
+  ]);
   const elapsed = Date.now() - started;
   assertToken(result, "unavailable");
   assert.equal(result.error, undefined);
-  assert.ok(elapsed < 1500, `bounded process took ${elapsed} ms`);
+  // correct = cold-start (2-3s loaded) + 25ms budget (~3.5s worst); wrong = lingering until the
+  // 15000 spawn kill-switch. 9000 is >=2x the loaded correct path and 40% below the kill floor.
+  assert.ok(elapsed < 9000, `bounded process took ${elapsed} ms`);
 });
 
 function assertTokenExit(result, token, code) {

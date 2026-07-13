@@ -94,7 +94,17 @@ dump_output(){
   fi
 }
 
-now_ms(){ "$NODE_BIN" -e 'process.stdout.write(String(Date.now()))'; }
+# Milliseconds now. Prefer bash-native EPOCHREALTIME (bash>=5): the node fallback spawns a
+# process whose cold-start (2-3s under battery load) lands INSIDE the measured window and
+# fattens every ELAPSED_MS sample by up to two cold-starts per run_wait.
+now_ms(){
+  if [[ -n "${EPOCHREALTIME:-}" ]]; then
+    local t="${EPOCHREALTIME/,/.}"
+    printf '%s' "$(( ${t%%.*} * 1000 + 10#${t#*.} / 1000 ))"
+  else
+    "$NODE_BIN" -e 'process.stdout.write(String(Date.now()))'
+  fi
+}
 
 run_wait(){
   RUN_ID=$((RUN_ID+1))
@@ -343,15 +353,20 @@ fi
 
 echo "== 4. bounded re-evaluation and option precedence =="
 CASE="$TMP/single-shot"; mkdir -p "$CASE"; write_pending "$CASE/rollout-$THREAD.jsonl"; make_reply "$CASE/reply.md"
-# Fuse must outlast run_case's spawn/assert overhead under full-battery load, not just
-# the waiter's own sub-second wall (which the ELAPSED_MS bound below asserts separately);
-# a 2s fuse raced that overhead and flaked the kill -0 liveness probe under contention.
+# Fuse must outlast run_case's spawn/assert overhead under full-battery load (a 2s fuse
+# raced it; 15s raced it again once load pushed cold-starts past 4s with node-based timing),
+# yet stay BELOW the 20s conflicting env budget so an env-honoring waiter is exposed three
+# ways: mutation flips its token to done, the liveness probe finds the writer dead, and the
+# ELAPSED_MS bound trips.
 (
-  sleep 15
+  sleep 18
   printf '%s\n' "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"$OWN_TURN\",\"last_agent_message\":\"complete\"}}" >>"$CASE/rollout-$THREAD.jsonl"
 ) &
 WRITER_PID=$!
-RUN_ENV=("CODEX_IPC_WAIT_BUDGET_MS=5000" "CODEX_IPC_WAIT_INTERVAL_MS=5000")
+# Conflicting env deliberately far above the pass bound: the wrong regime (honoring either
+# env knob over the flags) then costs >=18s (fuse-capped), leaving a wide gap over any
+# loaded correct-path cost instead of the old 5000ms floor the bound had to hug.
+RUN_ENV=("CODEX_IPC_WAIT_BUDGET_MS=20000" "CODEX_IPC_WAIT_INTERVAL_MS=20000")
 run_case "$CASE" --rollout-path "$CASE/rollout-$THREAD.jsonl" --reply-path "$CASE/reply.md" \
   --budget-ms 0 --interval-ms 25
 assert_token pending "budget flag zero overrides env and performs one evaluation"
@@ -363,7 +378,10 @@ else
   no "budget=0 remained alive until the fixture mutation"
   wait "$WRITER_PID" 2>/dev/null || true
 fi
-if (( ELAPSED_MS < 1000 )); then
+# correct = one spawn + one read (<=4s loaded: 2-3s cold-start + bash overhead); wrong =
+# env-honoring sleep (floor >=18000, fuse-capped). 10000 is >=2.5x loaded-correct and >=44%
+# below the wrong floor, so load cannot fail it and polling cannot pass it.
+if (( ELAPSED_MS < 10000 )); then
   ok "budget=0 has no polling-sized wall-time delay (${ELAPSED_MS}ms)"
 else
   no "budget=0 incurred a polling-sized delay (${ELAPSED_MS}ms)"
@@ -375,11 +393,16 @@ CASE="$TMP/env-poll"; mkdir -p "$CASE"; write_pending "$CASE/rollout-$THREAD.jso
   printf '%s\n' "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"$OWN_TURN\",\"last_agent_message\":\"complete\"}}" >>"$CASE/rollout-$THREAD.jsonl"
 ) &
 WRITER_PID=$!
-RUN_ENV=("CODEX_IPC_WAIT_BUDGET_MS=1500" "CODEX_IPC_WAIT_INTERVAL_MS=25")
+# Budget raised 1500 -> 20000 so exit-at-budget-expiry (the wrong regime) sits far above
+# the bound instead of inside the loaded correct-path band.
+RUN_ENV=("CODEX_IPC_WAIT_BUDGET_MS=20000" "CODEX_IPC_WAIT_INTERVAL_MS=25")
 run_case "$CASE" --rollout-path "$CASE/rollout-$THREAD.jsonl" --reply-path "$CASE/reply.md"
 wait "$WRITER_PID"
 assert_token done "budget and interval environment values drive in-process re-evaluation"
-if (( ELAPSED_MS >= 60 && ELAPSED_MS < 1500 )); then
+# correct = transition-triggered early exit (~150ms in-tool + <=4s loaded spawn overhead);
+# wrong = sleeping to the 20000ms env-budget expiry. 10000 is >=2.5x loaded-correct and 50%
+# below the expiry floor. Lower bound stays: it asserts the waiter really polled.
+if (( ELAPSED_MS >= 60 && ELAPSED_MS < 10000 )); then
   ok "env-budget polling observed the transition within its bound (${ELAPSED_MS}ms)"
 else
   no "env-budget polling timing escaped its bound (${ELAPSED_MS}ms)"
@@ -401,7 +424,10 @@ CASE="$TMP/budget-expiry"; mkdir -p "$CASE"; write_pending "$CASE/rollout-$THREA
 run_case "$CASE" --rollout-path "$CASE/rollout-$THREAD.jsonl" --reply-path "$CASE/reply.md" \
   --budget-ms 120 --interval-ms 20
 assert_token pending "unchanged state is pending at positive-budget expiry"
-if (( ELAPSED_MS >= 60 && ELAPSED_MS < 3000 )); then
+# correct = 120ms budget expiry + <=4s loaded spawn overhead; wrong = an unbounded wait
+# (no finite floor -- this is a hang fuse at >=2.5x the loaded correct path). Lower bound
+# stays: it asserts a positive budget actually waited.
+if (( ELAPSED_MS >= 60 && ELAPSED_MS < 10000 )); then
   ok "positive budget waits and exits within a bounded window (${ELAPSED_MS}ms)"
 else
   no "positive budget timing escaped its bounded window (${ELAPSED_MS}ms)"
@@ -416,7 +442,9 @@ if grep -qi 'interval' "$ERR_FILE"; then
 else
   no "zero interval did not emit a visible stderr warning"
 fi
-if (( ELAPSED_MS < 3000 )); then
+# correct = 120ms budget + <=250ms fallback interval + <=4s loaded spawn overhead; wrong =
+# a hang or an interval misparse that never expires (no finite floor). 10000 >= 2.5x loaded-correct.
+if (( ELAPSED_MS < 10000 )); then
   ok "zero interval fallback does not hang (${ELAPSED_MS}ms)"
 else
   no "zero interval fallback exceeded the wall-time bound (${ELAPSED_MS}ms)"
@@ -431,7 +459,8 @@ if grep -qi 'interval' "$ERR_FILE"; then
 else
   no "malformed interval did not emit a visible stderr warning"
 fi
-if (( ELAPSED_MS < 3000 )); then
+# Same regimes and margins as the zero-interval fallback bound above.
+if (( ELAPSED_MS < 10000 )); then
   ok "malformed interval fallback does not hang (${ELAPSED_MS}ms)"
 else
   no "malformed interval fallback exceeded the wall-time bound (${ELAPSED_MS}ms)"
