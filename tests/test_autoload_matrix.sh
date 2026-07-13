@@ -108,6 +108,8 @@ $ErrorActionPreference = "Stop"
 try {
   $needle = $env:AUTOLOAD_HYG_NEEDLE
   if ([string]::IsNullOrWhiteSpace($needle)) { Write-Output "ENUM_ERROR:helper-path needle missing from environment"; exit 3 }
+  # Name scope ^powershell matches what the suite spawns (powershell.exe); if the
+  # helper invocation ever migrates to pwsh, widen this or coverage silently ends.
   $ps = @(Get-CimInstance Win32_Process | Where-Object { $_.Name -imatch "^powershell" })
   if (-not ($ps | Where-Object { $_.ProcessId -eq $PID })) {
     Write-Output "ENUM_ERROR:own pid $PID absent from powershell snapshot (enumeration untrustworthy)"; exit 3
@@ -124,7 +126,9 @@ try {
 HYG_OUT="$(AUTOLOAD_HYG_NEEDLE="$PS1WIN" powershell.exe -NoProfile -NonInteractive -Command "$HYG_SNIPPET" 2>&1)"
 HYG_RC=$?
 HYG_OUT="${HYG_OUT//$'\r'/}"
-LEAK_COUNT="$(printf '%s\n' "$HYG_OUT" | sed -n 's/^LEAKS=\([0-9][0-9]*\)$/\1/p' | head -n1)"
+# tail -n1: the genuine LEAKS= line is written last; a leaked command line that
+# embedded a newline plus "LEAKS=0" could otherwise forge a pass via the first match.
+LEAK_COUNT="$(printf '%s\n' "$HYG_OUT" | sed -n 's/^LEAKS=\([0-9][0-9]*\)$/\1/p' | tail -n1)"
 if [[ $HYG_RC -ne 0 || -z "$LEAK_COUNT" ]]; then
     no "suite-scoped hygiene enumeration failed — failing closed (rc=$HYG_RC; out: $(printf '%s' "$HYG_OUT" | head -c 300))"
 elif [[ "$LEAK_COUNT" -eq 0 ]]; then
