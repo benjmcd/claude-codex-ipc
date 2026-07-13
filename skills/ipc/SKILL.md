@@ -237,7 +237,7 @@ another file — it states the denial in one line AND puts the full substantive 
 denial) in its final agent message, then completes. A one-line denial with no result is a contract
 violation. On the dispatcher side, a full final message is recoverable only via the opt-in
 `codex_ipc_wait.mjs --accept-rollout-fallback` path on a known-UUID `--ipc` dispatch (it certifies
-`done` with `replySource=rollout-fallback`); flagless v0.1.6 stays file-primary and filedrop is not
+`done` with `replySource=rollout-fallback`); flagless invocation stays file-primary and filedrop is not
 auto-recoverable. Dispatch never changes the target thread's model, reasoning, sandbox, or approval.
 
 ## New-session mode

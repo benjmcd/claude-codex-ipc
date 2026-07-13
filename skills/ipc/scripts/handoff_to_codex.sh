@@ -270,9 +270,11 @@ CHANNEL_DIR="${IPC_ROOT}/${CLAUDE_SID}/${CHANNEL_THREAD}"
 # UNREPLIED-TASK EXEMPTION (fail-safe): an aged *.task.md is deleted ONLY on positive
 # proof that its same-dispatch *.reply.md sibling exists (the dispatch was answered).
 # A task with no reply is an outstanding, never-answered dispatch -- age-deleting it is
-# silent data loss, so it is retained regardless of age. Deletion requires a positive
-# pairing check, so any file whose pairing cannot be determined is kept, and a failed
-# deletion is reported rather than suppressed: the sweep only ever errs toward retention.
+# silent data loss, so it is retained regardless of age. Task deletion requires a
+# positive pairing check, so any task whose pairing cannot be determined is kept, and a
+# failed TASK deletion is reported to stderr rather than suppressed. Reply and empty-dir
+# deletion failures remain suppressed as before -- their failure mode is retention, not
+# loss -- so every branch of the sweep errs toward retention.
 RETENTION_DAYS="${CODEX_IPC_RETENTION_DAYS:-7}"
 if [[ "$RETENTION_DAYS" =~ ^[0-9]+$ && "$RETENTION_DAYS" -gt 0 ]]; then
     if [[ "$RETENTION_SWEEP_OK" -eq 1 ]]; then

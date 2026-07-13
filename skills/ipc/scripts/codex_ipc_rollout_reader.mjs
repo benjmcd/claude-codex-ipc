@@ -550,7 +550,12 @@ function exactTaskBasename(text, basename) {
 // immutable per-turn snapshots carrying EXACTLY the eight boundary fields below
 // and no marker/text/lastAgentMessage/body/reply/source/verdict material. It
 // alone owns start/current-turn selection, explicit-id and ordered-fallback
-// binding, terminal binding, supersession, and parser/schema-gap attribution.
+// binding, terminal binding, and supersession, and it carries the primary
+// parser/schema-gap attribution (push-time for full-stream consumers,
+// finish()-time windows for retained-only consumers); the dispatch lifecycle
+// adapter additionally enforces the same in-window schema-gap rule over the
+// same parser diagnostics in its own projection (see the finish() comment) --
+// one rule, one signal, so the two attributions cannot disagree.
 // Both consumers are thin projections over its snapshots: createDispatchCorrelator
 // (A1 dispatch correlation) and summarizeThreadActivity (A4 thread activity).
 // ---------------------------------------------------------------------------

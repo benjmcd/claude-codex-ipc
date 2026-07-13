@@ -4,6 +4,54 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.1.7] — 2026-07-12
+
+Defect tranche superseding v0.1.6. **Known issues in v0.1.6:** v0.1.6 shipped with all four
+defects fixed below, including a release-gate process bound that could pass vacuously — the
+v0.1.6 RC-PASS process-bound figures are therefore unreliable. Do not install or propagate
+v0.1.6; it is superseded by 0.1.7.
+
+### Fixed
+- Release-gate process-bound trust (F2/A0): the "owned Node" accounting in
+  `tests/run_release_gates.sh` was a bare before/after set difference of global node PID
+  snapshots — no parent-PID logic (the header claimed a descendant confirmation that did not
+  exist) — and the Windows enumeration path swallowed failures, so a broken enumerator silently
+  measured an owned peak/residual of 0 and the process bound passed vacuously. Ownership is now
+  fail-closed descendant-of-runner PID ancestry (POSIX: PPID chains to the runner; Windows: the
+  runner's MSYS descendant closure mapped to Win32 PIDs and walked through the full
+  `Win32_Process` parent table, catching node-spawned node that MSYS `ps` cannot see). An
+  enumeration failure aborts the run with GATE ERROR (exit 3) instead of fabricating zero, at
+  startup, mid-suite sampling, and post-suite drain. Documented residual: a node process whose
+  intermediate parents already exited escapes ancestry attribution. Pinned by the new hermetic
+  `tests/test_gate_process_ownership.sh` fixture (not part of the pinned nine-suite battery).
+- In-window schema drift on a completed turn (F1/A4): the turn-boundary accumulator applied
+  schema-drift attribution only to turns still open at `finish()`, so a completed turn with
+  in-window drift kept a `closed` snapshot — the inspector and the write-proof pre-send gate
+  certified a turn the dispatch lifecycle projection refused over the same records
+  (`unavailable`, schema-drift). Drift arriving while a turn is open now poisons that turn at
+  push time: inspector `turnActivity` degrades to `ambiguous` and `codex_ipc_write_proof.mjs`
+  refuses the send, not overridable by `--allow-mid-turn` (fail closed on ambiguity).
+- Retention-sweep silent data loss (WS-7): the opportunistic sweep in `handoff_to_codex.sh`
+  deleted transport files by age alone, so an aged UNREPLIED `*.task.md` — an outstanding
+  dispatch that was never answered — was silently destroyed once it crossed the retention
+  horizon. An aged task is now deleted only on positive proof that its same-dispatch
+  `*.reply.md` exists (pairing decided before any reply is deleted, so aged pairs still sweep
+  in one run); an unreplied task is retained regardless of age, pairing ambiguity errs toward
+  retention, and a failed task deletion is reported to stderr rather than suppressed
+  (reply/empty-dir deletion failures remain suppressed and err toward retention). New hermetic
+  survival suite `tests/test_retention_sweep.sh`.
+
+### Changed
+- `tests/test_reply_view.sh` (F3/T23) no longer re-runs the entire `tests/test_ipc.sh`
+  transport suite inside itself — the standalone gated `test_ipc.sh` run in the same battery
+  already delivers that whole-suite guarantee, and the nested rerun pushed the suite past the
+  legitimate 600s per-suite cap on a loaded host. T23 is now a direct wrapper→viewer
+  envelope-seam contract check (the one interaction the rerun never exercised): one hermetic
+  wrapper dispatch must produce the keyed on-disk envelope layout, and the viewer must
+  enumerate it as awaiting-primary and render the reply once it lands at the advertised path.
+  Suite runtime ~150s versus the 400–1400s observed with the nested rerun; the per-suite cap
+  is NOT raised.
+
 ## [0.1.6] — 2026-07-12
 
 ### Added
