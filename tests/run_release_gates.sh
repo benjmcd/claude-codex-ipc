@@ -16,9 +16,20 @@
 #
 # Safety success is judged by the scanner PROCESS EXIT STATUS, never a printed CLEAN.
 #
-# Process bound: only Node PIDs that did NOT exist before this runner started are counted
-# as "owned" (this scopes OUT every pre-existing / global node.exe); on POSIX the owned set
-# is additionally confirmed as a descendant of this runner's PID. Never counts global node.
+# Process bound (fail-closed ancestry ownership): a Node process is counted as "owned"
+# ONLY if its parent chain reaches this runner's PID. POSIX: `ps -e -o pid=,ppid=,comm=`
+# + a PPID walk. Windows: MSYS `ps -e` builds the runner's descendant closure in MSYS pid
+# space (Win32 parent links break at MSYS fork/exec stubs, so a raw Win32 PPID walk cannot
+# span bash-to-bash boundaries) and maps each member to its Windows PID; Get-CimInstance
+# Win32_Process (ProcessId+ParentProcessId+Name, full table) then attributes every
+# node.exe — including node spawned by node, which MSYS ps cannot see — whose Win32 parent
+# chain reaches that closure. Global / pre-existing node is never counted (it is not a
+# descendant). FAIL-CLOSED: if enumeration fails, returns an unparseable snapshot, or
+# omits the runner's own PID (impossible for a live shell), the run ABORTS with GATE ERROR
+# (exit 3) — an owned count of 0 is never fabricated from a failed measurement.
+# KNOWN LIMITATION (documented, NOT covered): an owned node whose intermediate parents
+# already exited (orphan/reparent; or Windows PID reuse breaking a chain) can no longer be
+# attributed by ancestry and escapes the bound.
 #
 # Usage:
 #   run_release_gates.sh                 # full battery (9 suites + safety)
@@ -80,32 +91,122 @@ done
 
 is_windows() { case "$(uname -s 2>/dev/null)" in *NT*|*MINGW*|*MSYS*|*CYGWIN*) return 0;; *) return 1;; esac; }
 
-# ---- process enumeration -----------------------------------------------------------------
-# list_node_pids: one PID per line for every live node/node.exe process on the host.
-list_node_pids() {
+# ---- process enumeration + ancestry ownership ---------------------------------------------
+# Contract: owned_node_pids prints the owned node PID set (Windows PIDs on Windows, POSIX
+# PIDs otherwise; one per line; possibly empty) and returns 0. On ANY enumeration or
+# sanity failure it prints a single "ENUM_ERROR:<reason>" line and returns 1 — it never
+# silently degrades to an empty set. Ownership = the process's parent chain reaches
+# RUNNER_PID (see header for the per-OS mechanism and the orphaned-parent limitation).
+RUNNER_PID=$$
+
+owned_node_pids() {
   if is_windows; then
-    powershell.exe -NoProfile -NonInteractive -Command \
-      "Get-CimInstance Win32_Process -Filter \"Name='node.exe'\" | ForEach-Object { \$_.ProcessId }" \
-      2>/dev/null | tr -d '\r' | grep -E '^[0-9]+$' || true
+    local pstab cimtab
+    # Layer 1: MSYS process table (PID PPID PGID WINPID ... after a header line).
+    if ! pstab="$(ps -e)"; then
+      echo "ENUM_ERROR:MSYS ps enumeration failed (nonzero exit)"; return 1
+    fi
+    if ! printf '%s\n' "$pstab" | awk -v me="$RUNNER_PID" 'NR>1 && $1==me{f=1} END{exit f?0:1}'; then
+      echo "ENUM_ERROR:runner pid $RUNNER_PID absent from MSYS ps snapshot (enumeration untrustworthy)"; return 1
+    fi
+    # Layer 2: full Win32 process table "ProcessId ParentProcessId Name" (NO name filter:
+    # ancestry has to be walked through non-node intermediaries). Failure is NOT swallowed.
+    if ! cimtab="$(powershell.exe -NoProfile -NonInteractive -Command \
+        "Get-CimInstance Win32_Process | ForEach-Object { '{0} {1} {2}' -f \$_.ProcessId, \$_.ParentProcessId, \$_.Name }")"; then
+      echo "ENUM_ERROR:Win32_Process enumeration failed (powershell.exe nonzero exit)"; return 1
+    fi
+    if ! cimtab="$(printf '%s\n' "$cimtab" | tr -d '\r' | grep -E '^[0-9]+ [0-9]+ .')"; then
+      echo "ENUM_ERROR:Win32_Process enumeration returned no parseable rows"; return 1
+    fi
+    {
+      printf '%s\n' "$pstab" | awk 'NR>1 { print "PS", $1, $2, $4 }'
+      printf '%s\n' "$cimtab" | awk '{ print "CIM", $1, $2, $3 }'
+    } | awk -v me="$RUNNER_PID" '
+      $1 == "PS"  { mppid[$2] = $3; mwin[$2] = $4; next }
+      $1 == "CIM" { wppid[$2] = $3; wname[$2] = $4; next }
+      END {
+        if (mwin[me] == "") { print "ENUM_ERROR:runner row in MSYS ps snapshot has no WINPID"; exit 1 }
+        # (1) descendant closure of the runner in MSYS pid space -> Windows PID roots.
+        for (p in mppid) {
+          cur = p; d = 0; hit = 0
+          while (d++ < 64) {
+            if (cur == me) { hit = 1; break }
+            if (!(cur in mppid)) break
+            nxt = mppid[cur]; if (nxt == cur) break
+            cur = nxt
+          }
+          if (hit && mwin[p] != "") root[mwin[p]] = 1
+        }
+        if (!(mwin[me] in wppid)) {
+          print "ENUM_ERROR:runner winpid " mwin[me] " absent from Win32_Process snapshot"; exit 1
+        }
+        # (2) node.exe rows whose Win32 parent chain reaches a closure root.
+        for (w in wname) {
+          if (wname[w] != "node.exe") continue
+          cur = w; d = 0; owned = 0
+          while (d++ < 64) {
+            if (cur in root) { owned = 1; break }
+            if (!(cur in wppid)) break            # parent exited: chain unresolvable (see limitation)
+            nxt = wppid[cur]; if (nxt == cur) break
+            cur = nxt
+          }
+          if (owned) print w
+        }
+      }'
   else
-    ps -e -o pid=,comm= 2>/dev/null | awk '$2 ~ /(^|\/)node$/ { print $1 }' || true
+    local tab
+    if ! tab="$(ps -e -o pid=,ppid=,comm=)"; then
+      echo "ENUM_ERROR:ps enumeration failed (nonzero exit)"; return 1
+    fi
+    if ! printf '%s\n' "$tab" | awk -v me="$RUNNER_PID" '$1==me{f=1} END{exit f?0:1}'; then
+      echo "ENUM_ERROR:runner pid $RUNNER_PID absent from ps snapshot (enumeration untrustworthy)"; return 1
+    fi
+    printf '%s\n' "$tab" | awk -v me="$RUNNER_PID" '
+      { ppid[$1] = $2; comm[$1] = $3 }
+      END {
+        for (p in comm) {
+          if (comm[p] !~ /(^|\/)node(\.exe)?$/) continue
+          cur = p; d = 0; hit = 0
+          while (d++ < 64) {
+            if (cur == me) { hit = 1; break }
+            if (!(cur in ppid)) break             # parent exited: chain unresolvable (see limitation)
+            nxt = ppid[cur]; if (nxt == cur) break
+            cur = nxt
+          }
+          if (hit) print p
+        }
+      }'
   fi
 }
 
-BASELINE_NODE_PIDS=""   # global node PIDs present before the run (scoped OUT as non-owned)
-snapshot_baseline() { BASELINE_NODE_PIDS="$(list_node_pids | sort -u)"; }
-
-# owned_node_pids: node PIDs that appeared AFTER the baseline snapshot (i.e. spawned by us).
-owned_node_pids() {
-  local cur; cur="$(list_node_pids | sort -u)"
-  comm -23 <(printf '%s\n' "$cur" | sed '/^$/d') <(printf '%s\n' "$BASELINE_NODE_PIDS" | sed '/^$/d')
+# count_owned_node: prints the owned count on success; on enumeration failure prints the
+# ENUM_ERROR reason to stderr and returns 1. Callers MUST treat rc!=0 as fatal (fail closed).
+count_owned_node() {
+  local out rc
+  out="$(owned_node_pids)"; rc=$?
+  if [ "$rc" -ne 0 ]; then
+    printf '%s\n' "$out" | grep '^ENUM_ERROR:' >&2 || echo "ENUM_ERROR:unknown enumeration failure" >&2
+    return 1
+  fi
+  printf '%s\n' "$out" | sed '/^$/d' | grep -c . || true
 }
-count_owned_node() { owned_node_pids | sed '/^$/d' | grep -c . || true; }
+
+# enum_abort: fail the whole run closed when the owned set cannot be measured.
+enum_abort() { # enum_abort <context> [suite-child-pid]
+  local ctx="$1" spid="${2:-}"
+  if [ -n "$spid" ]; then kill "$spid" 2>/dev/null || true; wait "$spid" 2>/dev/null || true; fi
+  echo "GATE ERROR: owned-Node enumeration failed ($ctx); the process bound cannot be measured — failing closed (exit 3). Suite child processes may need manual cleanup." >&2
+  exit 3
+}
 
 kill_owned_tree() {
-  local pid
-  for pid in $(owned_node_pids); do
-    [ -n "$pid" ] || continue
+  local pid pids
+  if ! pids="$(owned_node_pids)"; then
+    echo "  WARN: cannot enumerate owned Node tree for kill ($pids); nothing killed" >&2
+    return 1
+  fi
+  for pid in $pids; do
+    case "$pid" in ''|*[!0-9]*) continue;; esac
     if is_windows; then
       taskkill //PID "$pid" //T //F >/dev/null 2>&1 || true
     else
@@ -141,7 +242,7 @@ run_one() { # run_one <suite-path-or-name>
   spid=$!
   peak=0; t0=$SECONDS
   while kill -0 "$spid" 2>/dev/null; do
-    owned="$(count_owned_node)"
+    owned="$(count_owned_node)" || enum_abort "mid-suite sample, $suite" "$spid"
     [ "$owned" -gt "$peak" ] && peak="$owned"
     if [ $((SECONDS - t0)) -ge "$PER_SUITE_TIMEOUT_S" ]; then
       echo "  ...timeout after ${PER_SUITE_TIMEOUT_S}s; killing owned Node tree" >&2
@@ -158,12 +259,13 @@ run_one() { # run_one <suite-path-or-name>
   wait "$spid"; rc=$?
 
   # Post-suite drain: owned Node descendants must reach zero within the drain window.
-  local d0=$SECONDS drained=0
+  local d0=$SECONDS drained=0 drain_now
   while [ $((SECONDS - d0)) -lt "$POST_SUITE_DRAIN_S" ]; do
-    if [ "$(count_owned_node)" -eq 0 ]; then drained=1; break; fi
+    drain_now="$(count_owned_node)" || enum_abort "post-suite drain, $suite"
+    if [ "$drain_now" -eq 0 ]; then drained=1; break; fi
     sleep 0.25
   done
-  local residual; residual="$(count_owned_node)"
+  local residual; residual="$(count_owned_node)" || enum_abort "post-suite residual, $suite"
 
   local status=PASS
   # 1. exit code
@@ -223,8 +325,11 @@ export NODE_BIN="$PREFLIGHT_NODE_BIN"
 export PREFLIGHT_NODE_FLAGS
 echo "pinned node: $PREFLIGHT_NODE_BIN ($PREFLIGHT_NODE_VERSION) flags='${PREFLIGHT_NODE_FLAGS:-<none>}'"
 
-snapshot_baseline
-echo "baseline global Node PIDs (scoped out): $(printf '%s' "$BASELINE_NODE_PIDS" | sed '/^$/d' | grep -c . || true)"
+# Fail-closed self-check: owned-Node enumeration must work BEFORE any suite runs; a broken
+# enumerator must never let a suite pass against a fabricated 0-measurement.
+SELFTEST_OWNED="$(count_owned_node)" || enum_abort "startup self-check"
+echo "owned-Node scope: ancestry to runner pid $RUNNER_PID (fail-closed; nodes with an already-exited parent chain are NOT attributable — known limitation, see header)"
+echo "owned-Node enumeration self-check: OK (owned now=$SELFTEST_OWNED)"
 
 LAYOUT_T0=$SECONDS
 for s in "${SUITES[@]}"; do
