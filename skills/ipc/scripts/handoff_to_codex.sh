@@ -34,7 +34,12 @@
 #
 # Optional env:
 #   CODEX_IPC_ROOT=<dir>               override the transport root (default ~/.claude/ipc)
-#   CODEX_IPC_RETENTION_DAYS=<n>       prune envelopes/replies older than n days on each run (default 7; 0 disables)
+#   CODEX_IPC_RETENTION_DAYS=<n>       prune transport files older than n days on each run
+#                                      (default 7; 0 disables). Aged *.reply.md files, and aged
+#                                      *.task.md files whose same-dispatch *.reply.md exists, are
+#                                      deleted. An UNREPLIED *.task.md is NEVER age-deleted: an
+#                                      outstanding dispatch is kept until it is answered, and
+#                                      pairing ambiguity errs toward retention.
 #   CODEX_IPC_INCLUDE_TRANSCRIPT=1     include the Claude transcript path in the handoff payload
 #                                      (default: omitted; transcript paths expose full session context)
 #   CODEX_SESSION_ID=<uuid>            target a specific session (positional arg overrides this)
@@ -261,10 +266,26 @@ CHANNEL_DIR="${IPC_ROOT}/${CLAUDE_SID}/${CHANNEL_THREAD}"
 # Prune envelopes older than N days BEFORE creating this dispatch's dir, so the fresh
 # (still-empty) channel dir is never swept. Envelopes carry repo/transcript pointers, so
 # this bounds stale-disclosure, not just disk. Env-tunable via CODEX_IPC_RETENTION_DAYS; 0 disables.
+#
+# UNREPLIED-TASK EXEMPTION (fail-safe): an aged *.task.md is deleted ONLY on positive
+# proof that its same-dispatch *.reply.md sibling exists (the dispatch was answered).
+# A task with no reply is an outstanding, never-answered dispatch -- age-deleting it is
+# silent data loss, so it is retained regardless of age. Deletion requires a positive
+# pairing check, so any file whose pairing cannot be determined is kept, and a failed
+# deletion is reported rather than suppressed: the sweep only ever errs toward retention.
 RETENTION_DAYS="${CODEX_IPC_RETENTION_DAYS:-7}"
 if [[ "$RETENTION_DAYS" =~ ^[0-9]+$ && "$RETENTION_DAYS" -gt 0 ]]; then
     if [[ "$RETENTION_SWEEP_OK" -eq 1 ]]; then
-        find "$IPC_ROOT" -type f \( -name '*.task.md' -o -name '*.reply.md' \) -mtime +"$RETENTION_DAYS" -delete 2>/dev/null || true
+        # Aged tasks first, deciding pairing BEFORE any reply is deleted below --
+        # otherwise an aged pair's task would misread as unreplied and never sweep.
+        while IFS= read -r -d '' AGED_TASK; do
+            if [[ -f "${AGED_TASK%.task.md}.reply.md" ]]; then
+                rm -f -- "$AGED_TASK" \
+                    || echo "WARNING: retention sweep could not delete \"${AGED_TASK}\"." >&2
+            fi
+        done < <(find "$IPC_ROOT" -type f -name '*.task.md' -mtime +"$RETENTION_DAYS" -print0 2>/dev/null)
+        # Aged replies are terminal artifacts: sweepable unconditionally, as before.
+        find "$IPC_ROOT" -type f -name '*.reply.md' -mtime +"$RETENTION_DAYS" -delete 2>/dev/null || true
         find "$IPC_ROOT" -mindepth 1 -type d -empty -mtime +"$RETENTION_DAYS" -delete 2>/dev/null || true
     else
         echo "WARNING: refusing retention sweep for dangerous CODEX_IPC_ROOT \"${IPC_ROOT}\"." >&2
