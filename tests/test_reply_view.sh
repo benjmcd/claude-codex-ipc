@@ -203,10 +203,53 @@ else
   no "static audit: shared renderer is not wired"
 fi
 
-echo "== T23 FINAL GATE: wrapper untouched + test_ipc green + syntax =="
-if [[ -f "$DIR/handoff_to_codex.sh.orig" ]]; then :; fi
+echo "== T23 FINAL GATE: viewer/wrapper syntax + wrapper->viewer envelope seam =="
+# T23 previously nested a FULL `bash test_ipc.sh` rerun here to prove the reply-view
+# tooling had not regressed the transport wrapper. That whole-suite guarantee is already
+# delivered by the release battery (run_release_gates.sh runs test_ipc.sh as its own
+# gated suite), the viewer shares no code with the wrapper (codex_ipc_safe_render.sh is
+# sourced by the viewer alone), and every viewer call above is proven read-only by the
+# manifest wrap — while the nested rerun alone cost ~360s and pushed this suite over its
+# own 600s per-suite cap on a loaded host. What the rerun never exercised is the one real
+# interaction seam: that the wrapper's ACTUAL on-disk envelopes are consumable by the
+# viewer (the mkreply/mktask fixtures above only imitate that layout). The rerun is
+# therefore replaced by a narrow, bounded end-to-end check of exactly that seam: one real
+# wrapper dispatch (node/codex/powershell stubbed, as in test_ipc.sh) into a fresh
+# hermetic root, after which the viewer must (a) enumerate that envelope as
+# awaiting-primary and (b) render a reply landed at the wrapper-advertised per-dispatch
+# path. The read-only manifest discipline is kept for both seam viewer calls.
 bash -n "$SCRIPT" && ok "bash -n codex_ipc_replies.sh clean" || no "syntax error in viewer"
-( cd "$DIR" && bash test_ipc.sh >/dev/null 2>&1 ) && ok "wrapper harness test_ipc.sh still ALL GREEN" || no "test_ipc.sh regressed"
+WRAPPER=""
+for _wcand in "$DIR/../skills/ipc/scripts/handoff_to_codex.sh" "$DIR/../scripts/handoff_to_codex.sh"; do
+    [[ -f "$_wcand" ]] && WRAPPER="$_wcand" && break
+done
+if [[ -z "$WRAPPER" ]]; then
+  no "T23 seam: handoff_to_codex.sh not found in repo or installed layout"
+else
+  bash -n "$WRAPPER" && ok "bash -n handoff_to_codex.sh clean" || no "syntax error in wrapper"
+  SEAMROOT="$TMP/seamroot"; mkdir -p "$SEAMROOT"
+  BIN23="$TMP/bin23"; mkdir -p "$BIN23"
+  printf '#!/usr/bin/env bash\necho "{\\"ok\\":true}"\nexit 0\n' > "$BIN23/node"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$BIN23/codex"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$BIN23/powershell.exe"
+  chmod +x "$BIN23"/*
+  seam_manifest(){ "$REAL_FIND" "$SEAMROOT" -printf '%p|%s|%T@\n' 2>/dev/null | "$REAL_SORT"; }
+  WOUT="$( cd "$TMP" && CODEX_IPC_ROOT="$SEAMROOT" CLAUDE_CODE_SESSION_ID=seam23 PATH="$BIN23:$PATH" bash "$WRAPPER" "seam probe task" 2>&1 )"; WRC=$?
+  wtask="$("$REAL_FIND" "$SEAMROOT/seam23" -name '*.task.md' -type f 2>/dev/null | head -1)"
+  [[ $WRC -eq 0 && -n "$wtask" ]] && ok "wrapper dispatch wrote a real keyed task envelope" || no "wrapper seam dispatch failed (rc=$WRC)"
+  wreply="${wtask%.task.md}.reply.md"
+  [[ -n "$wtask" ]] && grep -qF "$(basename "$wreply")" "$wtask" && ok "payload advertises the same-dispatch .reply.md path" || no "payload does not advertise the derived reply path"
+  sm_b="$(seam_manifest)"; VOUT="$( env CODEX_IPC_ROOT="$SEAMROOT" CLAUDE_CODE_SESSION_ID=seam23 bash "$SCRIPT" 2>&1 )"; VRC=$?; sm_a="$(seam_manifest)"
+  [[ "$sm_b" == "$sm_a" ]] || no "READ-ONLY VIOLATION: seam manifest changed during viewer run (pre-reply)"
+  [[ $VRC -eq 0 ]] && printf '%s' "$VOUT" | grep -q "Showing 1 of 1" \
+    && printf '%s' "$VOUT" | grep -q "source=none | reason=unavailable" \
+    && printf '%s' "$VOUT" | grep -q "1 dispatch(es) awaiting primary" \
+    && ok "viewer enumerates the wrapper-written envelope as awaiting primary" || no "viewer did not surface wrapper envelope (rc=$VRC)"
+  [[ -n "$wtask" ]] && printf 'SEAM-REPLY-BODY-73' > "$wreply"
+  sm_b="$(seam_manifest)"; VOUT="$( env CODEX_IPC_ROOT="$SEAMROOT" CLAUDE_CODE_SESSION_ID=seam23 bash "$SCRIPT" 2>&1 )"; VRC=$?; sm_a="$(seam_manifest)"
+  [[ "$sm_b" == "$sm_a" ]] || no "READ-ONLY VIOLATION: seam manifest changed during viewer run (post-reply)"
+  [[ $VRC -eq 0 ]] && printf '%s' "$VOUT" | grep -q "SEAM-REPLY-BODY-73" && ok "viewer renders the reply landed at the wrapper-advertised path" || no "viewer did not render seam reply (rc=$VRC)"
+fi
 
 echo ""
 echo "RESULT: $PASS passed, $FAIL failed"
