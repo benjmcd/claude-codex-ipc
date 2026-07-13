@@ -637,6 +637,21 @@ export function createTurnBoundaryAccumulator() {
         }
         return { sequence: null, snapshots: [] };
       }
+      // Schema-drift attribution at push time (A1/F1): an unknown envelope/payload pair arriving
+      // while a turn is open poisons THAT turn before it can finalize, so a later terminal still
+      // yields a fail-closed 'ambiguous' snapshot instead of 'closed'. This is the same drift
+      // signal (knownPair === false) from which the parser emits its 'schema-drift' diagnostics,
+      // and the arrival-while-open condition is exactly the lifecycle adapter's in-window rule
+      // (startLine < line < terminalLine) applied in stream order — the two cannot disagree.
+      // Consumers that push only retained records never hit this branch; their still-open turns
+      // keep the finish()-time window attribution below.
+      if (record.knownPair === false) {
+        if (current && !current.terminalType) {
+          current.schemaGap = true;
+          return { sequence: current.sequence, snapshots: [] };
+        }
+        return { sequence: null, snapshots: [] };
+      }
       if (record.envelopeType !== "event_msg") {
         return { sequence: null, snapshots: [] };
       }
@@ -736,9 +751,12 @@ export function createTurnBoundaryAccumulator() {
           drift.push(item.line);
         }
       }
-      // Attribute schema gaps to every still-open turn's window before finalizing it. Turns
-      // already finalized during push are emitted; the dispatch adapter enforces their schema-gap
-      // integrity separately over the same parser diagnostics.
+      // Attribute schema gaps to every still-open turn's window before finalizing it. This covers
+      // consumers that feed only RETAINED records plus parser diagnostics (drift records never
+      // reach push there). Consumers that feed the FULL normalized stream (the A4 inspector) get
+      // push-time attribution above, which also covers turns finalized during push; the dispatch
+      // adapter additionally enforces schema-gap integrity over the same parser diagnostics in
+      // its lifecycle projection. All three apply the same in-window rule to the same signal.
       for (const turn of openTurns) {
         for (const line of drift) {
           if (line > turn.startLine && (turn.terminalLine === null || line < turn.terminalLine)) {

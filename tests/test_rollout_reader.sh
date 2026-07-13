@@ -32,6 +32,7 @@ const {
   createTurnBoundaryAccumulator,
   inspectRolloutMarker,
   locateRollout,
+  normalizeRolloutRecord,
   pollRolloutForMarker,
   readRolloutFile,
   summarizeThreadActivity,
@@ -735,6 +736,71 @@ test("zero-snapshot: a found rollout with no emitted boundary maps to ambiguous 
   assert.equal(summarizeThreadActivity(null, "found").turnActivity, "ambiguous");
   assert.equal(summarizeThreadActivity({ activity: "closed" }, "unavailable").turnActivity, "ambiguous");
   assert.equal(summarizeThreadActivity({ activity: "closed" }, "ambiguous").turnActivity, "ambiguous");
+});
+
+// ---- A1/F1 drift fail-closed (RED at 9434721, GREEN after the fix): a COMPLETED turn with -------
+// in-window schema drift must not project a closed activity. The accumulator is fed the FULL
+// normalized parse stream exactly the way the A4 inspector feeds it (every record, drift included),
+// so the boundary snapshot itself must carry the drift attribution for push-finalized turns.
+test("drift fail-closed: in-window schema drift on a completed turn degrades activity to ambiguous", () => {
+  const records = [
+    meta,
+    ev("task_started", { turn_id: "turn-d" }),
+    { type: "event_msg", payload: { type: "future_lifecycle_event", turn_id: "turn-d", message: "unknown in-window record" } },
+    ev("user_message", { turn_id: "turn-d", message: "read C:/x/tmd-9-abcdef0123456789.task.md and proceed" }),
+    ev("agent_message", { message: "drifted body", phase: "final_answer" }),
+    ev("task_complete", { turn_id: "turn-d", last_agent_message: "drifted body" }),
+  ];
+  const target = path.join(tmp, "rollout-tm-driftclosed-00000000-0000-4000-8000-000000000000.jsonl");
+  fs.writeFileSync(target, `${records.map((r) => JSON.stringify(r)).join("\n")}\n`);
+  // Inspector feeding pattern (codex_ipc_session_inspect.mjs parseRollout): normalize and push
+  // EVERY parsed line; collect one schema-drift diagnostic per unknown pair; finish with them.
+  const acc = createTurnBoundaryAccumulator();
+  const driftDiagnostics = [];
+  const snaps = [];
+  const lines = fs.readFileSync(target, "utf8").split("\n").filter(Boolean);
+  lines.forEach((line, index) => {
+    const normalized = normalizeRolloutRecord(JSON.parse(line), { line: index + 1 });
+    snaps.push(...acc.push(normalized).snapshots);
+    if (!normalized.knownPair) driftDiagnostics.push({ code: "schema-drift", line: index + 1 });
+  });
+  snaps.push(...acc.finish(driftDiagnostics));
+  const last = snaps.reduce(
+    (latest, snap) => (latest === null || snap.sequence > latest.sequence ? snap : latest),
+    null,
+  );
+  assert.ok(last, "expected a boundary snapshot for the completed turn");
+  assert.equal(last.terminalType, "task_complete");
+  assert.notEqual(last.activity, "closed");
+  assert.equal(last.activity, "ambiguous");
+  assert.ok(last.diagnostics.some((d) => d.code === "schema-drift"));
+  assert.equal(summarizeThreadActivity(last, "found").turnActivity, "ambiguous");
+  // Consistency: the dispatch lifecycle adapter refuses the SAME records (existing behavior).
+  const result = correlateDispatch(readRolloutFile(target), "tmd-9-abcdef0123456789");
+  assert.equal(result.lifecycle.status, "unavailable");
+  assert.equal(result.lifecycle.certifiable, false);
+});
+
+test("drift fail-closed: a drift-free completed turn stays closed through the full-stream feed", () => {
+  const records = [
+    meta,
+    ev("task_started", { turn_id: "turn-e" }),
+    ev("user_message", { turn_id: "turn-e", message: "read C:/x/tme-9-abcdef0123456789.task.md and proceed" }),
+    ev("agent_message", { message: "clean body", phase: "final_answer" }),
+    ev("task_complete", { turn_id: "turn-e", last_agent_message: "clean body" }),
+  ];
+  const target = path.join(tmp, "rollout-tm-driftfree-00000000-0000-4000-8000-000000000000.jsonl");
+  fs.writeFileSync(target, `${records.map((r) => JSON.stringify(r)).join("\n")}\n`);
+  const acc = createTurnBoundaryAccumulator();
+  const snaps = [];
+  const lines = fs.readFileSync(target, "utf8").split("\n").filter(Boolean);
+  lines.forEach((line, index) => {
+    snaps.push(...acc.push(normalizeRolloutRecord(JSON.parse(line), { line: index + 1 })).snapshots);
+  });
+  snaps.push(...acc.finish([]));
+  assert.equal(snaps.at(-1).activity, "closed");
+  assert.equal(summarizeThreadActivity(snaps.at(-1), "found").turnActivity, "closed");
+  assert.equal(correlateDispatch(readRolloutFile(target), "tme-9-abcdef0123456789").lifecycle.status, "complete");
 });
 
 // ---- Harvester correlation deltas (RED-before at base b2aec66, GREEN after A1) -----------------

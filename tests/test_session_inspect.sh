@@ -431,6 +431,17 @@ write_no_boundary(){  # a found, parseable rollout with no turn boundary at all
 EOF
 }
 
+write_drifted_closed(){  # start(A) -> IN-WINDOW unknown-pair drift -> user(A) -> agent(A) -> task_complete(A)
+  cat > "$1" <<EOF
+{"type":"session_meta","payload":{"id":"$THREAD"}}
+{"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-a"}}
+{"type":"event_msg","payload":{"type":"future_lifecycle_event","turn_id":"turn-a","message":"unknown in-window record"}}
+{"type":"event_msg","payload":{"type":"user_message","turn_id":"turn-a","message":"do the task"}}
+{"type":"event_msg","payload":{"type":"agent_message","message":"done body","phase":"final_answer"}}
+{"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-a","last_agent_message":"done body"}}
+EOF
+}
+
 echo "== 11. A4 turnActivity: start->user->agent (no terminal) is open =="
 CASE="$TMP/ta-open"; mkdir -p "$CASE/sessions"
 write_open_no_terminal "$CASE/sessions/rollout-open-$THREAD.jsonl"
@@ -528,6 +539,22 @@ if [[ -n "$WRITE_PROOF" ]]; then
     && ok "a closed turn is send-ready" || no "closed turn not send-ready (rc=$WPRC)"
 else
   echo "  NOTE: codex_ipc_write_proof.mjs not found; skipping write-proof gate checks"
+fi
+
+# ---- A1/F1 fail-closed drift consistency (RED at 9434721, GREEN after the fix) --------------
+echo "== 22. A1/F1 turnActivity: in-window schema drift on a COMPLETED turn is ambiguous =="
+CASE="$TMP/ta-drift-closed"; mkdir -p "$CASE/sessions"
+write_drifted_closed "$CASE/sessions/rollout-driftclosed-$THREAD.jsonl"
+run_turn_activity_case "$CASE/sessions/rollout-driftclosed-$THREAD.jsonl"
+assert_turn_activity ambiguous "in-window drift inside a completed turn fails closed as ambiguous"
+
+if [[ -n "$WRITE_PROOF" ]]; then
+  echo "== 23. A1/F1 write-proof dry-run: a drift-poisoned completed turn is rejected, not overridable =="
+  wp_home_setup "$TMP/wp-drift" write_drifted_closed
+  wp_dryrun "$TMP/wp-drift" --allow-mid-turn
+  wp_field 'v.dryRun===true && v.ok===false && v.targetInspection.turnActivity==="ambiguous" && v.failures.some(f=>f.includes("ambiguous"))' \
+    && ok "drift-poisoned completed turn is not send-ready even with --allow-mid-turn" \
+    || no "drift-poisoned completed turn was accepted (rc=$WPRC)"
 fi
 
 echo ""
