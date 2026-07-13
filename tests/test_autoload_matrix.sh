@@ -54,11 +54,6 @@ run(){
     fi
 }
 
-# Baseline powershell process count (hygiene check at the end; every invocation
-# above is synchronous, so the count must not grow).
-ps_count(){ tasklist 2>/dev/null | grep -ci "powershell" || true; }
-PS_BEFORE="$(ps_count)"
-
 echo "== A. default policy (defer) x identity =="
 run 2 "action=defer" "A1 legacy Codex name defers" -- \
     -ConversationId "$UUID" -DryRun -MockForegroundProcess Codex
@@ -98,18 +93,44 @@ run 1 "must be a UUID" "D1 non-UUID conversation id rejected" -- \
     -ConversationId "not-a-uuid" -DryRun -MockForegroundProcess Codex
 
 echo "== E. process hygiene =="
-# Every invocation above is synchronous and -DryRun never reaches Start-Process, so a
-# lingering child can only mean a leak. The global count is jitter-prone (unrelated
-# powershell activity on the host), so allow one settle-and-recount before failing.
-PS_AFTER="$(ps_count)"
-if [[ "$PS_AFTER" -gt "$PS_BEFORE" ]]; then
-    sleep 2
-    PS_AFTER="$(ps_count)"
-fi
-if [[ "$PS_AFTER" -le "$PS_BEFORE" ]]; then
-    ok "no lingering powershell processes (before=$PS_BEFORE after=$PS_AFTER)"
+# Suite-scoped leak check. Every helper invocation above is synchronous, and under
+# -DryRun the helper exits before Start-Process (whose only target is a codex:// URI
+# anyway, never powershell), so the only powershell process attributable to this
+# suite would be a hung/detached helper invocation itself — and every one of those
+# carries `-File <PS1WIN>` on its command line. Assert ZERO such processes remain.
+# A host-global powershell count lived here before; that is racy on a shared host
+# (unrelated concurrent powershell activity flaked gate run 4 while all helper
+# invocations passed) and was replaced by this owned-scope check, mirroring the
+# gate runner's ownership philosophy: if the enumeration itself fails, FAIL closed —
+# never fabricate "no leaks" from a failed measurement.
+HYG_SNIPPET='
+$ErrorActionPreference = "Stop"
+try {
+  $needle = $env:AUTOLOAD_HYG_NEEDLE
+  if ([string]::IsNullOrWhiteSpace($needle)) { Write-Output "ENUM_ERROR:helper-path needle missing from environment"; exit 3 }
+  $ps = @(Get-CimInstance Win32_Process | Where-Object { $_.Name -imatch "^powershell" })
+  if (-not ($ps | Where-Object { $_.ProcessId -eq $PID })) {
+    Write-Output "ENUM_ERROR:own pid $PID absent from powershell snapshot (enumeration untrustworthy)"; exit 3
+  }
+  $leaks = @($ps | Where-Object {
+    $_.ProcessId -ne $PID -and $_.CommandLine -and
+    $_.CommandLine.IndexOf($needle, [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+  })
+  foreach ($p in $leaks) { Write-Output ("LEAK: pid={0} cmd={1}" -f $p.ProcessId, $p.CommandLine) }
+  Write-Output ("LEAKS={0}" -f $leaks.Count)
+  exit 0
+} catch { Write-Output ("ENUM_ERROR:{0}" -f $_.Exception.Message); exit 3 }
+'
+HYG_OUT="$(AUTOLOAD_HYG_NEEDLE="$PS1WIN" powershell.exe -NoProfile -NonInteractive -Command "$HYG_SNIPPET" 2>&1)"
+HYG_RC=$?
+HYG_OUT="${HYG_OUT//$'\r'/}"
+LEAK_COUNT="$(printf '%s\n' "$HYG_OUT" | sed -n 's/^LEAKS=\([0-9][0-9]*\)$/\1/p' | head -n1)"
+if [[ $HYG_RC -ne 0 || -z "$LEAK_COUNT" ]]; then
+    no "suite-scoped hygiene enumeration failed — failing closed (rc=$HYG_RC; out: $(printf '%s' "$HYG_OUT" | head -c 300))"
+elif [[ "$LEAK_COUNT" -eq 0 ]]; then
+    ok "no suite-attributable powershell processes remain (command line scoped to helper path)"
 else
-    no "powershell process count grew and did not settle (before=$PS_BEFORE after=$PS_AFTER)"
+    no "suite-attributable powershell process(es) remain after matrix (count=$LEAK_COUNT): $(printf '%s' "$HYG_OUT" | grep '^LEAK:' | head -c 400)"
 fi
 
 echo
