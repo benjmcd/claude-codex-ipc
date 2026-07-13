@@ -96,7 +96,7 @@ dump_output(){
 
 # Milliseconds now. Prefer bash-native EPOCHREALTIME (bash>=5): the node fallback spawns a
 # process whose cold-start (2-3s under battery load) lands INSIDE the measured window and
-# fattens every ELAPSED_MS sample by up to two cold-starts per run_wait.
+# skews ELAPSED_MS by up to a cold-start in either direction (net error band ~±1 cold-start).
 now_ms(){
   if [[ -n "${EPOCHREALTIME:-}" ]]; then
     local t="${EPOCHREALTIME/,/.}"
@@ -378,7 +378,7 @@ else
   no "budget=0 remained alive until the fixture mutation"
   wait "$WRITER_PID" 2>/dev/null || true
 fi
-# correct = one spawn + one read (<=4s loaded: 2-3s cold-start + bash overhead); wrong =
+# correct = one spawn + one read (observed worst 7.4s under synthetic battery load; modeled <=4s); wrong =
 # env-honoring sleep (floor >=18000, fuse-capped). 10000 is >=2.5x loaded-correct and >=44%
 # below the wrong floor, so load cannot fail it and polling cannot pass it.
 if (( ELAPSED_MS < 10000 )); then
@@ -399,7 +399,7 @@ RUN_ENV=("CODEX_IPC_WAIT_BUDGET_MS=20000" "CODEX_IPC_WAIT_INTERVAL_MS=25")
 run_case "$CASE" --rollout-path "$CASE/rollout-$THREAD.jsonl" --reply-path "$CASE/reply.md"
 wait "$WRITER_PID"
 assert_token done "budget and interval environment values drive in-process re-evaluation"
-# correct = transition-triggered early exit (~150ms in-tool + <=4s loaded spawn overhead);
+# correct = transition-triggered early exit (~150ms in-tool + loaded spawn overhead, observed worst ~7.4s total);
 # wrong = sleeping to the 20000ms env-budget expiry. 10000 is >=2.5x loaded-correct and 50%
 # below the expiry floor. Lower bound stays: it asserts the waiter really polled.
 if (( ELAPSED_MS >= 60 && ELAPSED_MS < 10000 )); then
@@ -424,7 +424,7 @@ CASE="$TMP/budget-expiry"; mkdir -p "$CASE"; write_pending "$CASE/rollout-$THREA
 run_case "$CASE" --rollout-path "$CASE/rollout-$THREAD.jsonl" --reply-path "$CASE/reply.md" \
   --budget-ms 120 --interval-ms 20
 assert_token pending "unchanged state is pending at positive-budget expiry"
-# correct = 120ms budget expiry + <=4s loaded spawn overhead; wrong = an unbounded wait
+# correct = 120ms budget expiry + loaded spawn overhead (observed worst ~7.4s total); wrong = an unbounded wait
 # (no finite floor -- this is a hang fuse at >=2.5x the loaded correct path). Lower bound
 # stays: it asserts a positive budget actually waited.
 if (( ELAPSED_MS >= 60 && ELAPSED_MS < 10000 )); then
@@ -442,7 +442,7 @@ if grep -qi 'interval' "$ERR_FILE"; then
 else
   no "zero interval did not emit a visible stderr warning"
 fi
-# correct = 120ms budget + <=250ms fallback interval + <=4s loaded spawn overhead; wrong =
+# correct = 120ms budget + <=250ms fallback interval + loaded spawn overhead (observed worst ~7.4s total); wrong =
 # a hang or an interval misparse that never expires (no finite floor). 10000 >= 2.5x loaded-correct.
 if (( ELAPSED_MS < 10000 )); then
   ok "zero interval fallback does not hang (${ELAPSED_MS}ms)"
