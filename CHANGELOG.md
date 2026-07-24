@@ -62,9 +62,9 @@ which removed live delivery entirely and is not a release candidate.
   threw a Bash octal error that silently skipped the sweep while still publishing. Values
   are now `^(0|[1-9][0-9]*)$` compared in base-10; any non-canonical value exits 64 before
   any envelope write.
-- **Portability:** `atomic_write` no longer uses GNU-only `ln -T`; the destination pre-check
-  already rules out a directory/symlink target, so a plain `ln` is create-once-safe on
-  BSD/macOS.
+- **Portability:** `atomic_write` no longer uses GNU-only `ln -T`; it uses portable plain
+  `ln` on BSD/macOS. A follow-on audit found that the destination pre-check alone did not
+  close a raced-directory interleaving; the post-link hardening is recorded below.
 - **Test seam:** `_TEST_SOURCE_ONLY` is honored only when the script is sourced and exactly
   `1`; an executed wrapper ignores it, so an inherited value cannot silently exit 0 without
   dispatching. New `test_ipc.sh` and `test_retention_sweep.sh` sections guard both fixes.
@@ -73,6 +73,15 @@ which removed live delivery entirely and is not a release candidate.
   release commit touches no runtime/overlay file, so `FINAL_REF` stays tag-accurate.
 - **Release gate:** `scan_public_safety.sh` excludes nested `worktrees/` (separate checkouts),
   so `run_release_gates.sh` passes from a primary checkout that has sibling worktrees.
+
+### Hardened after audit-chain review
+- **Create-once post-link verification:** after a successful portable `ln`, `atomic_write`
+  now verifies that the exact destination is a regular file. If a directory races into
+  place and `ln` succeeds inside it, the staging and inner hard-links are removed and the
+  publication fails closed instead of reporting a false success.
+- **Final-ref fail-closed check:** `gen_release_manifest.sh check-all` now parses
+  `FINAL_REF` with the same whitespace stripping used by manifest enumeration. Missing,
+  empty, and whitespace-only markers all fail closed while final manifests exist.
 
 ## [0.1.7] — 2026-07-12
 
