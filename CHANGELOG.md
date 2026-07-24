@@ -4,7 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-## [0.1.8] — 2026-07-23
+## [0.1.8] — 2026-07-24
+
+> Post-tag correction: the first v0.1.8 cut shipped correct runtime code but stale docs
+> (still instructing the removed `--app`/`--open`/`--exec` modes and a "default 7"
+> retention value), plus an octal-value validation hole, a GNU-only `ln -T`, a test seam
+> that could suppress an executed dispatch, and a final-manifest bound to the wrong commit.
+> An independent adversarial audit found these; all are fixed and the tag was moved to the
+> corrected commit. See "Fixed after audit" below.
 
 Identity: **No Codex CLI / No Ambiguous Resend.** Live `--ipc` GUI delivery, the
 completion-wait contract, and reply harvesting are unchanged and remain the primary
@@ -45,6 +52,27 @@ which removed live delivery entirely and is not a release candidate.
   asserts the keep-only default. The static contract audit is now a local release gate,
   not CI-only. A create-once collision/regression test was added. Final release
   manifests are regenerated at the tested commit and are now covered by `check-all`.
+
+### Fixed after audit
+- **Docs vs runtime:** removed every remaining `--app`/`--open`/`--exec` instruction from
+  `SKILL.md`, `README.md`, `docs/{ARCHITECTURE,COMPATIBILITY,INSTALL,TROUBLESHOOTING}.md`,
+  and `references/{architecture,troubleshooting}.md` (following one reached the wrapper and
+  exited 64). Corrected the "default 7" retention text to keep-only in the docs that lagged.
+- **Retention validation:** a leading-zero value (`08`/`09`) passed a bare `^[0-9]+$` then
+  threw a Bash octal error that silently skipped the sweep while still publishing. Values
+  are now `^(0|[1-9][0-9]*)$` compared in base-10; any non-canonical value exits 64 before
+  any envelope write.
+- **Portability:** `atomic_write` no longer uses GNU-only `ln -T`; the destination pre-check
+  already rules out a directory/symlink target, so a plain `ln` is create-once-safe on
+  BSD/macOS.
+- **Test seam:** `_TEST_SOURCE_ONLY` is honored only when the script is sourced and exactly
+  `1`; an executed wrapper ignores it, so an inherited value cannot silently exit 0 without
+  dispatching. New `test_ipc.sh` and `test_retention_sweep.sh` sections guard both fixes.
+- **Manifests:** `gen_release_manifest.sh check-all` fails closed if a final manifest exists
+  but `FINAL_REF` is missing; the final pair is regenerated at the tested commit and the
+  release commit touches no runtime/overlay file, so `FINAL_REF` stays tag-accurate.
+- **Release gate:** `scan_public_safety.sh` excludes nested `worktrees/` (separate checkouts),
+  so `run_release_gates.sh` passes from a primary checkout that has sibling worktrees.
 
 ## [0.1.7] — 2026-07-12
 
