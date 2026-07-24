@@ -47,7 +47,9 @@ run(){
     local want_rc="$1" want_tok="$2" label="$3"; shift 3; [[ "$1" == "--" ]] && shift
     local out rc
     out="$(powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$PS1WIN" "$@" 2>&1)"; rc=$?
-    if [[ $rc -eq $want_rc ]] && printf '%s' "$out" | grep -qF -- "$want_tok"; then
+    # PowerShell may wrap formatted diagnostics according to host width and invocation-path
+    # length. Collapse whitespace so the assertion checks message content, not display layout.
+    if [[ $rc -eq $want_rc ]] && printf '%s' "$out" | tr -s '[:space:]' ' ' | grep -qF -- "$want_tok"; then
         ok "$label (rc=$rc, token found)"
     else
         no "$label (rc=$rc want=$want_rc; out: $(printf '%s' "$out" | head -c 300))"
