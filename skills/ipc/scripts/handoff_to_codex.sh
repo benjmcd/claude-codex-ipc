@@ -107,10 +107,10 @@ atomic_write() {
     local dest="$1" tmp
     mkdir -p "$(dirname "$dest")"
     # If anything already occupies the exact destination path -- a regular file, a
-    # directory, or a symlink -- refuse. Distinguishing this here means a genuine
-    # collision is reported as a collision, not conflated with an environmental link
-    # failure below, and `ln -T` cannot then silently create a link INSIDE a directory
-    # named dest.
+    # directory, or a symlink -- refuse. This is what stops `ln` from creating a link
+    # INSIDE a directory named dest (so no GNU-only `ln -T` is needed -- portable to
+    # BSD/macOS `ln`), and it lets a genuine collision be reported as a collision rather
+    # than conflated with the environmental link failure below.
     if [[ -e "$dest" || -L "$dest" ]]; then
         echo "ERROR: refusing to overwrite existing path \"${dest}\"." >&2
         echo "(Create-once publication: a same-name envelope already exists and may be in flight.)" >&2
@@ -118,8 +118,9 @@ atomic_write() {
     fi
     tmp="$(mktemp "${dest}.XXXXXX")"
     cat > "$tmp"
-    # -T: treat dest as a normal name, never as a directory to link into.
-    if ! ln -T "$tmp" "$dest" 2>/dev/null; then
+    # Portable create-once link (no GNU-only flags). The pre-check above already rules
+    # out a directory/symlink at dest, so a plain `ln` cannot descend into one.
+    if ! ln "$tmp" "$dest" 2>/dev/null; then
         rm -f "$tmp"
         if [[ -e "$dest" || -L "$dest" ]]; then
             echo "ERROR: refusing to overwrite existing path \"${dest}\" (won a create race)." >&2
@@ -138,10 +139,15 @@ atomic_write() {
 
 is_uuid() { [[ "${1:-}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; }
 
-# Test seam: allow a hermetic unit test to source the helper functions (atomic_write,
-# to_win, uniq_hex, is_uuid) without running any dispatch, retention sweep, or envelope
-# write. Never set this in normal use. It changes nothing about the shipped code path.
-if [[ -n "${_TEST_SOURCE_ONLY:-}" ]]; then return 0 2>/dev/null || exit 0; fi
+# Test seam: allow a hermetic unit test to SOURCE the helper functions (atomic_write,
+# to_win, uniq_hex, is_uuid) without running any dispatch. It is honored ONLY when the
+# script is sourced (BASH_SOURCE[0] != $0) AND the value is exactly 1. An EXECUTED
+# wrapper ignores it entirely, so an inherited _TEST_SOURCE_ONLY in the environment can
+# never silently suppress a real dispatch (the previous guard exited 0 without
+# dispatching on any inherited nonempty value, including "0" -- a silent-success footgun).
+if [[ "${_TEST_SOURCE_ONLY:-}" == "1" && "${BASH_SOURCE[0]}" != "${0}" ]]; then
+    return 0
+fi
 
 # --- Parse mode and arguments ---
 MODE="filedrop"
@@ -286,11 +292,16 @@ RETENTION_DAYS="${CODEX_IPC_RETENTION_DAYS:-0}"
 # (negative, decimal, whitespace, junk) previously skipped the sweep silently and
 # continued -- a caller who fat-fingered a retention value got neither the pruning
 # they asked for nor any signal. Fail closed instead of guessing.
-if [[ ! "$RETENTION_DAYS" =~ ^[0-9]+$ ]]; then
-    printf '%s\n' "ERROR: CODEX_IPC_RETENTION_DAYS=\"${CODEX_IPC_RETENTION_DAYS}\" is invalid; use unset, empty, 0 (keep-only), or a positive integer (days)." >&2
+# Canonical form only: exactly `0`, or a positive integer with no leading zero. This
+# rejects negatives, decimals, whitespace and junk -- AND leading-zero values like `08`,
+# which pass a bare ^[0-9]+$ but then throw "value too great for base" in Bash's octal
+# arithmetic, silently skipping the sweep while continuing to publish. Fail closed here,
+# before any envelope creation or sweep.
+if [[ ! "$RETENTION_DAYS" =~ ^(0|[1-9][0-9]*)$ ]]; then
+    printf '%s\n' "ERROR: CODEX_IPC_RETENTION_DAYS=\"${CODEX_IPC_RETENTION_DAYS}\" is invalid; use unset, empty, 0 (keep-only), or a positive integer with no leading zero." >&2
     exit 64
 fi
-if [[ "$RETENTION_DAYS" -gt 0 ]]; then
+if (( 10#$RETENTION_DAYS > 0 )); then
     if [[ "$RETENTION_SWEEP_OK" -eq 1 ]]; then
         # Aged tasks first, deciding pairing BEFORE any reply is deleted below --
         # otherwise an aged pair's task would misread as unreplied and never sweep.

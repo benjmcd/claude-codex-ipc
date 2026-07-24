@@ -255,13 +255,9 @@ Prefer an explicit path or project name in the command. If absent, infer from th
 current conversation context. If it is genuinely ambiguous, ask one concise question before
 creating/opening the wrong context.
 
-To open a project in Codex Desktop, use the maintained wrapper:
-
-```bash
-"${CLAUDE_SKILL_DIR}/scripts/handoff_to_codex.sh" --app
-```
-
-or run `codex app <workspace>` from the intended workspace.
+To open a project in Codex Desktop, open the Codex Desktop app yourself and select (or create) the
+intended workspace/thread. v0.1.8 removed the CLI-backed `--app`/`--open`/`--exec` modes, so the
+wrapper no longer opens the app for you.
 
 After the Desktop project/session exists, obtain a concrete conversationId before using `--ipc`.
 Use the read-only locator to discover candidates from Codex Desktop's local thread index:
@@ -285,9 +281,7 @@ attempt to override them through the delivery route, the client flags, or any ot
 if the inspector preflight shows the thread's stored settings are unsuitable for the handoff
 (e.g. a `managed` sandbox where reply-file writes are needed), pick a suitable thread or ask the
 operator — never mutate. Model/reasoning tier guidance in a task belongs to the thread's
-SUBAGENT deployment instructions, not to the thread itself. For headless `--exec` handoffs,
-model/reasoning pins remain opt-in via the `CODEX_MODEL` / `CODEX_REASONING_EFFORT` environment
-variables (an explicit operator setting, passed only when set).
+SUBAGENT deployment instructions, not to the thread itself.
 
 ## Cross-session context
 
@@ -304,9 +298,9 @@ disclosure outside the local machine.
 - Inspect existing sessions before sending.
 - Use exactly one explicit UUID per IPC send.
 - Keep file-drop as default/fallback.
-- `/ipc` success is strictly GUI delivery into the renderer-owned Desktop thread. Never use
-  headless `codex exec resume` (or any non-GUI execution) as an `/ipc` fallback or call it `/ipc`
-  success; `--exec` remains a separate explicit tool.
+- `/ipc` success is strictly GUI delivery into the renderer-owned Desktop thread. Never treat any
+  non-GUI execution as an `/ipc` fallback or `/ipc` success. (The CLI-backed `--exec`/`--open`/`--app`
+  modes were removed in v0.1.8; there is no headless execution path in this tool.)
 - Unowned threads are recovered by the wrapper's automatic `codex://threads/<conversationId>` load
   with focus snapback (experimental, Windows-only) — never by asking the operator to click, and
   never by navigating while Codex is the operator's foreground window **unless** the operator

@@ -142,13 +142,11 @@ on `powershell.exe` plus Win32 foreground-window APIs. On other platforms — or
 unavailable — the wrapper still polls, and on failure reports `gui-unowned` with the manual
 `codex://threads/<id>` remediation plus the file-drop fallback.
 
-### Headless exec (`--exec`, optional, separate tool)
+### Removed in v0.1.8: headless `--exec` (and `--app` / `--open`)
 
-`codex exec resume` writes only to the JSONL rollout files, while the Desktop app renders from a
-separate SQLite store, so exec handoffs never appear in the Desktop GUI. `--exec` is therefore NOT
-an `/ipc` fallback: use it only for fire-and-forget tasks where you read the reply file. Model and
-reasoning pins are opt-in via `CODEX_MODEL` / `CODEX_REASONING_EFFORT` and are passed only when
-set; otherwise Codex's own configured defaults apply.
+The CLI-backed modes were removed in v0.1.8. The wrapper no longer invokes the `codex` binary on
+any path, and there is no headless execution path. Delivery is the default file-drop handoff or
+live `--ipc` GUI injection.
 
 ## Read-only inspection surfaces
 

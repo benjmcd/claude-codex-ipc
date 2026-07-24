@@ -152,6 +152,26 @@ grep -qi 'unreplied' "$SCRIPT" \
     && ok "script documentation mentions the unreplied-task exemption" \
     || no "script documentation does not mention the unreplied-task exemption"
 
+echo "== 8. non-canonical retention values are rejected LOUDLY before any envelope write =="
+# Regression guard for the octal hole: 08/09 pass a bare ^[0-9]+$ but throw
+# "value too great for base" in Bash octal arithmetic, which previously skipped the
+# sweep while still publishing. Every non-canonical value must exit nonzero with zero
+# envelopes written.
+R8="$TMP/root8"; mkdir -p "$R8"
+for badval in 08 09 -1 3.5 " " 1x; do
+    ch="$R8/sweepsess/filedrop"; rm -rf "$ch"
+    run_dispatch "$R8" CODEX_IPC_RETENTION_DAYS="$badval"
+    made=$(find "$R8" -name '*.task.md' 2>/dev/null | wc -l)
+    [[ "$RC" -ne 0 && "$made" -eq 0 ]] \
+        && ok "value '$badval' rejected (rc=$RC, 0 envelopes)" \
+        || no "value '$badval' NOT rejected safely (rc=$RC, envelopes=$made)"
+done
+# And a valid value still dispatches.
+R8b="$TMP/root8b"; run_dispatch "$R8b" CODEX_IPC_RETENTION_DAYS=7
+[[ "$RC" -eq 0 && "$(find "$R8b" -name '*.task.md'|wc -l)" -eq 1 ]] \
+    && ok "canonical value '7' still dispatches" \
+    || no "canonical value '7' failed to dispatch (rc=$RC)"
+
 echo ""
 echo "RESULT: $PASS passed, $FAIL failed"
 [[ $FAIL -eq 0 ]] && echo "ALL GREEN" || echo "FAILURES PRESENT"

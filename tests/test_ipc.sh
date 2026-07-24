@@ -174,6 +174,18 @@ CO="$TMP/create-once"; mkdir -p "$CO"
 [[ $? -eq 0 ]] && ok "create-once: fresh publishes, collision + directory-dest fail closed, no residue" \
               || no "create-once publication defect (see CO-FAIL above)"
 
+echo "== 11c. an EXECUTED wrapper ignores an inherited _TEST_SOURCE_ONLY (no silent suppression) =="
+# The test seam must be honored only when SOURCED. An inherited value in the environment
+# of an executed dispatch must NOT silently exit 0 without publishing.
+SS="$TMP/sourceseam/filedrop"; mkdir -p "$(dirname "$SS")"
+_TEST_SOURCE_ONLY=1 CODEX_IPC_ROOT="$TMP/sourceseam" CLAUDE_CODE_SESSION_ID="seam" \
+    bash "$SCRIPT" "seam-executed task" >/dev/null 2>&1
+seam_rc=$?
+seam_made=$(find "$TMP/sourceseam" -name '*.task.md' 2>/dev/null | wc -l)
+[[ "$seam_rc" -eq 0 && "$seam_made" -eq 1 ]] \
+    && ok "executed wrapper dispatched despite inherited _TEST_SOURCE_ONLY=1 (rc=$seam_rc, 1 envelope)" \
+    || no "inherited _TEST_SOURCE_ONLY suppressed a real executed dispatch (rc=$seam_rc, envelopes=$seam_made)"
+
 echo "== 12. removed Codex-CLI modes fail before transport access or child launch =="
 REMOVED_ENV="$TMP/removed-mode-probe.sh"
 REMOVED_EMPTY_PATH="$TMP/removed-empty-path"; mkdir -p "$REMOVED_EMPTY_PATH"

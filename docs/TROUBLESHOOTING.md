@@ -18,7 +18,7 @@ adds repo/install-level triage.
 | Symptom | Cause / fix |
 |---|---|
 | `node:sqlite is unavailable` | Inspection tools need Node.js with `node:sqlite` support (≥ 22.5; older 22.x/23.x lines may require `--experimental-sqlite`). Upgrade Node, or skip inspection — file-drop works without it. |
-| `ERROR: 'codex' not found on PATH` | Only `--app` / `--open` / `--exec` need the Codex CLI. File-drop and `--ipc` do not. |
+| `ERROR: --app/--open/--exec was removed in v0.1.8` | These CLI-backed modes were removed. Use the default file-drop handoff, or `--ipc <conversationId>` for live delivery — neither invokes the Codex CLI. |
 | `mapfile: command not found` | The reply viewer needs bash ≥ 4; stock macOS bash is 3.2. `brew install bash` and run the script with the newer bash. |
 | `--ipc` → `failed-closed` with pipe/connect errors | Codex Desktop is not running, or the private router protocol drifted after an update. Start the app; run `codex_ipc_revalidate.mjs`; suspect drift before suspecting the target. |
 | `--ipc` → `gui-unowned` repeatedly | No renderer owns the thread and auto-load could not complete (or you are actively working in Codex — the helper defers on purpose). Open `codex://threads/<conversationId>` manually, then rerun; or use the printed file-drop line. |
@@ -29,7 +29,7 @@ adds repo/install-level triage.
 | Reply view shows `source=none` | Neither source yielded content. Use the visible `pending`, `unavailable`, `ambiguous`, or `unparseable` reason; no cache or reply file is synthesized. |
 | Reply viewer exit 2 | No session id resolvable. Pass `--session <sid>` (the printed listing shows what exists). |
 | Reply viewer exit 1 on `--since` | Malformed `find -newermt` spec — the viewer fails closed rather than reporting a false "0 replies". |
-| Old envelopes disappeared | Retention pruning (`CODEX_IPC_RETENTION_DAYS`, default 7) ran on a later dispatch. Set `0` to disable. |
+| Old envelopes disappeared | Retention pruning ran on a later dispatch. As of v0.1.8 pruning is OFF by default (`CODEX_IPC_RETENTION_DAYS` unset/empty/`0` = keep-only); it deletes only if you set an explicit positive integer. |
 | Reply file never written (permission/sandbox denial) | Expected, not an error: the injected turn can run under a sandbox that blocks the per-dispatch `.reply.md` write. The producer states the denial and puts the full result in its final agent message; recover it with `codex_ipc_wait --accept-rollout-fallback` on a known-UUID `--ipc` dispatch (flagless/filedrop do not auto-recover). The inspector's stored `sandboxPolicy`/`approvalMode` are advisory only (`permissionProfileAdvisory`) and never predict reply-writability. |
 
 ## Completion / wait triage (`codex_ipc_wait`)

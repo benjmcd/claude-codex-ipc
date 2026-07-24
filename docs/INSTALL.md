@@ -58,6 +58,5 @@ PowerShell equivalents:
 | Bounded rollout confirmation and rollout-derived reply fallback | Node.js (built-ins only). Optional: primary reply-file viewing remains available without Node. |
 | Read-only inspection (inspector/locator/snapshot) | Node.js with `node:sqlite` support (≥ 22.5; older 22.x/23.x lines may require `--experimental-sqlite`) |
 | Live Desktop IPC (`--ipc`) | Windows, Node.js, Codex Desktop running; PowerShell for auto-load |
-| `--app` / `--open` / `--exec` | Codex CLI on PATH |
 
 See [COMPATIBILITY.md](COMPATIBILITY.md) for the full matrix.

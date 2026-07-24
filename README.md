@@ -80,13 +80,11 @@ Foreground-policy grammar and full operational rules: [skills/ipc/SKILL.md](skil
 | Variable | Default | Effect |
 |---|---|---|
 | `CODEX_IPC_ROOT` | `~/.claude/ipc` | Transport root for task/reply envelopes |
-| `CODEX_IPC_RETENTION_DAYS` | `7` | Prune envelopes older than N days on next dispatch (`0` disables) |
+| `CODEX_IPC_RETENTION_DAYS` | `0` (keep-only) | Unset/empty/`0` never delete; a positive integer prunes envelopes older than N days on next dispatch |
 | `CODEX_IPC_INCLUDE_TRANSCRIPT` | unset | `1` includes the Claude transcript path (default: omitted) |
 | `CODEX_IPC_AUTHORIZED_TEST_THREAD` | unset | Operator-owned test thread UUID exempt from `--allow-any-thread` |
 | `CODEX_IPC_FOREGROUND_POLICY` | `defer` | `--ipc` foreground policy: `defer`\|`switch`\|`restore-if-known` |
 | `CODEX_IPC_FOREGROUND_SWITCH_STANDING_APPROVAL` | unset | `1` = standing `switch` ack (printed every send; prefer the per-send flag) |
-| `CODEX_MODEL` / `CODEX_REASONING_EFFORT` | unset | `--exec` pins; passed only when set |
-| `CODEX_SESSION_ID` | unset | Target session for `--exec`/`--open` |
 | `CODEX_IPC_POLL_DEADLINE_S` / `_INTERVAL_S` | `30` / `2` | Auto-load retry poll (test knobs) |
 | `CODEX_IPC_OBSERVE_BUDGET_MS` | `20000` (measurement-informed) | Hard cap for post-acceptance rollout observation |
 | `CODEX_IPC_OBSERVE_INTERVAL_MS` | observer default | Positive observation interval override; invalid values warn and fall back |
@@ -100,7 +98,6 @@ Foreground-policy grammar and full operational rules: [skills/ipc/SKILL.md](skil
 | Reply viewer | ✅ | ✅ (bash ≥ 4 + GNU coreutils; Node optional for rollout fallback) | Stable |
 | Inspector / locator / snapshot | ✅ | ✅ (Node with `node:sqlite`, ≥ 22.5) | Stable, read-only |
 | Desktop pipe IPC + `codex://` autoload | ✅ | ❌ | **Experimental**, touches live Desktop |
-| Headless `--exec` | ✅ | ✅ (Codex CLI) | Optional, no GUI effect |
 
 Dependencies and fallbacks per feature: [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md).
 
@@ -131,7 +128,7 @@ CI adds syntax checks and public-safety scans on ubuntu + windows:
 
 Live route is Windows-only and version-fragile by nature. GUI delivery cannot set a thread's
 model/reasoning (renderer-controlled). Envelope files trust the local machine (any same-user
-process can read and modify them). `--exec` output never appears in the Desktop GUI.
+process can read and modify them).
 
 ## Status
 

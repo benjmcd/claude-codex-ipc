@@ -13,7 +13,7 @@ FAIL=0
 scan() { # scan <label> <extended-regex>
     local label="$1" pattern="$2" hits
     hits="$(grep -rInE --binary-files=without-match \
-        --exclude-dir=.git --exclude-dir=node_modules \
+        --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=worktrees \
         --exclude=scan_public_safety.sh \
         -e "$pattern" "$ROOT" 2>/dev/null || true)"
     if [[ -n "$hits" ]]; then
@@ -51,7 +51,7 @@ scan "OpenAI-style secret key literal"    'sk-[A-Za-z0-9]{20,}'
 scan "assigned secret/password literal"   '(password|secret|api[_-]?key)[[:space:]]*[:=][[:space:]]*["'"'"'][^"'"'"']+["'"'"']'
 
 # 5. Backup files must not exist (content-independent)
-bak_files="$(find "$ROOT" -name '*.bak' -o -name '*.bak-*' 2>/dev/null | grep -v '/\.git/' || true)"
+bak_files="$(find "$ROOT" -name '*.bak' -o -name '*.bak-*' 2>/dev/null | grep -vE '/(\.git|worktrees)/' || true)"
 if [[ -n "$bak_files" ]]; then
     echo "FAIL: backup files present"
     printf '%s\n' "$bak_files" | sed 's/^/    /'
@@ -63,7 +63,7 @@ fi
 # 6. Non-synthetic UUIDs: every UUID in the repo must be on the synthetic-fixture allowlist.
 ALLOWED_UUIDS='^(00000000-0000-4000-8000-000000000000|00000000-0000-4000-8000-00000000c0de|11111111-1111-4111-8111-111111111111|22222222-2222-4222-8222-222222222222|33333333-3333-4333-8333-333333333333)$'
 unknown_uuids="$(grep -rIhoE --binary-files=without-match \
-    --exclude-dir=.git --exclude-dir=node_modules \
+    --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=worktrees \
     --exclude=scan_public_safety.sh \
     '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' "$ROOT" 2>/dev/null \
     | sort -u | grep -vE "$ALLOWED_UUIDS" || true)"
@@ -78,7 +78,7 @@ fi
 # 7. Structural checks: state dirs and path-embedded UUIDs. Content greps cannot see
 #    these — a tool-state directory (e.g. OMC/Claude/Codex hooks writing into the tree)
 #    or a session-UUID-named path leaks machine state without matching any content rule.
-state_dirs="$(find "$ROOT" \( -name '.omc' -o -name '.claude' -o -name '.codex' \) -not -path '*/.git/*' 2>/dev/null || true)"
+state_dirs="$(find "$ROOT" \( -name '.omc' -o -name '.claude' -o -name '.codex' \) -not -path '*/.git/*' -not -path '*/worktrees/*' 2>/dev/null || true)"
 if [[ -n "$state_dirs" ]]; then
     echo "FAIL: local tool-state directory present"
     printf '%s\n' "$state_dirs" | sed 's/^/    /'
@@ -87,7 +87,7 @@ else
     echo "  ok: no local tool-state directories"
 fi
 
-path_uuids="$(find "$ROOT" -not -path '*/.git/*' 2>/dev/null \
+path_uuids="$(find "$ROOT" -not -path '*/.git/*' -not -path '*/worktrees/*' 2>/dev/null \
     | grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' \
     | sort -u | grep -vE "$ALLOWED_UUIDS" || true)"
 if [[ -n "$path_uuids" ]]; then

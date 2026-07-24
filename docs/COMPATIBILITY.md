@@ -69,15 +69,11 @@ Same dependencies as the inspector for snapshot mode; `--compare` mode is pure J
 | Touches live Desktop state | Yes — loads the target thread (background window on the default path; the VISIBLE window under authorized `switch` — disclosed residue) |
 | Fallback | Wrapper reports `gui-unowned`/`failed-closed` with reason token, manual `codex://threads/<id>` remediation + file-drop line |
 
-## Headless exec (`--exec`)
+## Removed in v0.1.8: `--app` / `--open` / `--exec`
 
-| | |
-|---|---|
-| Supported OS | Wherever the Codex CLI runs |
-| Dependencies | `codex` CLI on PATH; optional `CODEX_MODEL` / `CODEX_REASONING_EFFORT` pins (passed only when set) |
-| Stability | Optional; depends on the public-ish `codex exec` CLI surface |
-| Touches live Desktop state | No GUI effect — writes rollout JSONL only, invisible to the Desktop app |
-| Fallback | File-drop |
+The CLI-backed modes were removed in v0.1.8 ("No Codex CLI"). The wrapper no longer invokes the
+`codex` binary on any path. Use the default file-drop handoff, or `--ipc <conversationId>` for live
+Desktop delivery; there is no headless execution path in this tool.
 
 ## Validation tooling (`codex_ipc_revalidate.mjs`, `codex_ipc_write_proof.mjs`, `codex_ipc_contract_audit.mjs`)
 

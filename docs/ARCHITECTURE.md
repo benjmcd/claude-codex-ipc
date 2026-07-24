@@ -34,8 +34,8 @@ ${CODEX_IPC_ROOT:-~/.claude/ipc}/<claudeSessionId>/<conversationId|filedrop>/<di
   Codex threads cannot cross-talk or clobber.
 - Reply correlation is exact via `dispatchId`.
 - Works from any cwd; no git repo required (git context is optional payload enrichment).
-- Bounded retention: envelopes are pruned opportunistically on the next dispatch after
-  `CODEX_IPC_RETENTION_DAYS` (default 7; 0 disables).
+- Keep-only by default: `CODEX_IPC_RETENTION_DAYS` unset/empty/`0` never delete. A positive
+  integer prunes envelopes opportunistically on the next dispatch after that many days.
 
 ## Reply resolution
 
@@ -65,8 +65,8 @@ no cache, reconstructed reply file, transport-root write, lock, or retention sid
    unchanged `OpenAI.Codex` package family, so foreground/GUI identification is positive
    (executable path + package), never process-name-only (see `docs/COMPATIBILITY.md`,
    "Host-identity ledger").
-3. **`--exec` headless (optional):** `codex exec resume` writes only rollout JSONL, invisible to
-   the Desktop GUI; explicitly not an `/ipc` fallback.
+   (The CLI-backed `--exec`/`--app`/`--open` modes were removed in v0.1.8; there is no headless
+   execution path.)
 
 ## Inspection and validation surfaces (all read-only)
 

@@ -7,7 +7,7 @@ Repo-level triage lives in `docs/TROUBLESHOOTING.md`; this is the bundled quick 
 | Symptom | Cause | Fix |
 |---|---|---|
 | `node:sqlite is unavailable` from inspector/locator/snapshot | Node.js without `node:sqlite` support (needs ≥ 22.5; older 22.x/23.x lines may require `--experimental-sqlite`) | Upgrade Node, or skip inspection — file-drop handoff works without it |
-| `'codex' not found on PATH` | Codex CLI not installed | Only `--app`, `--open`, `--exec` need the CLI; file-drop and `--ipc` do not |
+| `--app/--open/--exec was removed in v0.1.8` | CLI-backed modes removed | Use the default file-drop handoff or `--ipc <conversationId>`; neither invokes the Codex CLI |
 | `--ipc` says `node not found` | Node.js missing | Install Node; or use the printed file-drop pickup line (already written) |
 | Inspector says `State DB was not found` | No Codex Desktop state on this machine (or non-default path) | Pass `--db`/`--sessions-root`, or accept that inspection is unavailable |
 | `autoload helper unavailable` warning | Not Windows, or `powershell.exe` missing | Expected off-Windows: open `codex://threads/<id>` manually, or use file-drop |
