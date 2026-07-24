@@ -6,19 +6,13 @@
 # or TUI) to pick it up.
 #   ./scripts/handoff_to_codex.sh "task for Codex"
 #
-# Other modes:
+# Live mode:
 #   ./scripts/handoff_to_codex.sh --ipc <conversationId> "task"  # inject into a live Desktop GUI thread
 #   ./scripts/handoff_to_codex.sh --ipc <conversationId> \
 #       [--foreground-policy defer|switch|restore-if-known] [--ack-foreground-switch] [--] "task"
-#   ./scripts/handoff_to_codex.sh --open [session_id]   # open a session in the terminal TUI
-#   ./scripts/handoff_to_codex.sh --app                 # open the workspace in the Codex desktop app
-#   ./scripts/handoff_to_codex.sh --exec "task" [sid]   # HEADLESS exec (NOT visible in the GUI)
 #
 # The file-drop default is the recommended path: it appears in the Codex Desktop GUI (your own session
-# reads the file) and has zero effect on any other running Codex session. Why --exec is not the default:
-# `codex exec` writes only to the JSONL rollout files, while the Desktop app renders from a separate
-# SQLite store, so exec handoffs never appear in the Desktop GUI -- use --exec only for fire-and-forget
-# tasks where you read the reply file.
+# reads the file) and has zero effect on any other running Codex session.
 #
 # TRANSPORT MODEL (2026-07-06 rebuild): the Claude->Codex transport ENVELOPE (the
 # per-dispatch .task.md the wrapper writes, and the .reply.md Codex writes back) lives
@@ -34,18 +28,17 @@
 #
 # Optional env:
 #   CODEX_IPC_ROOT=<dir>               override the transport root (default ~/.claude/ipc)
-#   CODEX_IPC_RETENTION_DAYS=<n>       prune transport files older than n days on each run
-#                                      (default 7; 0 disables). Aged *.reply.md files, and aged
+#   CODEX_IPC_RETENTION_DAYS=<n>       prune transport files older than n days on each run.
+#                                      KEEP-ONLY BY DEFAULT: unset, empty and 0 all mean never
+#                                      delete; pruning requires an explicit positive integer.
+#                                      When enabled: aged *.reply.md files, and aged
 #                                      *.task.md files whose same-dispatch *.reply.md exists, are
 #                                      deleted. An UNREPLIED *.task.md is NEVER age-deleted: an
 #                                      outstanding dispatch is kept until it is answered, and
 #                                      pairing ambiguity errs toward retention.
 #   CODEX_IPC_INCLUDE_TRANSCRIPT=1     include the Claude transcript path in the handoff payload
 #                                      (default: omitted; transcript paths expose full session context)
-#   CODEX_SESSION_ID=<uuid>            target a specific session (positional arg overrides this)
-#   CODEX_MODEL=<name>                 model pin for --exec (only passed when set; else Codex config default)
-#   CODEX_REASONING_EFFORT=<level>     advisory note added to the handoff (file-drop) / pin (--exec);
-#                                      only passed/added when set
+#   CODEX_REASONING_EFFORT=<level>     advisory note added to the handoff when set
 #   CODEX_IPC_FOREGROUND_POLICY=<p>    --ipc foreground policy default: defer|switch|restore-if-known
 #                                      (default defer; the --foreground-policy flag overrides)
 #   CODEX_IPC_FOREGROUND_SWITCH_STANDING_APPROVAL=1
@@ -59,6 +52,23 @@
 #   CODEX_IPC_OBSERVE_INTERVAL_MS=<n>  positive rollout observation interval override
 
 set -euo pipefail
+
+# v0.1.8 removes every Codex-CLI-backed mode. Reject these flags before transport-root
+# resolution, project inspection, retention, envelope publication, or any child launch.
+case "${1:-}" in
+    --app)
+        printf '%s\n' 'ERROR: --app was removed in v0.1.8 (No Codex CLI); use positional file-drop ("task") or --ipc <conversationId> "task".' >&2
+        exit 64
+        ;;
+    --open)
+        printf '%s\n' 'ERROR: --open was removed in v0.1.8 (No Codex CLI); use positional file-drop ("task") or --ipc <conversationId> "task".' >&2
+        exit 64
+        ;;
+    --exec)
+        printf '%s\n' 'ERROR: --exec was removed in v0.1.8 (No Codex CLI); use positional file-drop ("task") or --ipc <conversationId> "task".' >&2
+        exit 64
+        ;;
+esac
 
 # --- Machine-local IPC transport root (repo/CWD-independent) ---
 IPC_ROOT="${CODEX_IPC_ROOT:-${HOME}/.claude/ipc}"
@@ -96,25 +106,45 @@ uniq_hex() { od -An -N8 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n' || printf '%
 atomic_write() {
     local dest="$1" tmp
     mkdir -p "$(dirname "$dest")"
-    tmp="$(mktemp "${dest}.XXXXXX")"
-    cat > "$tmp"
-    if ! ln "$tmp" "$dest" 2>/dev/null; then
-        rm -f "$tmp"
-        echo "ERROR: refusing to overwrite existing file \"${dest}\"." >&2
+    # If anything already occupies the exact destination path -- a regular file, a
+    # directory, or a symlink -- refuse. Distinguishing this here means a genuine
+    # collision is reported as a collision, not conflated with an environmental link
+    # failure below, and `ln -T` cannot then silently create a link INSIDE a directory
+    # named dest.
+    if [[ -e "$dest" || -L "$dest" ]]; then
+        echo "ERROR: refusing to overwrite existing path \"${dest}\"." >&2
         echo "(Create-once publication: a same-name envelope already exists and may be in flight.)" >&2
         return 1
     fi
-    rm -f "$tmp"
+    tmp="$(mktemp "${dest}.XXXXXX")"
+    cat > "$tmp"
+    # -T: treat dest as a normal name, never as a directory to link into.
+    if ! ln -T "$tmp" "$dest" 2>/dev/null; then
+        rm -f "$tmp"
+        if [[ -e "$dest" || -L "$dest" ]]; then
+            echo "ERROR: refusing to overwrite existing path \"${dest}\" (won a create race)." >&2
+        else
+            echo "ERROR: could not publish \"${dest}\" (link failed: permission, filesystem, or quota)." >&2
+            echo "(This is an environmental failure, not a collision; nothing was published.)" >&2
+        fi
+        return 1
+    fi
+    # The link succeeded, so the destination is published. A failure to remove the
+    # staging hard-link must NOT propagate as a publication failure -- the envelope
+    # exists and a caller must not retry. Clean up best-effort and report success.
+    rm -f "$tmp" 2>/dev/null || echo "WARNING: staging residue left at \"${tmp}\" (destination published OK)." >&2
+    return 0
 }
 
 is_uuid() { [[ "${1:-}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; }
-need_codex() {
-    command -v codex &>/dev/null || { echo "ERROR: 'codex' not found on PATH. Install the Codex CLI first." >&2; exit 1; }
-}
+
+# Test seam: allow a hermetic unit test to source the helper functions (atomic_write,
+# to_win, uniq_hex, is_uuid) without running any dispatch, retention sweep, or envelope
+# write. Never set this in normal use. It changes nothing about the shipped code path.
+if [[ -n "${_TEST_SOURCE_ONLY:-}" ]]; then return 0 2>/dev/null || exit 0; fi
 
 # --- Parse mode and arguments ---
 MODE="filedrop"
-SESSION_ID="${CODEX_SESSION_ID:-}"
 IPC_CID=""
 TASK=""
 
@@ -145,15 +175,6 @@ guard_task() {
 }
 
 case "${1:-}" in
-    --exec)
-        MODE="exec"; shift
-        if [[ -z "${1:-}" ]]; then
-            echo "ERROR: --exec requires a task: $0 --exec \"task\" [session_id]" >&2
-            exit 1
-        fi
-        TASK="${1}"; guard_task
-        is_uuid "${2:-}" && SESSION_ID="${2}"
-        ;;
     --ipc)
         MODE="ipc"; shift
         if ! is_uuid "${1:-}"; then
@@ -206,15 +227,8 @@ case "${1:-}" in
             exit 1
         fi
         ;;
-    --open)
-        MODE="open"
-        is_uuid "${2:-}" && SESSION_ID="${2}"
-        ;;
-    --app)
-        MODE="app"
-        ;;
     "")
-        printf "ERROR: No task provided.\n\nUsage:\n  %s \"task for Codex\"               # file-drop handoff (recommended default)\n  %s --ipc <conversationId> \"task\"  # inject into a live Desktop GUI thread (opt-in)\n  %s --open [session_id]            # open session in TUI\n  %s --app                          # open Codex desktop app\n  %s --exec \"task\" [session_id]     # headless exec (not visible in GUI)\n" "$0" "$0" "$0" "$0" "$0" >&2
+        printf "ERROR: No task provided.\n\nUsage:\n  %s \"task for Codex\"               # file-drop handoff (recommended default)\n  %s --ipc <conversationId> \"task\"  # inject into a live Desktop GUI thread (opt-in)\n" "$0" "$0" >&2
         exit 1
         ;;
     --*)
@@ -223,35 +237,8 @@ case "${1:-}" in
         ;;
     *)
         TASK="${1}"; guard_task
-        is_uuid "${2:-}" && SESSION_ID="${2}"
         ;;
 esac
-
-# --- OPEN modes need PROJECT_ROOT; resolve a usable cwd (they are repo-oriented) ---
-OPEN_ROOT="${PROJECT_ROOT:-$PWD}"
-
-# --- OPEN IN DESKTOP APP ---
-if [[ "$MODE" == "app" ]]; then
-    need_codex
-    echo "Opening Codex desktop app at ${OPEN_ROOT}..."
-    codex app "${OPEN_ROOT}"
-    exit 0
-fi
-
-# --- OPEN IN TUI ---
-if [[ "$MODE" == "open" ]]; then
-    need_codex
-    echo "Opening Codex TUI${SESSION_ID:+ (session: ${SESSION_ID})}..."
-    (
-        cd "${OPEN_ROOT}"
-        if [[ -n "$SESSION_ID" ]]; then
-            codex resume "${SESSION_ID}"
-        else
-            codex resume --last
-        fi
-    )
-    exit $?
-fi
 
 # --- Resolve Claude's own session id (channel key + optional transcript pointer) ---
 # CLAUDE_CODE_SESSION_ID is injected by Claude Code. If absent, use an isolated
@@ -294,7 +281,16 @@ CHANNEL_DIR="${IPC_ROOT}/${CLAUDE_SID}/${CHANNEL_THREAD}"
 # transport is evidence, and silent age-based deletion of a reply nobody harvested is
 # unrecoverable data loss. Pruning is strictly opt-in via an explicit positive integer.
 RETENTION_DAYS="${CODEX_IPC_RETENTION_DAYS:-0}"
-if [[ "$RETENTION_DAYS" =~ ^[0-9]+$ && "$RETENTION_DAYS" -gt 0 ]]; then
+# Reject a non-canonical value LOUDLY, before any envelope creation, child launch, or
+# sweep. Unset/empty/0 mean keep-only; a positive integer prunes. Anything else
+# (negative, decimal, whitespace, junk) previously skipped the sweep silently and
+# continued -- a caller who fat-fingered a retention value got neither the pruning
+# they asked for nor any signal. Fail closed instead of guessing.
+if [[ ! "$RETENTION_DAYS" =~ ^[0-9]+$ ]]; then
+    printf '%s\n' "ERROR: CODEX_IPC_RETENTION_DAYS=\"${CODEX_IPC_RETENTION_DAYS}\" is invalid; use unset, empty, 0 (keep-only), or a positive integer (days)." >&2
+    exit 64
+fi
+if [[ "$RETENTION_DAYS" -gt 0 ]]; then
     if [[ "$RETENTION_SWEEP_OK" -eq 1 ]]; then
         # Aged tasks first, deciding pairing BEFORE any reply is deleted below --
         # otherwise an aged pair's task would misread as unreplied and never sweep.
@@ -658,38 +654,3 @@ if [[ "$MODE" == "ipc" ]]; then
     exit 1
 fi
 
-# --- HEADLESS EXEC (opt-in; NOT visible in the Desktop GUI) ---
-if [[ "$MODE" == "exec" ]]; then
-    need_codex
-    # Model/reasoning pins are OPT-IN: passed only when the caller sets CODEX_MODEL /
-    # CODEX_REASONING_EFFORT. When unset, Codex's own configured defaults apply.
-    REASONING_EFFORT="${CODEX_REASONING_EFFORT:-}"
-    MODEL="${CODEX_MODEL:-}"
-    PIN_ARGS=()
-    [[ -n "$MODEL" ]] && PIN_ARGS+=(-m "$MODEL")
-    [[ -n "$REASONING_EFFORT" ]] && PIN_ARGS+=(-c "model_reasoning_effort=${REASONING_EFFORT}")
-    RESUME_ARGS=()
-    if [[ -n "$SESSION_ID" ]]; then RESUME_ARGS=("$SESSION_ID"); else RESUME_ARGS=("--last"); fi
-
-    echo "NOTE: --exec is headless. The result will NOT appear in the Codex Desktop GUI."
-    echo "Sending to Codex (model: ${MODEL:-config default}, reasoning: ${REASONING_EFFORT:-config default}${SESSION_ID:+, session: ${SESSION_ID}})..."
-    (
-        cd "${WORKDIR}"
-        # -m and -c are per-invocation pins: they do NOT modify ~/.codex/config.toml and have
-        # NO effect on any other running Codex session. They are added only when set above.
-        printf '%s\n' "$PAYLOAD" \
-            | codex exec resume "${RESUME_ARGS[@]}" - \
-                -o "$INBOUND" \
-                ${PIN_ARGS[@]+"${PIN_ARGS[@]}"} \
-                2>&1 \
-            | grep -v "failed to load skill" \
-            | grep -v "ERROR codex_core" \
-            | grep -v "ERROR codex_memories" \
-            | grep -v "^SUCCESS: The process with PID" \
-            | grep -v "^tokens used" \
-            | grep -v "^[0-9][0-9,]*$"
-    )
-    echo ""
-    echo "[ Reply saved to ${INBOUND} ]"
-    exit 0
-fi

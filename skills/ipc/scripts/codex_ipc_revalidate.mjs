@@ -219,14 +219,22 @@ function checkCodexCliVersion() {
   // exec, fallback, recovery, validator or broker worker may invoke it. This check
   // therefore reports the invariant instead of spawning `codex --version`. It never
   // gated the summary even when it did probe, so nothing downstream changes.
+  //
+  // `available` is null, not false: nothing was probed, so availability is UNKNOWN,
+  // not "known-absent". Stable nullable status/signal/error/command/stdout/stderr keys
+  // are preserved for any consumer that read the old command-result shape.
   return {
     ok: true,
-    available: false,
+    applicable: false,
+    available: null,
     probed: false,
     command: null,
+    status: null,
+    signal: null,
+    error: null,
     stdout: "",
     stderr: "",
-    note: "Codex CLI is out of scope by design (no-CLI invariant); not probed.",
+    note: "Codex CLI is out of scope by design (no-CLI invariant); not probed. This report does not establish global no-CLI closure (N1).",
   };
 }
 

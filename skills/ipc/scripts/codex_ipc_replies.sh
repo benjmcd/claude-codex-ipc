@@ -209,7 +209,8 @@ SHOWN=$(( TOTAL < N ? TOTAL : N ))
 echo "# Codex replies — DERIVED READ-ONLY VIEW (point-in-time; never authoritative)"
 echo "# captured: ${NOW}   session: ${SESSION}${CONV:+   thread: ${CONV}}"
 echo "# root: \"$(to_win "$IPC_ROOT")\"   (reply files primary; rollouts are derived fallback)"
-echo "# replies older than CODEX_IPC_RETENTION_DAYS (default 7; 0 disables) are transport-pruned and not shown."
+echo "# replies are kept by default (CODEX_IPC_RETENTION_DAYS is keep-only unless set to a positive integer);"
+echo "# when pruning IS enabled, replies older than that many days are transport-pruned and not shown."
 echo "# Showing ${SHOWN} of ${TOTAL} dispatches, newest first${SINCE:+   (--since '${SINCE}')}${CONV:+   (thread ${CONV})}"
 echo ""
 

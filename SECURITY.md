@@ -13,9 +13,15 @@ Task envelopes (`*.task.md`) contain the task text, git context (branch, commit 
 stats, uncommitted file names), the Claude session id, and — only with opt-in — a transcript path.
 Reply files contain whatever Codex writes. All of it lives under
 `${CODEX_IPC_ROOT:-~/.claude/ipc}` as plaintext readable and writable by **any process running as
-the same OS user**. Mitigations: do not put secrets in task text; retention pruning
-(`CODEX_IPC_RETENTION_DAYS`, default 7) bounds how long stale envelopes persist; the root can be
-pointed at a more restricted location via `CODEX_IPC_ROOT`.
+the same OS user**. Mitigations: do not put secrets in task text; the root can be pointed at a
+more restricted location via `CODEX_IPC_ROOT`.
+
+**Retention is NOT a confidentiality control and is off by default.** As of v0.1.8
+`CODEX_IPC_RETENTION_DAYS` defaults to keep-only (unset, empty and `0` all mean never delete);
+pruning happens only when you set an explicit positive integer. Envelopes therefore persist
+indefinitely unless you opt in. This is deliberate — silently age-deleting a reply nobody
+harvested is unrecoverable data loss — but it means plaintext exposure grows without bound and
+disposal is your responsibility, not the transport's.
 
 ### Optional Claude transcript path exposure
 

@@ -59,10 +59,17 @@ cwd, recency, or project name.
 
 ## Workspace-scoped handoff artifacts
 
+The IPC tooling does not invoke the Codex CLI. As of v0.1.8 the `--app`, `--open` and `--exec`
+modes are removed: they fail with a stable error before any transport access or child launch.
+Delivery is the file-drop default (paste one line into your Codex session) or live `--ipc`
+injection into a Desktop GUI thread — neither shells out to a `codex` binary.
+
 The IPC transport envelope (the `.task.md`/`.reply.md` pair) is deliberately machine-local under
 `${CODEX_IPC_ROOT:-~/.claude/ipc}` — that is the ONE exception to the rule below. Envelopes and
-replies are pruned after `CODEX_IPC_RETENTION_DAYS` (default 7; 0 disables), opportunistically on
-the next dispatch, so read replies within the session or disable retention if you need them kept.
+replies are KEPT by default: `CODEX_IPC_RETENTION_DAYS` defaults to keep-only (unset, empty and
+`0` all mean never delete), and pruning runs only if you set an explicit positive integer —
+opportunistically, on the next dispatch. Nothing is deleted behind your back; the trade-off is
+that the root grows until you prune or rotate it.
 To skim replies consolidated newest-first, use `scripts/codex_ipc_replies.sh` — a read-only,
 point-in-time DERIVED view (never the authoritative channel; it writes, locks, and creates
 nothing). Run it with `-h` for the full flag list; a malformed `--since` fails closed.

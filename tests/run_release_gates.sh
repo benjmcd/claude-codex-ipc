@@ -310,6 +310,23 @@ run_safety() {
   fi
 }
 
+# The machine-checkable skill-contract audit. It exits nonzero on any missing-or-weak
+# requirement (e.g. an advertised contract the code does not satisfy). It was gated only
+# in CI, so a broken requirement could pass the LOCAL release gate -- exactly how a bad
+# REQ-017 slipped through once. Gate it here too, same node binary the suites use.
+run_contract_audit() {
+  local path="$TDIR/../skills/ipc/scripts/codex_ipc_contract_audit.mjs" logf="$RUNDIR/contract_audit.log" rc
+  echo "== running static contract audit (success = process exit status) =="
+  "$NODE_BIN" ${PREFLIGHT_NODE_FLAGS:-} "$path" >"$logf" 2>&1
+  rc=$?
+  if [ "$rc" -eq 0 ]; then
+    echo "  PASS: contract_audit (exit 0)"
+  else
+    record_fail "contract_audit: exit $rc (a requirement is missing-or-weak)"
+    tail -30 "$logf" | sed 's/^/    /'
+  fi
+}
+
 # ---- main --------------------------------------------------------------------------------
 RUNDIR="$(mktemp -d)"
 trap 'rm -rf "$RUNDIR"' EXIT
@@ -341,6 +358,7 @@ for s in "${SUITES[@]}"; do
   fi
 done
 [ "$RUN_SAFETY" -eq 1 ] && run_safety
+run_contract_audit
 
 echo ""
 if [ "${#FAILURES[@]}" -eq 0 ]; then

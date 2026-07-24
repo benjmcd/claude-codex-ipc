@@ -26,8 +26,9 @@ Properties this buys by construction:
 
 ### Retention
 
-Envelopes and replies are pruned after `CODEX_IPC_RETENTION_DAYS` (default 7; `0` disables), so a
-reply file is transient coordination, not a permanent record. Pruning is **opportunistic**: it runs
+Envelopes and replies are **kept by default**: `CODEX_IPC_RETENTION_DAYS` defaults to keep-only
+(unset, empty and `0` all mean never delete). Pruning requires an explicit positive integer, so a
+reply file persists until you opt in to deleting it. Pruning is **opportunistic**: it runs
 only on the *next* `handoff_to_codex.sh` dispatch (the read-only viewer sweeps nothing), so a
 terminal session's envelopes persist until a future handoff prunes them — an opportunistic bound,
 not a scheduled sweep.

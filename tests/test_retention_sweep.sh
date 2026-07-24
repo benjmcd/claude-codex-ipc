@@ -58,7 +58,11 @@ seed_root(){
 
 run_dispatch(){ # run_dispatch <root> [env VAR=VAL ...] -> OUT/RC; a plain file-drop dispatch triggers the sweep
   local root="$1"; shift
-  OUT="$( cd "$NOREPO" && env "$@" CODEX_IPC_ROOT="$root" CLAUDE_CODE_SESSION_ID="sweeper" bash "$SCRIPT" "sweep trigger task" 2>&1 )"; RC=$?
+  # Hermetic: unset any INHERITED CODEX_IPC_RETENTION_DAYS so a section that means to
+  # exercise the DEFAULT actually gets the default, not the runner's ambient value.
+  # A caller that wants a specific retention passes it explicitly in "$@" and `env`
+  # applies it after this -u, so the explicit value still wins.
+  OUT="$( cd "$NOREPO" && env -u CODEX_IPC_RETENTION_DAYS "$@" CODEX_IPC_ROOT="$root" CLAUDE_CODE_SESSION_ID="sweeper" bash "$SCRIPT" "sweep trigger task" 2>&1 )"; RC=$?
 }
 
 echo "== 1. survival matrix under an explicit 7-day sweep =="

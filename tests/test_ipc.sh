@@ -3,7 +3,8 @@
 # Tests the transport FILE-PLANE (root resolution, per-(session,thread,dispatch) keying,
 # atomic non-truncating write, flag-guard/mis-invocation absorption, repo/CWD-independence,
 # missing-session-id safety). The live Codex delivery path (router/autoload) is stubbed:
-# `node`/`codex`/`powershell.exe` are faked so no real thread is touched.
+# `node`/`powershell.exe` are faked so no real thread is touched; `codex` is an inert
+# tripwire proving that no wrapper path invokes the Codex CLI.
 set -uo pipefail
 
 # Dual-layout probe: repo layout (tests/ beside skills/ipc/) and installed-skill layout
@@ -149,10 +150,57 @@ for i in $(seq 1 15); do run "$REPO" "rapid" "burst $i"; done
 rc=$(find "$IPCROOT/rapid/filedrop" -name '*.task.md' 2>/dev/null | wc -l | tr -d ' ')
 [[ "$rc" -eq 15 ]] && ok "15 rapid dispatches -> 15 unique files" || no "rapid-fire collision: $rc/15"
 
-echo "== 12. --open / --app smoke (stubbed codex), incl. outside a repo =="
-run "$REPO" "sessO" --app;  [[ $RC -eq 0 ]] && ok "--app exits 0 in a repo" || no "--app failed (rc=$RC)"
-run "$REPO" "sessO" --open; [[ $RC -eq 0 ]] && ok "--open exits 0 in a repo" || no "--open failed (rc=$RC)"
-run "$NOREPO" "sessO" --app; [[ $RC -eq 0 ]] && ok "--app works outside a repo (uses PWD)" || no "--app failed outside repo (rc=$RC)"
+echo "== 11b. create-once: a same-name destination is a HARD ERROR, never a silent overwrite =="
+# Source the wrapper's own atomic_write so the test exercises the SHIPPING primitive,
+# not a reimplementation. `_TEST_SOURCE_ONLY` makes the script define functions and
+# return before doing any dispatch work.
+CO="$TMP/create-once"; mkdir -p "$CO"
+( set -e
+  _TEST_SOURCE_ONLY=1 . "$SCRIPT" 2>/dev/null || true
+  # Case 1: fresh destination publishes and the staging link is cleaned up.
+  printf 'first\n'  | atomic_write "$CO/env.task.md"
+  [[ "$(cat "$CO/env.task.md")" == "first" ]] || { echo "CO-FAIL: first write wrong content"; exit 3; }
+  [[ -z "$(find "$CO" -name 'env.task.md.*' 2>/dev/null)" ]] || { echo "CO-FAIL: staging residue left"; exit 3; }
+  # Case 2: a colliding write FAILS (nonzero) and does NOT alter the existing bytes.
+  if printf 'second\n' | atomic_write "$CO/env.task.md" 2>/dev/null; then echo "CO-FAIL: overwrite succeeded"; exit 3; fi
+  [[ "$(cat "$CO/env.task.md")" == "first" ]] || { echo "CO-FAIL: existing bytes clobbered"; exit 3; }
+  # Case 3: a directory sitting at the destination is refused, not linked into.
+  mkdir -p "$CO/dir.task.md"
+  if printf 'x\n' | atomic_write "$CO/dir.task.md" 2>/dev/null; then echo "CO-FAIL: linked into a directory dest"; exit 3; fi
+  [[ -z "$(find "$CO/dir.task.md" -type f 2>/dev/null)" ]] || { echo "CO-FAIL: created a link inside the dir dest"; exit 3; }
+  # Case 4: no staging residue remains after the failing cases either.
+  [[ "$(find "$CO" -name '*.task.md.*' 2>/dev/null | wc -l)" -eq 0 ]] || { echo "CO-FAIL: staging residue after failures"; exit 3; }
+)
+[[ $? -eq 0 ]] && ok "create-once: fresh publishes, collision + directory-dest fail closed, no residue" \
+              || no "create-once publication defect (see CO-FAIL above)"
+
+echo "== 12. removed Codex-CLI modes fail before transport access or child launch =="
+REMOVED_ENV="$TMP/removed-mode-probe.sh"
+REMOVED_EMPTY_PATH="$TMP/removed-empty-path"; mkdir -p "$REMOVED_EMPTY_PATH"
+cat > "$REMOVED_ENV" <<'EOF'
+cd() {
+  builtin printf 'builtin:cd\n' >> "$REMOVED_PROBE_LOG"
+  return 97
+}
+command_not_found_handle() {
+  builtin printf 'external:%s\n' "$1" >> "$REMOVED_PROBE_LOG"
+  return 127
+}
+EOF
+for flag in --app --open --exec; do
+  removed_root="$TMP/removed-root-${flag#--}"
+  removed_log="$TMP/removed-${flag#--}.log"
+  : > "$removed_log"
+  expected="ERROR: $flag was removed in v0.1.8 (No Codex CLI); use positional file-drop (\"task\") or --ipc <conversationId> \"task\"."
+  OUT="$( cd "$REPO" && CODEX_IPC_ROOT="$removed_root" CLAUDE_CODE_SESSION_ID="removed" \
+      REMOVED_PROBE_LOG="$removed_log" BASH_ENV="$REMOVED_ENV" PATH="$REMOVED_EMPTY_PATH" \
+      "$BASH" "$SCRIPT" "$flag" "ignored" 2>&1 )"; RC=$?
+  [[ $RC -eq 64 ]] && ok "$flag exits with stable status 64" || no "$flag exit changed (rc=$RC)"
+  [[ "$OUT" == "$expected" ]] && ok "$flag emits the exact replacement error" || no "$flag error changed: $OUT"
+  [[ ! -e "$removed_root" ]] && ok "$flag creates no transport root or envelope" || no "$flag wrote transport state"
+  [[ ! -s "$removed_log" ]] && ok "$flag performs no root read or child-command attempt" \
+    || no "$flag touched the root or attempted a child: $(cat "$removed_log")"
+done
 
 echo "== 13. apostrophe in transport root: pickup string stays quote-safe =="
 QROOT="$TMP/ob'rien/ipc"; mkdir -p "$QROOT"
@@ -239,13 +287,13 @@ assert_tax(){ # every RESULT line in $OUT must match the parser-compatible taxon
   bad="$(printf '%s\n' "$OUT" | grep '^RESULT:' | grep -vE "$TAX_RE" || true)"
   [[ -z "$bad" ]] && ok "$1: all RESULT lines parser-compatible" || { no "$1: non-conforming RESULT line"; printf '%s\n' "$bad"; }
 }
-assert_no_codex_exec_fallback(){
+assert_no_codex_cli(){
   local bad
   bad="$(
-    { [[ -f "$TMP/codexargs.log" ]] && cat "$TMP/codexargs.log"; [[ -f "$FGDIR/codexargs.log" ]] && cat "$FGDIR/codexargs.log"; } \
-      | grep -E '(^|[[:space:]])exec([[:space:]]|$)' || true
+    { [[ -f "$TMP/codexargs.log" ]] && cat "$TMP/codexargs.log"; [[ -f "$FGDIR/codexargs.log" ]] && cat "$FGDIR/codexargs.log"; } || true
   )"
-  [[ -z "$bad" ]] && echo "  CHECK: no /ipc path invoked codex exec" || { no "/ipc path invoked codex exec"; printf '%s\n' "$bad"; }
+  [[ -z "$bad" ]] && ok "no wrapper path invoked the Codex CLI" \
+    || { no "a wrapper path invoked the Codex CLI"; printf '%s\n' "$bad"; }
 }
 
 echo "== 14. default policy defer: foreground-Codex deferral is explicit =="
@@ -453,7 +501,7 @@ else
   no "--ipc payload missing the denied-reply protocol"
 fi
 
-assert_no_codex_exec_fallback
+assert_no_codex_cli
 
 # --- A3 wrapper wait-hint (D3) + easy-path OQ-4 gate --------------------------------------
 fgrun_stdout(){ # like fgrun but captures stdout ONLY (stderr discarded) to test WAIT/RESULT ordering

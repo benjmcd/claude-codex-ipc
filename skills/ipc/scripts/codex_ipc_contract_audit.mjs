@@ -98,6 +98,13 @@ function check(id, requirement, evidenceChecks, residualRisk = null) {
 
 function main() {
   const files = Object.fromEntries(REQUIRED_FILES.map((relPath) => [relPath, fileInfo(relPath)]));
+  const handoffText = readText("scripts/handoff_to_codex.sh");
+  // Anchor on the ACTUAL transport-root assignment, not the earlier doc-comment mention
+  // of CODEX_IPC_ROOT=<dir>. The removed-mode errors must fire before this line runs.
+  const transportInit = handoffText.search(/^IPC_ROOT="\$\{CODEX_IPC_ROOT/m);
+  const removedModeErrors = ["--app", "--open", "--exec"].map(
+    (flag) => `ERROR: ${flag} was removed in v0.1.8 (No Codex CLI);`,
+  );
   const requirements = [
     check("REQ-001", "The default handoff path remains file-drop and GUI-safe.", [
       {
@@ -354,18 +361,38 @@ function main() {
         ok: contains("scripts/handoff_to_codex.sh", "reason=autoload-unexpected-status"),
       },
     ]),
-    check("REQ-017", "No headless fallback: /ipc success is GUI delivery only; exec is a separate explicit mode.", [
+    check("REQ-017", "No Codex CLI: legacy CLI-backed modes fail before transport access or child launch.", [
       {
-        label: "SKILL.md forbids headless execution as /ipc success or fallback",
+        label: "SKILL.md states the no-CLI wrapper contract",
         file: "SKILL.md",
-        ok: contains("SKILL.md", /Never use\s+headless `codex exec resume`/),
+        ok: contains("SKILL.md", "The IPC tooling does not invoke the Codex CLI"),
       },
       {
-        label: "wrapper keeps exec as a separate, explicitly-labeled non-GUI mode",
+        label: "all removed modes have stable errors before transport initialization",
         file: "scripts/handoff_to_codex.sh",
-        ok: contains("scripts/handoff_to_codex.sh", "NOTE: --exec is headless. The result will NOT appear in the Codex Desktop GUI."),
+        // Assert each removed-mode error is present AND exits nonzero before transport
+        // init. Anchored to the three removed-mode errors specifically -- NOT a count of
+        // all `exit 64`, which other unrelated validation (e.g. an invalid retention
+        // value) may also legitimately use.
+        ok:
+          transportInit > 0 &&
+          removedModeErrors.every((needle) => {
+            const index = handoffText.indexOf(needle);
+            return index >= 0 && index < transportInit;
+          }) &&
+          ["--app", "--open", "--exec"].every((flag) =>
+            new RegExp(`--${flag.slice(2)}\\)[\\s\\S]{0,300}?exit 64`).test(handoffText),
+          ),
       },
-    ], "Static greps prove the contract text and mode separation, not runtime absence; the hermetic tests log stubbed codex argv and assert no /ipc path invokes codex exec."),
+      {
+        label: "wrapper contains no Codex CLI lookup, helper, or invocation",
+        file: "scripts/handoff_to_codex.sh",
+        ok:
+          !contains("scripts/handoff_to_codex.sh", "need_codex") &&
+          !contains("scripts/handoff_to_codex.sh", /command\s+-v\s+codex/) &&
+          !contains("scripts/handoff_to_codex.sh", /\bcodex(?:\.exe)?\s+(?:app|resume|exec|--version)\b/),
+      },
+    ], "Static ordering and source greps are backed by hermetic tests that run every removed flag under a poisoned pre-transport environment and retain the Codex stub as an invocation tripwire."),
     check("REQ-011", "Future controlled write re-proof is dry-run-first and evidence-backed.", [
       {
         label: "write proof harness exists",
