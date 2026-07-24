@@ -190,13 +190,15 @@ cmd_freeze() {
 }
 
 cmd_check_all() {
-  local rc=0 name kind val ref
+  local rc=0 name kind val ref final_ref=""
   # Fail closed if a final manifest exists on disk but FINAL_REF does not: a missing
   # FINAL_REF would otherwise make frozen_targets silently omit the final-* semantic
   # checks, so a drifted final manifest could pass unverified.
+  [ -f "$MANIFEST_DIR/FINAL_REF" ] \
+    && final_ref="$(tr -d ' \t\r\n' < "$MANIFEST_DIR/FINAL_REF")"
   if { [ -f "$MANIFEST_DIR/final-runtime.manifest" ] || [ -f "$MANIFEST_DIR/final-overlay.manifest" ]; } \
-     && [ ! -s "$MANIFEST_DIR/FINAL_REF" ]; then
-    echo "CHECK FAIL: final-*.manifest present but release/manifests/FINAL_REF is missing/empty; cannot verify them against the release commit" >&2
+     && [ -z "$final_ref" ]; then
+    echo "CHECK FAIL: final-*.manifest present but release/manifests/FINAL_REF is missing/empty/whitespace-only; cannot verify them against the release commit" >&2
     rc=1
   fi
   while IFS=$'\t' read -r name kind val ref; do

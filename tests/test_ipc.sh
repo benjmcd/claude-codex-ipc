@@ -168,13 +168,46 @@ CO="$TMP/create-once"; mkdir -p "$CO"
   mkdir -p "$CO/dir.task.md"
   if printf 'x\n' | atomic_write "$CO/dir.task.md" 2>/dev/null; then echo "CO-FAIL: linked into a directory dest"; exit 3; fi
   [[ -z "$(find "$CO/dir.task.md" -type f 2>/dev/null)" ]] || { echo "CO-FAIL: created a link inside the dir dest"; exit 3; }
-  # Case 4: no staging residue remains after the failing cases either.
+  # Case 4: a directory racing in AFTER the pre-check also fails closed. Override
+  # only `ln` so the shipping helper executes its real post-link verification.
+  race_dest="$CO/race.task.md"
+  ln() {
+    mkdir -p "$2"
+    command ln "$1" "$2"
+  }
+  if printf 'race\n' | atomic_write "$race_dest" 2>"$CO/race.err"; then echo "CO-FAIL: raced directory reported success"; exit 3; fi
+  unset -f ln
+  [[ -d "$race_dest" ]] || { echo "CO-FAIL: race fixture did not create directory dest"; exit 3; }
+  [[ -z "$(find "$race_dest" -type f 2>/dev/null)" ]] || { echo "CO-FAIL: raced inner hard-link was not cleaned"; exit 3; }
+  grep -q 'create-once post-link verify failed' "$CO/race.err" || { echo "CO-FAIL: post-link failure diagnostic missing"; exit 3; }
+  # Case 5: no staging residue remains after the failing cases either.
   [[ "$(find "$CO" -name '*.task.md.*' 2>/dev/null | wc -l)" -eq 0 ]] || { echo "CO-FAIL: staging residue after failures"; exit 3; }
 )
-[[ $? -eq 0 ]] && ok "create-once: fresh publishes, collision + directory-dest fail closed, no residue" \
+[[ $? -eq 0 ]] && ok "create-once: fresh publishes, collision + pre-existing/raced directory fail closed, no residue" \
               || no "create-once publication defect (see CO-FAIL above)"
 
-echo "== 11c. an EXECUTED wrapper ignores an inherited _TEST_SOURCE_ONLY (no silent suppression) =="
+echo "== 11c. release check-all fails closed on whitespace-only FINAL_REF =="
+# Source a main-call-free copy of the shipping checker, isolate its manifest dir,
+# and stub only the unrelated target enumeration. Old size-only guard returns 0.
+MF_SCRIPT="$TDIR/gen_release_manifest.sh"
+MF_LIB="$TMP/gen_release_manifest.lib.sh"
+MF_DIR="$TMP/manifest-final-ref"; mkdir -p "$MF_DIR"
+sed '/^main "\$@"/,$d' "$MF_SCRIPT" > "$MF_LIB"
+printf '\n' > "$MF_DIR/final-runtime.manifest"
+printf ' \t\r\n' > "$MF_DIR/FINAL_REF"
+( cd "$MF_DIR" && sha256sum ./final-runtime.manifest > MANIFEST-SHA256SUMS.txt )
+(
+  . "$MF_LIB"
+  MANIFEST_DIR="$MF_DIR"
+  frozen_targets() { :; }
+  cmd_check_all
+) >"$MF_DIR/check.out" 2>&1
+mf_rc=$?
+[[ "$mf_rc" -eq 1 ]] && grep -q 'missing/empty/whitespace-only' "$MF_DIR/check.out" \
+  && ok "release check-all rejects whitespace-only FINAL_REF (exit 1)" \
+  || no "release check-all accepted whitespace-only FINAL_REF (rc=$mf_rc)"
+
+echo "== 11d. an EXECUTED wrapper ignores an inherited _TEST_SOURCE_ONLY (no silent suppression) =="
 # The test seam must be honored only when SOURCED. An inherited value in the environment
 # of an executed dispatch must NOT silently exit 0 without publishing.
 SS="$TMP/sourceseam/filedrop"; mkdir -p "$(dirname "$SS")"

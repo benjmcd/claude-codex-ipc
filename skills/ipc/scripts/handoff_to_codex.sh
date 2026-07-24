@@ -130,6 +130,14 @@ atomic_write() {
         fi
         return 1
     fi
+    # A directory/symlink can still race in after the pre-check. Plain `ln` then
+    # succeeds by creating the staging hard-link inside that directory, so verify
+    # the exact destination before reporting publication success.
+    if [[ ! -f "$dest" || -d "$dest" || -L "$dest" ]]; then
+        rm -f "$tmp" "$dest/$(basename "$tmp")" 2>/dev/null
+        echo "ERROR: create-once post-link verify failed for \"${dest}\" (destination is not a regular file)." >&2
+        return 1
+    fi
     # The link succeeded, so the destination is published. A failure to remove the
     # staging hard-link must NOT propagate as a publication failure -- the envelope
     # exists and a caller must not retry. Clean up best-effort and report success.
