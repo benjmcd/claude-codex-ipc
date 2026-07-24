@@ -83,8 +83,10 @@ which removed live delivery entirely and is not a release candidate.
   `FINAL_REF` with the same whitespace stripping used by manifest enumeration. Missing,
   empty, and whitespace-only markers all fail closed while final manifests exist.
 - **Release-document consistency:** the README status footer now reports v0.1.8; the
-  release-runner suite-count comment and retention test's seven-day wording now describe
-  the current ten-suite and explicit-opt-in contracts.
+  release runner's header and every usage form now describe all ten `DEFAULT_SUITES`,
+  the conditional safety scan, and the always-run contract audit; its older nine-suite
+  timing figure is labelled historical. The retention test's seven-day wording now
+  describes an explicit opt-in contract.
 
 ## [0.1.7] — 2026-07-12
 
