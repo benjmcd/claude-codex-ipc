@@ -82,6 +82,9 @@ which removed live delivery entirely and is not a release candidate.
 - **Final-ref fail-closed check:** `gen_release_manifest.sh check-all` now parses
   `FINAL_REF` with the same whitespace stripping used by manifest enumeration. Missing,
   empty, and whitespace-only markers all fail closed while final manifests exist.
+- **Release-document consistency:** the README status footer now reports v0.1.8; the
+  release-runner suite-count comment and retention test's seven-day wording now describe
+  the current ten-suite and explicit-opt-in contracts.
 
 ## [0.1.7] — 2026-07-12
 
