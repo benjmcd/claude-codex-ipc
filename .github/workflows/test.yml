@@ -30,6 +30,7 @@ jobs:
           bash -n tests/test_ipc.sh
           bash -n tests/test_autoload_matrix.sh
           bash -n tests/test_reply_view.sh
+          bash -n tests/test_retention_sweep.sh
           bash -n tests/test_rollout_reader.sh
           bash -n tests/test_reply_harvest.sh
           bash -n tests/test_session_inspect.sh
@@ -72,6 +73,11 @@ jobs:
       - name: Hermetic reply-viewer tests
         # GNU find/date required; the windows runner's Git Bash provides them.
         run: bash tests/test_reply_view.sh
+
+      - name: Hermetic retention-sweep tests
+        # Guards the unreplied-task exemption (9434721) and the keep-only default.
+        # GNU find/date required; the windows runner's Git Bash provides them.
+        run: bash tests/test_retention_sweep.sh
 
       - name: Hermetic rollout-reader tests
         run: bash tests/test_rollout_reader.sh

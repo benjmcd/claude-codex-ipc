@@ -61,10 +61,10 @@ run_dispatch(){ # run_dispatch <root> [env VAR=VAL ...] -> OUT/RC; a plain file-
   OUT="$( cd "$NOREPO" && env "$@" CODEX_IPC_ROOT="$root" CLAUDE_CODE_SESSION_ID="sweeper" bash "$SCRIPT" "sweep trigger task" 2>&1 )"; RC=$?
 }
 
-echo "== 1. survival matrix under the default 7-day sweep =="
+echo "== 1. survival matrix under an explicit 7-day sweep =="
 R1="$TMP/root1"; seed_root "$R1"
 CH1="$R1/sweepsess/filedrop"
-run_dispatch "$R1"
+run_dispatch "$R1" CODEX_IPC_RETENTION_DAYS=7
 [[ $RC -eq 0 ]] && ok "dispatch exits 0" || no "dispatch failed (rc=$RC): $OUT"
 [[ -f "$CH1/1000-1-aaaaaaaaaaaaaaaa.task.md" ]] \
     && ok "aged UNREPLIED task survives the sweep" \
@@ -101,7 +101,7 @@ n2="$(find "$CH2" -type f \( -name '*.task.md' -o -name '*.reply.md' \) 2>/dev/n
 [[ -d "$R2/aged-empty" ]] && ok "aged empty dir retained when disabled" || no "aged empty dir deleted despite 0"
 
 echo "== 3. exemption survives repeat sweeps (idempotent retention, not a one-run grace) =="
-run_dispatch "$R1"
+run_dispatch "$R1" CODEX_IPC_RETENTION_DAYS=7
 [[ -f "$CH1/1000-1-aaaaaaaaaaaaaaaa.task.md" ]] \
     && ok "aged unreplied task still present after a second sweep" \
     || no "second sweep deleted the unreplied task"
@@ -109,7 +109,7 @@ run_dispatch "$R1"
 echo "== 4. once the reply ARRIVES and ages, the pair becomes sweepable =="
 printf 'late reply\n' > "$CH1/1000-1-aaaaaaaaaaaaaaaa.reply.md"
 age "$CH1/1000-1-aaaaaaaaaaaaaaaa.task.md" "$CH1/1000-1-aaaaaaaaaaaaaaaa.reply.md"
-run_dispatch "$R1"
+run_dispatch "$R1" CODEX_IPC_RETENTION_DAYS=7
 [[ ! -f "$CH1/1000-1-aaaaaaaaaaaaaaaa.task.md" && ! -f "$CH1/1000-1-aaaaaaaaaaaaaaaa.reply.md" ]] \
     && ok "answered-then-aged pair is swept (exemption is pairing-based, not permanent)" \
     || no "answered aged pair not swept"
@@ -119,7 +119,7 @@ R3="$TMP/root3"; CH3="$R3/sweepsess/filedrop"; mkdir -p "$CH3"
 printf 'aged answered task\n' > "$CH3/3000-6-ffffffffffffffff.task.md"
 printf 'fresh late reply\n'   > "$CH3/3000-6-ffffffffffffffff.reply.md"
 age "$CH3/3000-6-ffffffffffffffff.task.md"
-run_dispatch "$R3"
+run_dispatch "$R3" CODEX_IPC_RETENTION_DAYS=7
 [[ ! -f "$CH3/3000-6-ffffffffffffffff.task.md" ]] \
     && ok "aged answered task swept even when its reply is fresh" \
     || no "aged answered task not swept"
@@ -127,7 +127,23 @@ run_dispatch "$R3"
     && ok "fresh reply untouched" \
     || no "fresh reply deleted"
 
-echo "== 6. retention doc text states the unreplied exemption =="
+echo "== 6. the DEFAULT is keep-only: pruning requires an explicit positive opt-in =="
+# Regression guard for the v0.1.8 default flip. Previously the default was 7, so a
+# caller that never mentioned retention silently age-deleted transport evidence --
+# including replies nobody had harvested. Deletion is now strictly opt-in.
+R4="$TMP/root4"; seed_root "$R4"
+CH4="$R4/sweepsess/filedrop"
+run_dispatch "$R4"                      # no CODEX_IPC_RETENTION_DAYS in the environment
+[[ $RC -eq 0 ]] && ok "default dispatch exits 0" || no "default dispatch failed (rc=$RC): $OUT"
+SURV4=$(find "$CH4" -type f \( -name '*.task.md' -o -name '*.reply.md' \) | wc -l)
+[[ "$SURV4" -eq 7 ]] \
+    && ok "all 7 seeded envelopes retained under the default (7/7)" \
+    || no "default sweep deleted transport evidence ($SURV4/7 survived; default must be keep-only)"
+[[ -d "$R4/aged-empty" ]] \
+    && ok "aged empty dir retained under the default" \
+    || no "default sweep pruned an aged directory"
+
+echo "== 7. retention doc text states the unreplied exemption =="
 grep -qi 'unreplied' "$SCRIPT" \
     && ok "script documentation mentions the unreplied-task exemption" \
     || no "script documentation does not mention the unreplied-task exemption"

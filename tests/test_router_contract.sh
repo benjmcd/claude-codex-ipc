@@ -214,11 +214,16 @@ run_wrapper_case acceptance 0 \
 run_wrapper_case no-client 1 \
   "RESULT: failed-closed -- reason=target-not-found -- confirmation=not-attempted" \
   "no-client-found reaches guarded ownership handling"
+# router-pipe-failure is POST-ATTEMPT: the client writes the follower frame before it
+# awaits the response, so a timeout, closed pipe or protocol drift can each leave the
+# task already admitted. The wrapper cannot distinguish "failed before the write" from
+# "failed after it", so the honest classification is `unknown`, never `not-attempted`.
+# Reporting not-attempted here is what invited a duplicate dispatch.
 run_wrapper_case unknown 1 \
-  "RESULT: failed-closed -- reason=router-pipe-failure -- confirmation=not-attempted" \
+  "RESULT: failed-closed -- reason=router-pipe-failure -- confirmation=unknown" \
   "unknown client failure is not misclassified as no-client-found"
 run_wrapper_case malformed 1 \
-  "RESULT: failed-closed -- reason=router-pipe-failure -- confirmation=not-attempted" \
+  "RESULT: failed-closed -- reason=router-pipe-failure -- confirmation=unknown" \
   "malformed client failure fails closed as router-pipe-failure"
 
 if [[ ! -s "$TOOL_LOG" ]]; then

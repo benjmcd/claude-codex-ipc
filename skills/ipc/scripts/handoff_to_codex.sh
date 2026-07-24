@@ -88,9 +88,24 @@ to_win() { cygpath -m "$1" 2>/dev/null || printf '%s' "$1" | sed 's|^/\([a-zA-Z]
 # 16 hex chars from /dev/urandom; falls back to concatenated $RANDOM if urandom is absent.
 uniq_hex() { od -An -N8 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n' || printf '%s%s%s' "$RANDOM" "$RANDOM" "$RANDOM"; }
 
-# Atomic, non-truncating write: temp file in the same dir, then rename. Never clobbers
-# a shared file mid-read; a concurrent dispatch has its own unique filename anyway.
-atomic_write() { local dest="$1" tmp; mkdir -p "$(dirname "$dest")"; tmp="$(mktemp "${dest}.XXXXXX")"; cat > "$tmp"; mv -f "$tmp" "$dest"; }
+# Create-once publication: temp file in the same dir, then a link that FAILS if the
+# destination already exists. `mv -f` would silently clobber a pre-existing envelope;
+# `ln` is the atomic create-once primitive on both NTFS and POSIX. A same-name
+# collision is a hard error, never a silent overwrite -- an envelope that already
+# exists may be in flight, and destroying it loses a dispatch.
+atomic_write() {
+    local dest="$1" tmp
+    mkdir -p "$(dirname "$dest")"
+    tmp="$(mktemp "${dest}.XXXXXX")"
+    cat > "$tmp"
+    if ! ln "$tmp" "$dest" 2>/dev/null; then
+        rm -f "$tmp"
+        echo "ERROR: refusing to overwrite existing file \"${dest}\"." >&2
+        echo "(Create-once publication: a same-name envelope already exists and may be in flight.)" >&2
+        return 1
+    fi
+    rm -f "$tmp"
+}
 
 is_uuid() { [[ "${1:-}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; }
 need_codex() {
@@ -275,7 +290,10 @@ CHANNEL_DIR="${IPC_ROOT}/${CLAUDE_SID}/${CHANNEL_THREAD}"
 # failed TASK deletion is reported to stderr rather than suppressed. Reply and empty-dir
 # deletion failures remain suppressed as before -- their failure mode is retention, not
 # loss -- so every branch of the sweep errs toward retention.
-RETENTION_DAYS="${CODEX_IPC_RETENTION_DAYS:-7}"
+# Keep-only by default. Unset, empty, and exact `0` all mean "never delete" -- the
+# transport is evidence, and silent age-based deletion of a reply nobody harvested is
+# unrecoverable data loss. Pruning is strictly opt-in via an explicit positive integer.
+RETENTION_DAYS="${CODEX_IPC_RETENTION_DAYS:-0}"
 if [[ "$RETENTION_DAYS" =~ ^[0-9]+$ && "$RETENTION_DAYS" -gt 0 ]]; then
     if [[ "$RETENTION_SWEEP_OK" -eq 1 ]]; then
         # Aged tasks first, deciding pairing BEFORE any reply is deleted below --
@@ -419,10 +437,28 @@ if [[ "$MODE" == "ipc" ]]; then
     printf '%s\n' "$PAYLOAD" | atomic_write "$OUTBOUND_MSYS"
     echo "[ Handoff written to ${OUTBOUND} ]"
     SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+    # Safe fallback: ONLY for failures classified before any send was attempted
+    # (confirmation=not-attempted). Pasting the pickup line is safe because nothing
+    # can already be running.
     fallback() {
         echo "" >&2
         echo "FALLBACK -- file-drop is ready. In your Codex session, paste:" >&2
         echo "    read \"${OUTBOUND}\" and proceed" >&2
+    }
+    # Ambiguous terminal: a send was attempted and its outcome is UNKNOWN. The client
+    # writes the follower frame before awaiting the response, so a timeout, closed
+    # pipe, or protocol drift can each leave the task already admitted and running.
+    # Emitting the pickup line here is what turns one dispatch into two, so it is
+    # deliberately NOT printed. The envelope exists; a human must establish whether it
+    # already ran before doing anything with it.
+    fallback_ambiguous() {
+        echo "" >&2
+        echo "AMBIGUOUS -- a send was attempted and its outcome is UNKNOWN." >&2
+        echo "The task may ALREADY be running in thread ${IPC_CID}." >&2
+        echo "Do NOT resend. Inspect the thread first:" >&2
+        echo "    node \"${SCRIPT_DIR}/codex_ipc_session_inspect.mjs\" --thread ${IPC_CID} --tail-events 5" >&2
+        echo "The envelope is preserved at ${OUTBOUND} -- dispatch it only after" >&2
+        echo "confirming the thread did not pick it up." >&2
     }
     # Active policy and acknowledgement source are printed on EVERY --ipc send so a
     # standing approval can never act silently.
@@ -493,11 +529,14 @@ if [[ "$MODE" == "ipc" ]]; then
         exit 0
     fi
     if ! printf '%s' "$IPC_OUTPUT" | grep -q '"error": *"no-client-found"'; then
-        # Router/pipe-level failure (app closed, timeout, protocol drift) -- not an
-        # ownership condition, so auto-load would be pointless or misleading.
-        echo "RESULT: failed-closed -- reason=router-pipe-failure -- confirmation=not-attempted" >&2
+        # Router/pipe-level failure (app closed, timeout, protocol drift). This is
+        # POST-ATTEMPT: the follower frame is written before the response is awaited,
+        # so the task may already be admitted. It is not an ownership condition, so
+        # auto-load would be pointless or misleading -- and it is not `not-attempted`,
+        # so the outcome is reported as UNKNOWN and no pickup line is emitted.
+        echo "RESULT: failed-closed -- reason=router-pipe-failure -- confirmation=unknown" >&2
         printf '%s\n' "$IPC_OUTPUT" | sed -n '1,20p' >&2
-        fallback
+        fallback_ambiguous
         exit 1
     fi
     # Guard the unowned path: never deep-link a target that does not exist or is archived.
@@ -599,7 +638,19 @@ if [[ "$MODE" == "ipc" ]]; then
             echo "RESULT: gui-delivered -- reason=${DELIVER_REASON} -- confirmation=${CONFIRMATION}"
             exit 0
         fi
+        # Retry ONLY on the authoritative "thread not loaded" answer. Any other
+        # failure (timeout, closed pipe, protocol drift) is post-attempt and may have
+        # already admitted the task -- retrying it is the duplicate-execution defect
+        # this release is named for. Terminate ambiguously instead of looping.
+        if ! printf '%s' "$IPC_OUTPUT" | grep -q '"error": *"no-client-found"'; then
+            echo "RESULT: failed-closed -- reason=retry-ambiguous-outcome -- confirmation=unknown" >&2
+            printf '%s\n' "$IPC_OUTPUT" | sed -n '1,20p' >&2
+            fallback_ambiguous
+            exit 1
+        fi
     done
+    # Every iteration ended in an authoritative no-client-found, so nothing was ever
+    # admitted and the pickup line is safe to emit.
     echo "RESULT: gui-unowned -- reason=autoload-incomplete -- confirmation=not-attempted" >&2
     echo "(Auto-load did not complete within the ${POLL_DEADLINE_S}s poll window. Manual remediation:" >&2
     echo " open codex://threads/${IPC_CID} in the app, then rerun /ipc.)" >&2

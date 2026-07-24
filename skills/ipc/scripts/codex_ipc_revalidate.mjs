@@ -215,15 +215,18 @@ function checkNodeSqlite() {
 }
 
 function checkCodexCliVersion() {
-  const result = runCommand("codex", ["--version"], { maxChars: 1000 });
-  if (result.ok) {
-    return { ...result, available: true };
-  }
+  // The Codex CLI is deliberately NOT part of IPC: no launcher, version probe, resume,
+  // exec, fallback, recovery, validator or broker worker may invoke it. This check
+  // therefore reports the invariant instead of spawning `codex --version`. It never
+  // gated the summary even when it did probe, so nothing downstream changes.
   return {
-    ...result,
     ok: true,
     available: false,
-    warning: "Codex CLI version could not be captured; IPC/file-drop validation can still proceed.",
+    probed: false,
+    command: null,
+    stdout: "",
+    stderr: "",
+    note: "Codex CLI is out of scope by design (no-CLI invariant); not probed.",
   };
 }
 

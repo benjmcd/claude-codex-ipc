@@ -71,6 +71,7 @@ DEFAULT_SUITES=(
   test_ipc_wait.sh
   test_reply_harvest.sh
   test_reply_view.sh
+  test_retention_sweep.sh
   test_rollout_reader.sh
   test_router_contract.sh
   test_session_inspect.sh
