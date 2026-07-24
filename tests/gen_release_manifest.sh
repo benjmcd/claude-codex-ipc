@@ -158,33 +158,45 @@ cmd_check() {
 }
 
 frozen_targets() {
-  # name<TAB>kind<TAB>value  (ref implied: base sets use BASE_SHA)
-  printf 'base-runtime\tset\tbase-runtime\n'
-  printf 'base-overlay\tset\tbase-overlay\n'
-  printf 'root-claude\troot\t%s\n' "$(root_dir_for root-claude)"
-  printf 'root-agents\troot\t%s\n' "$(root_dir_for root-agents)"
-  printf 'root-codex\troot\t%s\n'  "$(root_dir_for root-codex)"
+  # name<TAB>kind<TAB>value<TAB>ref  (ref is used only by set kinds; base sets ignore
+  # it and use BASE_SHA, final sets require it). The final pair is pinned to the tested
+  # release commit recorded in release/manifests/FINAL_REF so check-all re-derives and
+  # verifies them against that exact ref instead of leaving them unchecked.
+  printf 'base-runtime\tset\tbase-runtime\t\n'
+  printf 'base-overlay\tset\tbase-overlay\t\n'
+  printf 'root-claude\troot\t%s\t\n' "$(root_dir_for root-claude)"
+  printf 'root-agents\troot\t%s\t\n' "$(root_dir_for root-agents)"
+  printf 'root-codex\troot\t%s\t\n'  "$(root_dir_for root-codex)"
+  local final_ref=""
+  [ -f "$MANIFEST_DIR/FINAL_REF" ] && final_ref="$(tr -d ' \t\r\n' < "$MANIFEST_DIR/FINAL_REF")"
+  if [ -n "$final_ref" ]; then
+    printf 'final-runtime\tset\tfinal-runtime\t%s\n' "$final_ref"
+    printf 'final-overlay\tset\tfinal-overlay\t%s\n' "$final_ref"
+  fi
 }
 
 cmd_freeze() {
   mkdir -p "$MANIFEST_DIR"
-  local name kind val out
-  while IFS=$'\t' read -r name kind val; do
+  local name kind val ref out
+  while IFS=$'\t' read -r name kind val ref; do
     out="$MANIFEST_DIR/$name.manifest"
-    generate_to_stdout "$kind" "$val" "" > "$out"
+    generate_to_stdout "$kind" "$val" "$ref" > "$out"
     echo "froze $(wc -l < "$out" | tr -d ' ') rows -> release/manifests/$name.manifest"
   done < <(frozen_targets)
-  ( cd "$MANIFEST_DIR" && sha256sum \
-      base-runtime.manifest base-overlay.manifest \
-      root-claude.manifest root-agents.manifest root-codex.manifest \
-      > MANIFEST-SHA256SUMS.txt )
+  # Self-hash every manifest that actually exists (the final pair is present only after
+  # a release ref is recorded); glob keeps the list correct without hard-coding names.
+  ( cd "$MANIFEST_DIR" && sha256sum ./*.manifest > MANIFEST-SHA256SUMS.txt )
   echo "recorded self-hashes -> release/manifests/MANIFEST-SHA256SUMS.txt"
 }
 
 cmd_check_all() {
-  local rc=0 name kind val
-  while IFS=$'\t' read -r name kind val; do
-    cmd_check --"$kind" "$val" --file "$MANIFEST_DIR/$name.manifest" || rc=1
+  local rc=0 name kind val ref
+  while IFS=$'\t' read -r name kind val ref; do
+    if [ "$kind" = set ] && [ -n "$ref" ]; then
+      cmd_check --set "$val" --ref "$ref" --file "$MANIFEST_DIR/$name.manifest" || rc=1
+    else
+      cmd_check --"$kind" "$val" --file "$MANIFEST_DIR/$name.manifest" || rc=1
+    fi
   done < <(frozen_targets)
   if [ -f "$MANIFEST_DIR/MANIFEST-SHA256SUMS.txt" ]; then
     if ( cd "$MANIFEST_DIR" && sha256sum -c MANIFEST-SHA256SUMS.txt ) >/dev/null 2>&1; then

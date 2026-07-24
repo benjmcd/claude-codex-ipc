@@ -4,6 +4,48 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.1.8] — 2026-07-23
+
+Identity: **No Codex CLI / No Ambiguous Resend.** Live `--ipc` GUI delivery, the
+completion-wait contract, and reply harvesting are unchanged and remain the primary
+path; this release removes the CLI-backed modes and closes two data-safety defects in
+the daily-use wrapper. It supersedes the abandoned file-drop-only `v018-nocli` line,
+which removed live delivery entirely and is not a release candidate.
+
+### Removed
+- `--app`, `--open`, and `--exec` modes and the `need_codex` helper. Each removed flag
+  now exits non-zero with a replacement hint **before** any transport-root read, envelope
+  write, or child launch. `--ipc` and the default file-drop path are unchanged. The
+  wrapper no longer invokes the `codex` binary on any path; `codex_ipc_revalidate.mjs`
+  no longer spawns `codex --version` (it reports the no-CLI invariant instead).
+
+### Changed
+- **Retention is keep-only by default.** `CODEX_IPC_RETENTION_DAYS` now defaults to
+  never-delete: unset, empty, and exact `0` all mean keep-only, and pruning requires an
+  explicit positive integer. Previously the default was 7, so a caller that never
+  mentioned retention silently age-deleted transport envelopes — including replies
+  nobody had harvested. A non-canonical value (negative, decimal, junk) is now rejected
+  loudly before any envelope write instead of silently skipping the sweep. Retention is
+  **not** a confidentiality control and is documented as such; plaintext persists
+  indefinitely by default (SECURITY.md).
+- **Create-once publication.** The envelope writer no longer publishes with `mv -f`
+  (which could silently clobber a pre-existing, possibly in-flight envelope). It links
+  the destination and fails loudly on collision, rejects a directory/symlink already at
+  the path, distinguishes a genuine collision from an environmental link failure, and
+  never reports a post-publication cleanup failure as a dispatch failure.
+- **No ambiguous resend.** The follower request is written before its response is
+  awaited, so a timeout, closed pipe, or protocol drift may leave a task already
+  admitted. Such outcomes are now classified `confirmation=unknown` and do not print a
+  pickup/resend line; the autoload retry poll retries only on an authoritative
+  `no-client-found` and otherwise terminates as `retry-ambiguous-outcome`.
+
+### Tests / CI
+- `tests/test_retention_sweep.sh` is now gated in both CI and the local release runner
+  (it previously ran nowhere); made hermetic against an inherited retention value; and
+  asserts the keep-only default. The static contract audit is now a local release gate,
+  not CI-only. A create-once collision/regression test was added. Final release
+  manifests are regenerated at the tested commit and are now covered by `check-all`.
+
 ## [0.1.7] — 2026-07-12
 
 Defect tranche superseding v0.1.6. **Known issues in v0.1.6:** v0.1.6 shipped with all four
