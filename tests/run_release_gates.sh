@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # CANON-RUNNER (NEXT-STEPS §5.2) — OS-aware release gate runner + checker.
 #
-# Runs the ten tests/test_*.sh suites + tests/scan_public_safety.sh SEQUENTIALLY and
-# fails the run on the first hard problem. A run FAILS if any suite:
+# Runs all DEFAULT_SUITES (currently ten), tests/scan_public_safety.sh, and the static
+# contract audit SEQUENTIALLY. A run records every hard problem and FAILS if any suite:
 #   * exits nonzero; OR
 #   * emits an UNEXPECTED `^SKIP:` line (fail-on-SKIP); OR
 #   * breaches the §5.1 process bound (owned real-Node peak > 2, or owned Node descendants
@@ -32,9 +32,9 @@
 # attributed by ancestry and escapes the bound.
 #
 # Usage:
-#   run_release_gates.sh                 # full battery (9 suites + safety)
-#   run_release_gates.sh [suite ...]     # only the named suites (basename or path); still runs safety
-#   run_release_gates.sh --no-safety [suite ...]
+#   run_release_gates.sh                 # all DEFAULT_SUITES (currently 10) + safety + contract audit
+#   run_release_gates.sh [suite ...]     # named suites + safety + contract audit
+#   run_release_gates.sh --no-safety [suite ...]  # skip safety only; contract audit still runs
 set -uo pipefail
 
 TDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -50,7 +50,7 @@ KILL_DEADLINE_S=5            # on timeout, kill/reap the owned tree within this 
 # Wall-clock recalibration (WINDOWS/MSYS host, 2026-07-12). NEXT-STEPS §5.1/§5.2 pin the
 # per-suite 300s / whole-layout 600s figures as "first-run estimates to recalibrate-and-record";
 # that recalibrate-and-record authorization is hereby extended to the per-suite value on Windows.
-# Measured standalone Windows/MSYS runtimes (nine suites all green, 381 assertions, 0 failures):
+# Historical calibration measured the then-nine standalone suites (all green, 381 assertions, 0 failures):
 #   * test_ipc.sh       ~362s
 #   * test_reply_view.sh ~453s  (its T23 nests a FULL test_ipc re-run — a Phase-5/WS-D de-dup
 #                                candidate; NOT fixed here)
