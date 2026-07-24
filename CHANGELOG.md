@@ -87,6 +87,10 @@ which removed live delivery entirely and is not a release candidate.
   the conditional safety scan, and the always-run contract audit; its older nine-suite
   timing figure is labelled historical. The retention test's seven-day wording now
   describes an explicit opt-in contract.
+- **Worktree-path test stability:** the autoload matrix now collapses PowerShell's
+  host-width-dependent diagnostic whitespace before fixed-token matching. Long required
+  worktree paths no longer split `must be a UUID` across lines and produce a false red;
+  the exit-code and message-content checks are unchanged.
 
 ## [0.1.7] — 2026-07-12
 
