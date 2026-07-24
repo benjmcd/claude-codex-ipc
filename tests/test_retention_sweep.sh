@@ -34,7 +34,7 @@ PASS=0; FAIL=0
 ok(){ echo "  PASS: $1"; PASS=$((PASS+1)); }
 no(){ echo "  FAIL: $1"; FAIL=$((FAIL+1)); }
 
-age(){ touch -d '10 days ago' "$@"; }  # well past the default 7-day horizon
+age(){ touch -d '10 days ago' "$@"; }  # well past the explicit 7-day opt-in horizon
 
 # seed_root <root>: builds the retention matrix in a foreign channel (a session
 # other than the one whose dispatch triggers the sweep).

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # CANON-RUNNER (NEXT-STEPS §5.2) — OS-aware release gate runner + checker.
 #
-# Runs the nine tests/test_*.sh suites + tests/scan_public_safety.sh SEQUENTIALLY and
+# Runs the ten tests/test_*.sh suites + tests/scan_public_safety.sh SEQUENTIALLY and
 # fails the run on the first hard problem. A run FAILS if any suite:
 #   * exits nonzero; OR
 #   * emits an UNEXPECTED `^SKIP:` line (fail-on-SKIP); OR
