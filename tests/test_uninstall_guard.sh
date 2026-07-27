@@ -64,6 +64,12 @@ refuses "$ROOT/./skills/ipc" "canonical source via dot-segment is refused"
 refuses "$ROOT/skills/ipc/" "canonical source with trailing slash is refused"
 refuses "$HOME" "\$HOME is refused"
 refuses "/" "filesystem root is refused"
+refuses "/c" "drive root is refused"
+
+# UNC respelling of a local path resolves to itself, so it matches neither the
+# source-prefix test nor the root test. It bypassed the PowerShell guard once.
+refuses "//localhost/c\$$(printf '%s' "$ROOT" | sed 's|^/c||')/skills/ipc" "UNC respelling of the source tree is refused"
+refuses "//localhost/c\$/" "UNC root is refused"
 
 echo "== 2. case variants are refused (the bypass this suite exists for) =="
 UPPER_ROOT="$(printf '%s' "$ROOT" | tr '[:lower:]' '[:upper:]')"

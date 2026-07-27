@@ -62,8 +62,12 @@ if ($Force -and (Test-Path -LiteralPath $Target)) {
     $homeReal = (Resolve-Path -LiteralPath $HOME).ProviderPath.TrimEnd('\', '/')
     $targetRoot = [System.IO.Path]::GetPathRoot($targetReal).TrimEnd('\', '/')
 
+    # Refuse UNC outright, matching install.sh's `//*/*` arm: a UNC respelling of a local
+    # path (\\localhost\c$\...) resolves to itself and so matches neither the source-prefix
+    # test nor the root test. Every supported install target is a local path.
     if (
         [string]::IsNullOrWhiteSpace($targetReal) -or
+        $targetReal.StartsWith('\\') -or
         $targetReal.Equals($srcReal, [System.StringComparison]::OrdinalIgnoreCase) -or
         $targetReal.StartsWith("$srcReal\", [System.StringComparison]::OrdinalIgnoreCase) -or
         $targetReal.Equals($homeReal, [System.StringComparison]::OrdinalIgnoreCase) -or

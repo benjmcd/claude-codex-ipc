@@ -28,13 +28,19 @@ $tgtRoot  = [System.IO.Path]::GetPathRoot($tgtReal).TrimEnd('\')
 # source tree would otherwise pass every comparison below. PS 5.1 Remove-Item -Recurse
 # on a junction can delete the TARGET's contents, so refuse reparse points outright.
 $isReparse = ((Get-Item -LiteralPath $tgtReal -Force).Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0
-if ($tgtReal.Equals($srcReal, $ic) -or
+# Refuse UNC outright, matching uninstall.sh's `//*/*` arm. A UNC respelling of a local
+# path (\\localhost\c$\dev\... or \\127.0.0.1\c$\...) resolves to itself, so it matches
+# neither the source-prefix test nor the root test, and is not a reparse point -- it
+# walked the entire guard. Refusing all UNC is correct here: every supported install
+# target is a local path under the user profile.
+if ($tgtReal.StartsWith('\\') -or
+    $tgtReal.Equals($srcReal, $ic) -or
     $tgtReal.StartsWith($srcReal + '\', $ic) -or
     $tgtReal.Equals($homeReal, $ic) -or
     $tgtReal.Equals($tgtRoot, $ic) -or
     $isReparse -or
     [string]::IsNullOrWhiteSpace($tgtReal)) {
-    Write-Error "Refusing dangerous -Target `"$Target`". It resolves inside this source tree, to the user profile, to a filesystem/UNC root, or is a reparse point."
+    Write-Error "Refusing dangerous -Target `"$Target`". It resolves inside this source tree, to the user profile, to a filesystem root, to a UNC path, or is a reparse point."
     exit 1
 }
 

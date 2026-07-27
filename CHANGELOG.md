@@ -13,23 +13,45 @@ All notable changes to this project will be documented in this file.
   check any target that resolves to this source tree or any descendant, to
   `$HOME`/`$env:USERPROFILE`, or to a filesystem/UNC root.
 
-  The first attempt at this guard was **defective and is corrected here**. It was modelled on
-  `install.sh:79-91`, whose `case` comparison is case-**sensitive** — but this is a Windows tool on
-  NTFS, where `C:/DEV/...` and `C:/dev/...` are the same directory, and `pwd -P` normalizes the drive
-  letter while preserving directory-name case. A one-character case change in the caller's argument
-  walked through both the guard and the marker check. `install.ps1:67-70` had it right all along with
-  `OrdinalIgnoreCase`; the claim that the new guard "mirrored" it was false. Both bash guards
-  (`uninstall.sh` and the pre-existing `install.sh` `--force` arm) now compare case-insensitively;
-  `uninstall.ps1` now uses `OrdinalIgnoreCase`, `GetPathRoot` for UNC roots, `-LiteralPath` on its
-  existence check, and refuses reparse points outright because `Resolve-Path` does not resolve
-  junctions.
+  This guard took **three attempts**; both earlier ones are recorded here rather than quietly
+  amended, because each failed the same way — the guard was bypassable by respelling the path.
+
+  *Attempt 1* was case-**sensitive**. It was modelled on the `--force` arm at `install.sh:79-91`
+  (as of `f929e53`; the line range now holds the corrected block), whose `case` comparison is
+  case-sensitive — but this is a Windows tool on NTFS, where `C:/DEV/...` and `C:/dev/...` are the
+  same directory, and `pwd -P` normalizes the drive letter while preserving directory-name case. A
+  one-character case change walked through both the guard and the marker check.
+  `install.ps1:67-70` had used `OrdinalIgnoreCase` all along; the claim that the new guard
+  "mirrored" it was false and is retracted.
+
+  *Attempt 2* fixed case in both shells and added a `//*/*` UNC arm to the **bash** guards only. A
+  UNC respelling of a local path (`\\localhost\c$\dev\...`) resolves to itself, so it matched
+  neither the source-prefix test nor the root test and was not a reparse point — it walked the
+  entire PowerShell guard and printed a deletion plan over the canonical source tree. Both
+  PowerShell guards now refuse any target beginning `\\`, matching the bash arm.
+
+  Current state, both shells: refuse before the marker check any target resolving to this source
+  tree or any descendant, to `$HOME`/`$env:USERPROFILE`, to a filesystem root, or to any UNC path.
+  `uninstall.ps1` additionally uses `-LiteralPath` on its existence check (a wildcard target
+  previously passed the glob check then died on a null) and refuses reparse points, because
+  `Resolve-Path` does not resolve junctions.
+
+  **Known remaining gap, not fixed here:** `uninstall.ps1` tests only whether the target *itself*
+  is a reparse point, so a junction in an *ancestor* directory still defeats the path comparisons
+  and is stopped only by the marker check. bash is immune (`pwd -P` resolves). Also unfixed: the
+  installers compute their source root as `<repo>/skills/ipc` rather than the repo root, so they
+  accept a worktree copy as a `--force`/`-Force` target where the uninstallers refuse it.
 
 ### Added
 
-- **`tests/test_uninstall_guard.sh`** — first test coverage of the uninstallers, registered in
-  `run_release_gates.sh`. 14 assertions, every invocation `--dry-run`, so the suite itself can delete
-  nothing. Covers refusal of the source tree (plain, dot-segment, trailing slash), `$HOME`, a
-  filesystem root, both worktree copies, and — the reason it exists — **case variants**. Verified
+- **`tests/test_uninstall_guard.sh`** — first test coverage of the uninstallers, registered in both
+  `run_release_gates.sh` and `.github/workflows/test.yml` so it actually gates a PR. 17 assertions on
+  a host with worktrees and installed roots present; a fresh clone runs fewer and says so, because
+  sections 3 and 4 iterate whatever exists. Every invocation is `--dry-run`, so the suite itself can
+  delete nothing. Covers refusal of the source tree (plain, dot-segment, trailing slash), `$HOME`,
+  filesystem and drive roots, UNC respellings, both worktree copies, and — the reason it exists —
+  **case variants**. It asserts against `uninstall.sh` only; the PowerShell guard is not covered by
+  any suite, and that gap is what let attempt 2's UNC bypass through. Verified
   non-vacuous: disabling the fix makes 3 assertions fail, printing a deletion plan over the real
   source tree. The absence of any uninstaller test is why the case-sensitivity class was invisible.
 - **`docs/COMPATIBILITY.md` autoload row** said `gui-unowned`/`failed-closed` outcomes come with a

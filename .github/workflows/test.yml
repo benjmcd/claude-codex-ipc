@@ -37,6 +37,7 @@ jobs:
           bash -n tests/test_router_contract.sh
           bash -n tests/test_ipc_wait.sh
           bash -n tests/test_wait_contract.sh
+          bash -n tests/test_uninstall_guard.sh
           bash -n tests/scan_public_safety.sh
           bash -n install.sh
           bash -n uninstall.sh
@@ -96,6 +97,9 @@ jobs:
 
       - name: Blind wait-contract conformance suite
         run: bash tests/test_wait_contract.sh
+
+      - name: Uninstaller dangerous-target sentinel
+        run: bash tests/test_uninstall_guard.sh
 
       - name: Static contract audit
         run: node skills/ipc/scripts/codex_ipc_contract_audit.mjs
