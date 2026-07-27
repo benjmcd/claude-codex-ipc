@@ -56,7 +56,7 @@ Same dependencies as the inspector for snapshot mode; `--compare` mode is pure J
 | Dependencies | Node.js; Codex Desktop running; private router protocol (`initialize`, `thread-follower-start-turn`, uint32le framing) |
 | Stability | **Experimental** — private internals; assume broken after any Desktop update until revalidated |
 | Touches live Desktop state | **Yes** — a live send starts a real model turn in the target thread |
-| Fallback | File-drop is written first and its pickup line is printed in every outcome |
+| Fallback | File-drop envelope is written first in every outcome; its pickup line is printed only on a proven pre-send failure. After an ambiguous post-attempt result (`confirmation=unknown`) pickup is suppressed — do not resend |
 
 ## `codex://` autoload + PowerShell focus restore (`codex_ipc_autoload.ps1`)
 

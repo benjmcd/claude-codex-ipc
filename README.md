@@ -60,8 +60,10 @@ resuming the goal in a fresh, unmarked turn will NOT re-certify the original dis
 After an accepted live `--ipc` send the wrapper prints a ready-to-run `WAIT:` line before its final
 `RESULT:` line. Flagless (no `--accept-rollout-fallback`) is the legacy file-primary contract.
 
-The wrapper always writes the file-drop before any live attempt, so a failed delivery still
-leaves a working pickup line. Live results are machine-parseable:
+The wrapper always writes the file-drop **envelope** before any live attempt. The **pickup line** is
+printed only when the failure is proven pre-send; after an ambiguous post-attempt result
+(`confirmation=unknown`) the envelope is preserved but pickup is suppressed, because the turn may
+already have been admitted and resending would duplicate it. Live results are machine-parseable:
 `RESULT: gui-delivered|gui-unowned|failed-closed -- reason=<token> -- confirmation=<token>`.
 After an accepted live send, confirmation is `rollout-hit` (the exact dispatch task basename was
 observed in a rollout user message), `rollout-pending` (at least one authoritative candidate was

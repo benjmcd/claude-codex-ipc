@@ -99,7 +99,9 @@ not the foreground app and the wrapper can safely auto-load the target (focus re
 a failed verification is reported as a WARNING rather than staying silent). If Codex IS the
 foreground app and the target thread is unowned, the default policy defers rather than changing
 the visible Codex view — foreground recovery then requires explicit switch authorization (below)
-or a future proven restore path. The file-drop pickup line is preserved in every outcome.
+or a future proven restore path. The file-drop **envelope** is preserved in every outcome; the
+**pickup line** is printed only when the failure is proven pre-send. After an ambiguous
+post-attempt result (`confirmation=unknown`) pickup is suppressed and resending is forbidden.
 
 #### Foreground policy (`--foreground-policy`, EXPERIMENTAL)
 

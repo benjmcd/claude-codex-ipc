@@ -34,9 +34,15 @@ triggers an automatic resend; re-inspect the thread tail when certainty matters.
 2. `RESULT: gui-unowned` — no renderer owns the thread and auto-load did not complete. Open
    `codex://threads/<conversationId>` in the app, then rerun `/ipc`; or paste the printed
    file-drop pickup line.
-3. `RESULT: failed-closed` — target missing/archived, or router/pipe failure (app closed, timeout,
-   protocol drift). Diagnostics are printed. If Codex Desktop recently updated, run
-   `codex_ipc_revalidate.mjs`; suspect protocol drift before suspecting the target.
+3. `RESULT: failed-closed` with `confirmation=not-attempted` — the failure is proven pre-send
+   (target missing/archived, invalid arguments, refused policy). No turn was admitted, so the
+   printed file-drop pickup line is safe to paste.
+4. `RESULT: failed-closed` with `confirmation=unknown` — router/pipe failure *after* a send was
+   attempted (app closed, timeout, protocol drift). **The envelope is preserved but no pickup line
+   is printed, and you must not paste one or resend** — the turn may already have been admitted,
+   and resending would execute it twice. Re-inspect the thread tail to establish what happened.
+   If Codex Desktop recently updated, run `codex_ipc_revalidate.mjs`; suspect protocol drift before
+   suspecting the target.
 
 ## Post-update revalidation
 

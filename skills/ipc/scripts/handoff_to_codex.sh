@@ -48,10 +48,39 @@
 #   CODEX_IPC_POLL_DEADLINE_S=<n>      auto-load retry poll window (default 30; test knob)
 #   CODEX_IPC_POLL_INTERVAL_S=<n>      auto-load retry poll interval (default 2; test knob)
 #   CODEX_IPC_OBSERVE_BUDGET_MS=<n>    post-acceptance rollout observation cap
-#                                      (default 8000; provisional)
+#                                      (default 20000; measurement-informed)
 #   CODEX_IPC_OBSERVE_INTERVAL_MS=<n>  positive rollout observation interval override
 
 set -euo pipefail
+
+# Help/version are effect-free: they answer and exit before transport-root resolution,
+# project inspection, retention, envelope publication, or any child launch. Single-dash
+# -h/-v are included because guard_task only rejects `--*`, so without this branch they
+# would be accepted as file-drop task text and publish a junk envelope.
+case "${1:-}" in
+    -h|-\?|--help)
+        printf '%s\n' \
+            'handoff_to_codex.sh — Claude Code to Codex Desktop handoff' \
+            '' \
+            'USAGE:' \
+            '  handoff_to_codex.sh "<task>"                       file-drop (writes an envelope; prints a pickup line)' \
+            '  handoff_to_codex.sh --ipc <conversationId> "<task>" live delivery into an existing Desktop thread' \
+            '  handoff_to_codex.sh --ipc <conversationId> --foreground-policy switch --ack-foreground-switch -- "<task>"' \
+            '  handoff_to_codex.sh -h | --help | -v | --version' \
+            '' \
+            'NOTES:' \
+            '  Exactly one conversationId per --ipc send. The envelope is always written first;' \
+            '  the pickup line is printed only on a proven pre-send failure. After an ambiguous' \
+            '  post-attempt result (confirmation=unknown) pickup is suppressed — do not resend.' \
+            '  Transport root: ${CODEX_IPC_ROOT:-~/.claude/ipc}. Envelopes are kept by default.' \
+            '  --app/--open/--exec were removed in v0.1.8 (No Codex CLI).'
+        exit 0
+        ;;
+    -v|--version)
+        printf '%s\n' 'handoff_to_codex.sh 0.1.9'
+        exit 0
+        ;;
+esac
 
 # v0.1.8 removes every Codex-CLI-backed mode. Reject these flags before transport-root
 # resolution, project inspection, retention, envelope publication, or any child launch.
@@ -446,7 +475,9 @@ fi
 # automatic focus snapback (codex_ipc_autoload.ps1; foreground-aware: defers
 # while the operator is actively in the Codex app), then the send is retried.
 # Model/reasoning are renderer-controlled: this CANNOT change the thread's model
-# or reasoning effort, nor any other session's. Falls back to file-drop on failure.
+# or reasoning effort, nor any other session's. Falls back to the file-drop pickup
+# line ONLY for failures classified before any send was attempted; after an ambiguous
+# post-attempt result the envelope is preserved but pickup is suppressed (no resend).
 # Result taxonomy: gui-delivered | gui-unowned | failed-closed.
 if [[ "$MODE" == "ipc" ]]; then
     printf '%s\n' "$PAYLOAD" | atomic_write "$OUTBOUND_MSYS"
@@ -531,7 +562,7 @@ if [[ "$MODE" == "ipc" ]]; then
     # runnable WAIT: line (exact thread/dispatch/--reply-path + the D2 flag and 30-minute budget)
     # BEFORE the single final RESULT: line. File-drop, exec, and every failure branch must not.
     print_wait_hint() {
-        printf 'WAIT: node %q --thread %q --dispatch %q --reply-path %q --accept-rollout-fallback --budget-ms 1800000 --interval-ms 1000\n' \
+        printf 'WAIT: node %q --thread %q --dispatch %q --reply-path %q --accept-rollout-fallback --budget-ms 1800000 --interval-ms 1000 --status-exit-codes\n' \
             "${SCRIPT_DIR}/codex_ipc_wait.mjs" "$IPC_CID" "$DISPATCH_ID" "$INBOUND"
     }
     echo "Injecting pickup line into live Desktop thread ${IPC_CID} via IPC router..."

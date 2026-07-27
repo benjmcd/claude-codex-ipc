@@ -4,6 +4,63 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.1.9] — 2026-07-27
+
+Documentation-coherence patch. **No runtime behavior changes** except one new effect-free
+`-h`/`--help`/`--version` branch and one added flag in a printed hint. Cut as a new immutable tag;
+the `v0.1.8` tag is not moved.
+
+### Fixed — contradictory instruction surfaces
+
+- **Ambiguous-send pickup guidance (5 surfaces + 1 code comment).** `README.md`,
+  `docs/COMPATIBILITY.md`, `skills/ipc/SKILL.md`, `references/architecture.md`, and
+  `references/troubleshooting.md` all stated that the file-drop pickup line is preserved or printed
+  in *every* outcome. The runtime deliberately suppresses it after an ambiguous post-attempt result
+  (`confirmation=unknown`), which is the core defect this release line is named for. An operator
+  following the docs could paste the envelope after an admitted turn and duplicate execution. All
+  five now distinguish the **envelope** (always preserved) from the **pickup line** (printed only on
+  a proven pre-send failure). `troubleshooting.md` splits its `failed-closed` row into the
+  `not-attempted` and `unknown` cases. The wrapper's own header comment, which said "Falls back to
+  file-drop on failure", is corrected to match its body.
+- **Stored thread policy read two ways in one file.** `SKILL.md` said stored
+  `approvalMode`/`sandboxPolicy` are advisory and "MUST NOT ... be read as a reply-writability
+  prediction", then later told the agent to pick a different thread when a stored `managed` sandbox
+  was present. The second passage is corrected: a stored `managed` sandbox is not a reason to avoid
+  a target. A blocked reply write is expected and is recovered via
+  `codex_ipc_wait --accept-rollout-fallback`. "Choose another thread" is reserved for
+  inspector-proven conditions — missing, archived, identity-mismatched.
+- **Stale observation-budget comment.** `handoff_to_codex.sh` documented a default of `8000` ms;
+  the runtime default is `20000` ms (`codex_ipc_rollout_observe.mjs`).
+
+### Added
+
+- **`-h` / `-?` / `--help` and `-v` / `--version`**, answered and exited before transport-root
+  resolution, Git inspection, retention, or envelope publication. `guard_task` rejects only `--*`,
+  so single-dash `-h`/`-v` were previously accepted as file-drop task text and published a junk
+  envelope. `--help`/`--version` already failed cleanly; this makes both forms standard and
+  effect-free.
+- **`--status-exit-codes` in the printed `WAIT:` hint.** The flag already shipped; the hint omitted
+  it, so a caller composing `node wait... && next` received exit 0 on `reply-missing` and proceeded
+  as if the delegation had completed. Composed commands now fail closed.
+- **Relayed-authority labeling convention** in `references/handoff-template.md` (conditional field,
+  included only when a handoff forwards someone else's authorization) with a one-line pointer in
+  `SKILL.md`. Forwarded owner text stays labeled relayed with its source, is not rewritten into
+  first-person owner voice, and cannot override a trusted instruction the receiver already holds.
+  This is a **labeling convention, not a control** — the transport cannot authenticate human intent
+  or decide instruction precedence.
+
+### Deliberately not changed
+
+- Envelope publication still precedes foreground-policy validation. This is the documented
+  file-drop-first invariant, not a defect.
+- Automatic Git context enrichment is unchanged from v0.1.7/v0.1.8 and remains unbounded. Under a
+  dirty repository it previously produced a measured 230,175-byte context block per dispatch
+  (97.16% of stored envelope bytes in that session). Current harm is negligible on a clean tree, so
+  this is **dormant, not fixed**, and re-arms on any dispatch from a dirty repo.
+- Zero-byte reply files still certify `done` when the dispatch's own turn reached `task_complete`
+  un-superseded, and an explicit `--reply-path` is still trusted without basename binding. Both were
+  reviewed and deliberately retained this cycle.
+
 ## [0.1.8] — 2026-07-24
 
 > Post-tag correction: the first v0.1.8 cut shipped correct runtime code but stale docs
