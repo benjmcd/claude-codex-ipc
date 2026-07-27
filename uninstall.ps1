@@ -15,6 +15,20 @@ if (-not (Test-Path $Target)) {
     exit 0
 }
 
+# Resolved-path guard, mirroring install.ps1's -Force guard. The marker check below is
+# NOT sufficient on its own: this repository's own skills\ipc carries `name: ipc`, so a
+# marker-only uninstaller would recursively delete the canonical source tree (or a
+# worktree copy) if it were named as -Target.
+$srcReal  = (Resolve-Path -LiteralPath $PSScriptRoot).ProviderPath.TrimEnd('\')
+$tgtReal  = (Resolve-Path -LiteralPath $Target).ProviderPath.TrimEnd('\')
+$homeReal = (Resolve-Path -LiteralPath $env:USERPROFILE).ProviderPath.TrimEnd('\')
+$isRoot   = $tgtReal -match '^[A-Za-z]:\\?$'
+if ($tgtReal -eq $srcReal -or $tgtReal.StartsWith($srcReal + '\') -or
+    $tgtReal -eq $homeReal -or $isRoot -or [string]::IsNullOrWhiteSpace($tgtReal)) {
+    Write-Error "Refusing dangerous -Target `"$Target`". It resolves inside this source tree, to the user profile, or to a filesystem root."
+    exit 1
+}
+
 # Sanity guard: only ever delete a directory that actually looks like this skill.
 $skillMd = Join-Path $Target "SKILL.md"
 $looksRight = (Test-Path $skillMd) -and ((Get-Content -LiteralPath $skillMd -TotalCount 5) -contains "name: ipc")

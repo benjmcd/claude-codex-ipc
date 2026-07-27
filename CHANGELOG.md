@@ -4,7 +4,31 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Uninstallers no longer accept a destructive target.** `uninstall.sh` and `uninstall.ps1` guarded
+  only on a `SKILL.md` containing `name: ipc`. This repository's own `skills/ipc` satisfies that
+  marker, as do both worktree copies, so naming one as `--target`/`-Target` reached
+  `rm -rf`/`Remove-Item -Recurse`. Both now carry the resolved-path guard the installers already had
+  (`install.sh:83-92`, `install.ps1`): a target resolving to this source tree or any descendant, to
+  `$HOME`/`$env:USERPROFILE`, or to a filesystem root is refused before the marker check.
+- **`docs/COMPATIBILITY.md` autoload row** said `gui-unowned`/`failed-closed` outcomes come with a
+  file-drop line. A post-autoload retry can end
+  `failed-closed -- reason=retry-ambiguous-outcome -- confirmation=unknown`, where the pickup line is
+  deliberately suppressed. This was an eighth surface of the same overclaim v0.1.9 and v0.1.10
+  corrected elsewhere — including one already-corrected line in this same file.
+- **README status line** reported `v0.1.8`; it is now `v0.1.10`.
+
 ## [0.1.10] — 2026-07-27
+
+> Post-tag correction (record only; the tag is not moved): the "Added" note below describes the new
+> assertion as covering "the pickup line". It forbids the **banner**
+> (`FALLBACK -- file-drop is ready`), not the operator command on the following runtime line
+> (`read "<envelope>" and proceed`). The assertion is real and was verified non-vacuous, but a
+> reworded banner would let a retained operator command pass. Read it as partial coverage of the
+> no-resend invariant, not full coverage. The `retry-ambiguous-outcome` branch has no test at all.
+
+
 
 Follow-on patch to v0.1.9. Adds a goal-setting instruction to every dispatch payload, removes the
 last surviving false-fallback string, and puts the release line's central invariant under test for

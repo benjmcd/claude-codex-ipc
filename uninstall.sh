@@ -32,6 +32,21 @@ if [[ ! -e "$TARGET" ]]; then
     exit 0
 fi
 
+# Resolved-path guard, mirroring install.sh's --force guard. The marker check below is
+# NOT sufficient on its own: this repository's own skills/ipc carries `name: ipc`, so a
+# marker-only uninstaller would recursively delete the canonical source tree (or a
+# worktree copy) if it were named as --target.
+SRC_REAL="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+TGT_REAL="$(cd "$TARGET" 2>/dev/null && pwd -P || echo "$TARGET")"
+HOME_REAL="$(cd "$HOME" 2>/dev/null && pwd -P || echo "$HOME")"
+case "$TGT_REAL" in
+    "$SRC_REAL"|"$SRC_REAL"/*|"$HOME_REAL"|/|/[A-Za-z]|"")
+        echo "ERROR: refusing dangerous --target \"${TARGET}\"." >&2
+        echo "It resolves inside this source tree, to \$HOME, or to a filesystem root." >&2
+        exit 1
+        ;;
+esac
+
 # Sanity guard: only ever delete a directory that actually looks like this skill.
 if [[ ! -f "${TARGET}/SKILL.md" ]] || ! grep -q '^name: ipc$' "${TARGET}/SKILL.md" 2>/dev/null; then
     echo "ERROR: \"${TARGET}\" does not look like an installed ipc skill (no matching SKILL.md)." >&2
