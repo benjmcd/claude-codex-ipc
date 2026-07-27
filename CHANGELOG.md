@@ -9,9 +9,29 @@ All notable changes to this project will be documented in this file.
 - **Uninstallers no longer accept a destructive target.** `uninstall.sh` and `uninstall.ps1` guarded
   only on a `SKILL.md` containing `name: ipc`. This repository's own `skills/ipc` satisfies that
   marker, as do both worktree copies, so naming one as `--target`/`-Target` reached
-  `rm -rf`/`Remove-Item -Recurse`. Both now carry the resolved-path guard the installers already had
-  (`install.sh:83-92`, `install.ps1`): a target resolving to this source tree or any descendant, to
-  `$HOME`/`$env:USERPROFILE`, or to a filesystem root is refused before the marker check.
+  `rm -rf`/`Remove-Item -Recurse`. Both now carry a resolved-path guard, refusing before the marker
+  check any target that resolves to this source tree or any descendant, to
+  `$HOME`/`$env:USERPROFILE`, or to a filesystem/UNC root.
+
+  The first attempt at this guard was **defective and is corrected here**. It was modelled on
+  `install.sh:79-91`, whose `case` comparison is case-**sensitive** — but this is a Windows tool on
+  NTFS, where `C:/DEV/...` and `C:/dev/...` are the same directory, and `pwd -P` normalizes the drive
+  letter while preserving directory-name case. A one-character case change in the caller's argument
+  walked through both the guard and the marker check. `install.ps1:67-70` had it right all along with
+  `OrdinalIgnoreCase`; the claim that the new guard "mirrored" it was false. Both bash guards
+  (`uninstall.sh` and the pre-existing `install.sh` `--force` arm) now compare case-insensitively;
+  `uninstall.ps1` now uses `OrdinalIgnoreCase`, `GetPathRoot` for UNC roots, `-LiteralPath` on its
+  existence check, and refuses reparse points outright because `Resolve-Path` does not resolve
+  junctions.
+
+### Added
+
+- **`tests/test_uninstall_guard.sh`** — first test coverage of the uninstallers, registered in
+  `run_release_gates.sh`. 14 assertions, every invocation `--dry-run`, so the suite itself can delete
+  nothing. Covers refusal of the source tree (plain, dot-segment, trailing slash), `$HOME`, a
+  filesystem root, both worktree copies, and — the reason it exists — **case variants**. Verified
+  non-vacuous: disabling the fix makes 3 assertions fail, printing a deletion plan over the real
+  source tree. The absence of any uninstaller test is why the case-sensitivity class was invisible.
 - **`docs/COMPATIBILITY.md` autoload row** said `gui-unowned`/`failed-closed` outcomes come with a
   file-drop line. A post-autoload retry can end
   `failed-closed -- reason=retry-ambiguous-outcome -- confirmation=unknown`, where the pickup line is
@@ -57,7 +77,8 @@ the first time. Cut as a new immutable tag; `v0.1.8` and `v0.1.9` are not moved.
   file-drop on any failure" — the sole tracked survivor of the overclaim v0.1.9 removed from five
   documentation surfaces and a code comment, and doubly wrong at that exit because no envelope has
   been written yet. It now states that nothing was written for the invocation and to rerun with a
-  valid conversationId or omit `--ipc`. `git grep "falls back to file-drop"` now returns zero.
+  valid conversationId or omit `--ipc`. `git grep "falls back to file-drop"` now matches only this
+  changelog line, which quotes the removed phrase.
 - **`handoff-template.md` preamble vs conditional field.** "Fill every field" contradicted the
   relayed-authority field v0.1.9 added, which says to omit it entirely when inapplicable. The
   preamble now reads "Fill every applicable field" and states that conditional fields are omitted.

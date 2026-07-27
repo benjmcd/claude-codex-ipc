@@ -75,6 +75,7 @@ DEFAULT_SUITES=(
   test_rollout_reader.sh
   test_router_contract.sh
   test_session_inspect.sh
+  test_uninstall_guard.sh
   test_wait_contract.sh
 )
 SAFETY_SUITE="scan_public_safety.sh"

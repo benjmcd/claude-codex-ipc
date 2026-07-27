@@ -10,7 +10,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-if (-not (Test-Path $Target)) {
+if (-not (Test-Path -LiteralPath $Target)) {
     Write-Output "Nothing to do: no install at `"$Target`"."
     exit 0
 }
@@ -19,13 +19,22 @@ if (-not (Test-Path $Target)) {
 # NOT sufficient on its own: this repository's own skills\ipc carries `name: ipc`, so a
 # marker-only uninstaller would recursively delete the canonical source tree (or a
 # worktree copy) if it were named as -Target.
+$ic       = [System.StringComparison]::OrdinalIgnoreCase
 $srcReal  = (Resolve-Path -LiteralPath $PSScriptRoot).ProviderPath.TrimEnd('\')
 $tgtReal  = (Resolve-Path -LiteralPath $Target).ProviderPath.TrimEnd('\')
 $homeReal = (Resolve-Path -LiteralPath $env:USERPROFILE).ProviderPath.TrimEnd('\')
-$isRoot   = $tgtReal -match '^[A-Za-z]:\\?$'
-if ($tgtReal -eq $srcReal -or $tgtReal.StartsWith($srcReal + '\') -or
-    $tgtReal -eq $homeReal -or $isRoot -or [string]::IsNullOrWhiteSpace($tgtReal)) {
-    Write-Error "Refusing dangerous -Target `"$Target`". It resolves inside this source tree, to the user profile, or to a filesystem root."
+$tgtRoot  = [System.IO.Path]::GetPathRoot($tgtReal).TrimEnd('\')
+# Resolve-Path does NOT resolve junctions/symlinks, so a reparse point aimed into the
+# source tree would otherwise pass every comparison below. PS 5.1 Remove-Item -Recurse
+# on a junction can delete the TARGET's contents, so refuse reparse points outright.
+$isReparse = ((Get-Item -LiteralPath $tgtReal -Force).Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0
+if ($tgtReal.Equals($srcReal, $ic) -or
+    $tgtReal.StartsWith($srcReal + '\', $ic) -or
+    $tgtReal.Equals($homeReal, $ic) -or
+    $tgtReal.Equals($tgtRoot, $ic) -or
+    $isReparse -or
+    [string]::IsNullOrWhiteSpace($tgtReal)) {
+    Write-Error "Refusing dangerous -Target `"$Target`". It resolves inside this source tree, to the user profile, to a filesystem/UNC root, or is a reparse point."
     exit 1
 }
 

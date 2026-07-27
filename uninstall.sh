@@ -39,13 +39,21 @@ fi
 SRC_REAL="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 TGT_REAL="$(cd "$TARGET" 2>/dev/null && pwd -P || echo "$TARGET")"
 HOME_REAL="$(cd "$HOME" 2>/dev/null && pwd -P || echo "$HOME")"
+# Case-INSENSITIVE comparison is mandatory here. This is a Windows tool on NTFS, where
+# C:/DEV/... and C:/dev/... are the same directory; `pwd -P` normalizes the drive letter
+# but preserves directory-name case, so a case-sensitive match is bypassed by a one-character
+# change in the caller's argument. On a genuinely case-sensitive filesystem this errs toward
+# refusing more targets, which is the safe direction for a recursive delete.
+shopt -s nocasematch
 case "$TGT_REAL" in
-    "$SRC_REAL"|"$SRC_REAL"/*|"$HOME_REAL"|/|/[A-Za-z]|"")
+    "$SRC_REAL"|"$SRC_REAL"/*|"$HOME_REAL"|/|/[A-Za-z]|//*/*|"")
+        shopt -u nocasematch
         echo "ERROR: refusing dangerous --target \"${TARGET}\"." >&2
-        echo "It resolves inside this source tree, to \$HOME, or to a filesystem root." >&2
+        echo "It resolves inside this source tree, to \$HOME, or to a filesystem/UNC root." >&2
         exit 1
         ;;
 esac
+shopt -u nocasematch
 
 # Sanity guard: only ever delete a directory that actually looks like this skill.
 if [[ ! -f "${TARGET}/SKILL.md" ]] || ! grep -q '^name: ipc$' "${TARGET}/SKILL.md" 2>/dev/null; then

@@ -80,12 +80,19 @@ if [[ "$FORCE" -eq 1 && -e "$TARGET" ]]; then
     SRC_REAL="$(cd "$SRC_ROOT" && pwd -P)"
     TGT_REAL="$(cd "$TARGET" 2>/dev/null && pwd -P || echo "$TARGET")"
     HOME_REAL="$(cd "$HOME" 2>/dev/null && pwd -P || echo "$HOME")"
+    # Case-INSENSITIVE: NTFS treats C:/DEV and C:/dev as one directory, and `pwd -P`
+    # preserves directory-name case, so a case-sensitive match is bypassed by a
+    # one-character change in the caller's argument. install.ps1 already compares with
+    # OrdinalIgnoreCase; this arm did not, and the divergence was the actual defect.
+    shopt -s nocasematch
     case "$TGT_REAL" in
-        "$SRC_REAL"|"$SRC_REAL"/*|"$HOME_REAL"|/|/[A-Za-z]|"")
+        "$SRC_REAL"|"$SRC_REAL"/*|"$HOME_REAL"|/|/[A-Za-z]|//*/*|"")
+            shopt -u nocasematch
             echo "ERROR: refusing dangerous --target \"${TARGET}\"." >&2
             exit 1
             ;;
     esac
+    shopt -u nocasematch
     { [[ -f "$TARGET/SKILL.md" ]] && grep -q '^name: ipc$' "$TARGET/SKILL.md"; } \
         || { echo "ERROR: --force refuses to delete \"${TARGET}\": not an ipc skill install." >&2; exit 1; }
 fi
