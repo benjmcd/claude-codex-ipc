@@ -47,9 +47,12 @@ $isReparse = ((Get-Item -LiteralPath $tgtReal -Force).Attributes -band [System.I
 #   * subst / net use drive-letter aliasing (`subst Z: C:\dev\repo` then -Target Z:\...).
 #   * A junction or symlink in an ANCESTOR directory: the reparse check below tests only
 #     the target itself.
-#   * Invoking THIS SCRIPT via an aliased path (UNC or dotted). That de-canonicalizes
-#     $srcReal, the guard's source anchor, rather than the target -- so a canonical
-#     -Target no longer matches the prefix test. Affects uninstall.sh identically.
+#   * Invoking THIS SCRIPT via a UNC or \\?\ path (e.g. `powershell -File
+#     \\localhost\c$\...\uninstall.ps1`, or `\\?\C:\...\uninstall.ps1`). That
+#     de-canonicalizes $srcReal, the guard's source ANCHOR, rather than its target, so a
+#     canonical -Target stops matching the prefix test. Both measured live. A DOTTED
+#     script path (`C:\dev\repo.\uninstall.ps1`) is NOT in this set -- Get-Item collapses
+#     it and the guard refuses correctly. uninstall.sh is affected by the UNC form too.
 # Closing these requires filesystem-identity comparison (volume serial + file id), not
 # path canonicalization. Judged disproportionate for a single-user tool whose install
 # targets are all local paths under the user profile.

@@ -22,8 +22,11 @@ All notable changes to this project will be documented in this file.
   every one of those spellings; all denylist arms are unchanged. Measured across the six
   confirmed hostile spellings: `Resolve-Path` catches 4/6, `Get-Item` catches 6/6. Deliberately
   **not** `[System.IO.Path]::GetFullPath`, which resolves a relative path against the process
-  CWD rather than the PowerShell location. `uninstall.sh`/`install.sh` refused every one of
-  these spellings and are unchanged.
+  CWD rather than the PowerShell location. `uninstall.sh`/`install.sh` reach no deletion plan for
+  any of these spellings and are unchanged — though for several of them bash *short-circuits* at
+  `rc=0 "Nothing to do"` because MSYS cannot resolve the string at all, rather than *refusing* at
+  `rc=1`. Fail-closed and safe, but not the same thing as a refusal, and the two shells therefore
+  diverge in exit code for the same input.
 
   `install.ps1 -Force` had **no reparse-point arm at all** despite ending in the same
   `Remove-Item -Recurse` that `uninstall.ps1` guards; added for parity.
@@ -39,13 +42,23 @@ comments rather than left to be rediscovered:
 
 - **`subst` / `net use` drive-letter aliasing** — `subst Z: C:\dev\repo` then `-Target Z:\...`.
 - **A junction or symlink in an ANCESTOR directory** — the reparse arms test only the target itself.
-- **Invoking the scripts themselves via an aliased path** (UNC or dotted). This de-canonicalizes
-  the guard's *source anchor* rather than its target, so a canonical `-Target` stops matching the
-  prefix test. Measured in both shells:
-  `powershell -File \\localhost\c$\dev\...\uninstall.ps1 -DryRun -Target C:\dev\...\skills\ipc`
-  reaches a deletion plan. Three fix rounds hardened the target operand; the anchor operand was
-  never in scope, and the `Get-Item` swap does not close it (`Get-Item` does not collapse a UNC
-  anchor to its local form).
+  Note the bash suite's header claims junctions are "not constructible hermetically without
+  elevation"; that is true of symlinks but false of directory junctions (`mklink /J`), so this arm
+  is testable and simply is not tested yet.
+- **Invoking the scripts themselves via a UNC or `\\?\` path.** This de-canonicalizes the guard's
+  *source anchor* rather than its target, so a canonical `-Target` stops matching the prefix test.
+  Measured: `powershell -File \\localhost\c$\dev\...\uninstall.ps1 -DryRun -Target C:\dev\...\skills\ipc`
+  and the `\\?\C:\...` form both reach a deletion plan; `bash //localhost/c$/.../uninstall.sh`
+  likewise. Three fix rounds hardened the target operand; the anchor was never in scope, and the
+  `Get-Item` swap does not close it (it does not collapse a UNC anchor to its local form).
+  A **dotted** script path (`C:\dev\repo.\uninstall.ps1`) is **not** in this set — the `Get-Item`
+  swap does collapse it and the guard refuses correctly. An earlier draft of this entry listed it
+  as open; that was wrong.
+- **`install.sh --force` / `install.ps1 -Force` do not protect worktree copies.** Both anchor on
+  `<repo>/skills/ipc` rather than the repo root, so
+  `--force --target <repo>/worktrees/<wt>/skills/ipc` reaches a delete-then-replace plan while both
+  *uninstallers* refuse the same path. Measured in both shells. Asymmetric and pre-existing; the
+  earlier entry above claiming worktree copies are covered is accurate for the uninstallers only.
 
 Closing these requires filesystem-identity comparison (volume serial + file id), not path
 canonicalization. Judged disproportionate here: every supported install target is a local path
