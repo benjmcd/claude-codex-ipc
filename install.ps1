@@ -57,17 +57,26 @@ if (Test-Path -LiteralPath $Target) {
 }
 
 if ($Force -and (Test-Path -LiteralPath $Target)) {
-    $srcReal = (Resolve-Path -LiteralPath $SrcRoot).ProviderPath.TrimEnd('\', '/')
-    $targetReal = (Resolve-Path -LiteralPath $Target).ProviderPath.TrimEnd('\', '/')
-    $homeReal = (Resolve-Path -LiteralPath $HOME).ProviderPath.TrimEnd('\', '/')
+    # Canonicalize with Get-Item, NOT Resolve-Path: Resolve-Path().ProviderPath preserves
+    # trailing dots/spaces and forward-slash UNC form, so the guard would compare a string
+    # the deleter never uses. Not [System.IO.Path]::GetFullPath either -- it resolves a
+    # relative path against the process CWD rather than the PowerShell location.
+    $srcReal = (Get-Item -LiteralPath $SrcRoot -Force).FullName.TrimEnd('\', '/')
+    $targetReal = (Get-Item -LiteralPath $Target -Force).FullName.TrimEnd('\', '/')
+    $homeReal = (Get-Item -LiteralPath $HOME -Force).FullName.TrimEnd('\', '/')
     $targetRoot = [System.IO.Path]::GetPathRoot($targetReal).TrimEnd('\', '/')
+    # Parity with uninstall.ps1: Get-Item/Resolve-Path do not resolve junctions, and this
+    # block ends in Remove-Item -Recurse, which under PS 5.1 can delete a junction's TARGET
+    # contents. uninstall.ps1 has refused reparse points since its guard was added; this arm
+    # was missing here despite the identical destructive call.
+    $isReparse = ((Get-Item -LiteralPath $targetReal -Force).Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0
 
     # Refuse UNC outright, matching install.sh's `//*/*` arm: a UNC respelling of a local
-    # path (\\localhost\c$\...) resolves to itself and so matches neither the source-prefix
-    # test nor the root test. Every supported install target is a local path.
+    # path (\\localhost\c$\...) is a different string for the same directory.
     if (
         [string]::IsNullOrWhiteSpace($targetReal) -or
         $targetReal.StartsWith('\\') -or
+        $isReparse -or
         $targetReal.Equals($srcReal, [System.StringComparison]::OrdinalIgnoreCase) -or
         $targetReal.StartsWith("$srcReal\", [System.StringComparison]::OrdinalIgnoreCase) -or
         $targetReal.Equals($homeReal, [System.StringComparison]::OrdinalIgnoreCase) -or

@@ -6,6 +6,52 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **Fourth and fifth guard bypasses, and the process defect behind all of them.** The
+  dangerous-target guard was bypassable in two further spellings, both live until this change:
+  a **forward-slash UNC** target (`//localhost/c$/dev/.../skills/ipc`) produced a full deletion
+  plan over the canonical source tree at exit 0, because the previous fix refused only targets
+  whose resolved path began `\\` and `Resolve-Path` returns forward slashes for that input; and a
+  **trailing dot** on the leaf or on any ancestor segment (`...\skills\ipc.`,
+  `...\claude-codex-ipc.\skills\ipc`) defeated the equality and prefix arms, because Windows
+  strips trailing dots when resolving while the string comparison does not.
+
+  All four historical bypasses share one root cause: **the guard canonicalized with a weaker
+  primitive than the deleter acts through.** `Resolve-Path().ProviderPath` preserves trailing
+  dots and spaces and preserves forward-slash UNC form. Both PowerShell guards now canonicalize
+  with `(Get-Item -LiteralPath ... -Force).FullName`, which is filesystem-backed and collapses
+  every one of those spellings; all denylist arms are unchanged. Measured across the six
+  confirmed hostile spellings: `Resolve-Path` catches 4/6, `Get-Item` catches 6/6. Deliberately
+  **not** `[System.IO.Path]::GetFullPath`, which resolves a relative path against the process
+  CWD rather than the PowerShell location. `uninstall.sh`/`install.sh` refused every one of
+  these spellings and are unchanged.
+
+  `install.ps1 -Force` had **no reparse-point arm at all** despite ending in the same
+  `Remove-Item -Recurse` that `uninstall.ps1` guards; added for parity.
+
+  **The process defect:** `tests/test_uninstall_guard.sh` existed and passed while the PowerShell
+  guard was bypassable three separate times, and CI's PowerShell leg ran only a happy-path
+  dry-run that cannot detect a bypass. A green bash run was never evidence about PowerShell.
+
+### Known not closed — recorded, not implied away
+
+These defeat every string comparison in all four scripts and are named in the guards' own
+comments rather than left to be rediscovered:
+
+- **`subst` / `net use` drive-letter aliasing** — `subst Z: C:\dev\repo` then `-Target Z:\...`.
+- **A junction or symlink in an ANCESTOR directory** — the reparse arms test only the target itself.
+- **Invoking the scripts themselves via an aliased path** (UNC or dotted). This de-canonicalizes
+  the guard's *source anchor* rather than its target, so a canonical `-Target` stops matching the
+  prefix test. Measured in both shells:
+  `powershell -File \\localhost\c$\dev\...\uninstall.ps1 -DryRun -Target C:\dev\...\skills\ipc`
+  reaches a deletion plan. Three fix rounds hardened the target operand; the anchor operand was
+  never in scope, and the `Get-Item` swap does not close it (`Get-Item` does not collapse a UNC
+  anchor to its local form).
+
+Closing these requires filesystem-identity comparison (volume serial + file id), not path
+canonicalization. Judged disproportionate here: every supported install target is a local path
+under the user profile, the guard protects a git-tracked and pushed tree, and reaching any of
+these requires deliberately aliasing one's own machine.
+
 - **Uninstallers no longer accept a destructive target.** `uninstall.sh` and `uninstall.ps1` guarded
   only on a `SKILL.md` containing `name: ipc`. This repository's own `skills/ipc` satisfies that
   marker, as do both worktree copies, so naming one as `--target`/`-Target` reached
@@ -43,6 +89,16 @@ All notable changes to this project will be documented in this file.
   accept a worktree copy as a `--force`/`-Force` target where the uninstallers refuse it.
 
 ### Added
+
+- **`tests/test_uninstall_guard.ps1`** — the PowerShell half, wired into the Windows CI leg. 17
+  assertions covering canonical, case, backslash UNC, forward-slash UNC, trailing dot on leaf and
+  on ancestor, user profile, drive root, plus the over-block guards. Landed **red** first: it
+  reported 5 failures against the then-live guards, and those are exactly the bypasses the
+  primitive swap closes. Grades on **exit code plus refusal banner**, never on stdout shape —
+  `install.ps1` prints its plan line before the guard runs, so output-shape grading silently
+  mis-scores. One harness note preserved in the file: `$ErrorActionPreference = 'Stop'` turns a
+  child's stderr into a terminating error and kills the suite on the *first successful refusal*,
+  so the invocation helper scopes it to `Continue`.
 
 - **`tests/test_uninstall_guard.sh`** — first test coverage of the uninstallers, registered in both
   `run_release_gates.sh` and `.github/workflows/test.yml` so it actually gates a PR. 17 assertions on

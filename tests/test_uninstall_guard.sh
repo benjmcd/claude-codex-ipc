@@ -13,7 +13,10 @@
 #   an absent target still short-circuits cleanly.
 #
 # EXCLUDED:
-# - uninstall.ps1 (PowerShell; covered by the workflow's PowerShell leg, not this suite).
+# - uninstall.ps1 / install.ps1. Covered by the sibling suite test_uninstall_guard.ps1, which
+#   carries the hostile-spelling matrix for that side. It did not exist until 2026-07-27, and
+#   its absence is exactly why the PowerShell guard was bypassable three separate times while
+#   THIS suite passed. Do not read a green bash run as evidence about PowerShell.
 # - Any real deletion. Every invocation here passes --dry-run; a bug in this suite cannot
 #   remove anything.
 # - Junction/symlink and UNC behavior (not constructible hermetically without elevation).

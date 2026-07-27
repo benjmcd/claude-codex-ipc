@@ -20,19 +20,39 @@ if (-not (Test-Path -LiteralPath $Target)) {
 # marker-only uninstaller would recursively delete the canonical source tree (or a
 # worktree copy) if it were named as -Target.
 $ic       = [System.StringComparison]::OrdinalIgnoreCase
-$srcReal  = (Resolve-Path -LiteralPath $PSScriptRoot).ProviderPath.TrimEnd('\')
-$tgtReal  = (Resolve-Path -LiteralPath $Target).ProviderPath.TrimEnd('\')
-$homeReal = (Resolve-Path -LiteralPath $env:USERPROFILE).ProviderPath.TrimEnd('\')
+# Canonicalize with Get-Item, NOT Resolve-Path. Resolve-Path().ProviderPath is a weaker
+# canonicalizer than the one Remove-Item acts through: it preserves trailing dots and spaces
+# and preserves forward-slash UNC form. Every historical bypass of this guard was the same
+# defect -- the guard compared a string the deleter would not have used. Get-Item hits the
+# filesystem and collapses all of those spellings.
+# NOT [System.IO.Path]::GetFullPath: that resolves a relative path against the process CWD
+# rather than the PowerShell location, so a relative -Target would canonicalize against the
+# wrong anchor.
+$srcReal  = (Get-Item -LiteralPath $PSScriptRoot -Force).FullName.TrimEnd('\')
+$tgtReal  = (Get-Item -LiteralPath $Target -Force).FullName.TrimEnd('\')
+$homeReal = (Get-Item -LiteralPath $env:USERPROFILE -Force).FullName.TrimEnd('\')
 $tgtRoot  = [System.IO.Path]::GetPathRoot($tgtReal).TrimEnd('\')
 # Resolve-Path does NOT resolve junctions/symlinks, so a reparse point aimed into the
 # source tree would otherwise pass every comparison below. PS 5.1 Remove-Item -Recurse
 # on a junction can delete the TARGET's contents, so refuse reparse points outright.
 $isReparse = ((Get-Item -LiteralPath $tgtReal -Force).Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0
-# Refuse UNC outright, matching uninstall.sh's `//*/*` arm. A UNC respelling of a local
-# path (\\localhost\c$\dev\... or \\127.0.0.1\c$\...) resolves to itself, so it matches
-# neither the source-prefix test nor the root test, and is not a reparse point -- it
-# walked the entire guard. Refusing all UNC is correct here: every supported install
-# target is a local path under the user profile.
+# Refuse UNC, matching uninstall.sh's `//*/*` arm. A UNC respelling of a local path
+# (\\localhost\c$\dev\... or \\127.0.0.1\c$\...) is a different string for the same
+# directory. Combined with the Get-Item canonicalization above this covers backslash AND
+# forward-slash UNC; the earlier Resolve-Path form preserved forward slashes, so a
+# `//localhost/c$/...` target walked the entire guard.
+#
+# KNOWN NOT CLOSED by this guard -- these defeat every string comparison here, and are
+# recorded rather than implied away:
+#   * subst / net use drive-letter aliasing (`subst Z: C:\dev\repo` then -Target Z:\...).
+#   * A junction or symlink in an ANCESTOR directory: the reparse check below tests only
+#     the target itself.
+#   * Invoking THIS SCRIPT via an aliased path (UNC or dotted). That de-canonicalizes
+#     $srcReal, the guard's source anchor, rather than the target -- so a canonical
+#     -Target no longer matches the prefix test. Affects uninstall.sh identically.
+# Closing these requires filesystem-identity comparison (volume serial + file id), not
+# path canonicalization. Judged disproportionate for a single-user tool whose install
+# targets are all local paths under the user profile.
 if ($tgtReal.StartsWith('\\') -or
     $tgtReal.Equals($srcReal, $ic) -or
     $tgtReal.StartsWith($srcReal + '\', $ic) -or

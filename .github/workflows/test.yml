@@ -121,3 +121,11 @@ jobs:
           New-Item -ItemType Directory -Force -Path $target | Out-Null
           Set-Content -LiteralPath (Join-Path $target 'SKILL.md') -Value 'name: ipc'
           ./uninstall.ps1 -DryRun -Target $target
+
+      # Hostile-spelling matrix for the PowerShell guards. The step above is a happy-path
+      # dry-run only and cannot detect a guard bypass; three separate bypasses shipped while
+      # it was green. This suite is the sentinel for that class.
+      - name: PowerShell uninstaller dangerous-target sentinel
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./tests/test_uninstall_guard.ps1
