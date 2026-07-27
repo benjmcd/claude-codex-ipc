@@ -4,6 +4,56 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.1.10] — 2026-07-27
+
+Follow-on patch to v0.1.9. Adds a goal-setting instruction to every dispatch payload, removes the
+last surviving false-fallback string, and puts the release line's central invariant under test for
+the first time. Cut as a new immutable tag; `v0.1.8` and `v0.1.9` are not moved.
+
+### Added
+
+- **Dispatch payloads now instruct the receiver to set a `/goal` before starting work.** The
+  generated "How to use this file" preamble reads "Read the **Task** below, set your `/goal` to a
+  concise summary of it, then complete it in the associated workspace at:". Applies to every
+  wrapper-generated dispatch, file-drop and `--ipc` alike, since both consume the same payload
+  heredoc. `skills/ipc/examples/example-dispatch-payload.md` carries the identical change — that
+  file is manifest-covered, and letting it drift is the stale-mirror defect class v0.1.9 was cut to
+  close.
+- **First test coverage for the no-resend invariant.** `tests/test_router_contract.sh`'s
+  `run_wrapper_case` takes an optional fifth argument naming text that must NOT appear in the
+  wrapper's output; the `unknown` and `malformed` cases now assert the pickup line
+  (`FALLBACK -- file-drop is ready`) is absent. Until now nothing anywhere asserted that a
+  `confirmation=unknown` outcome suppresses pickup — the behavior this release line is named for.
+  The assertion was verified non-vacuous: arming it on the `no-client` case, where the pickup line
+  is legitimately printed, makes it fail.
+
+### Fixed
+
+- **The last false-fallback string.** The invalid-UUID diagnostic said the mechanism "falls back to
+  file-drop on any failure" — the sole tracked survivor of the overclaim v0.1.9 removed from five
+  documentation surfaces and a code comment, and doubly wrong at that exit because no envelope has
+  been written yet. It now states that nothing was written for the invocation and to rerun with a
+  valid conversationId or omit `--ipc`. `git grep "falls back to file-drop"` now returns zero.
+- **`handoff-template.md` preamble vs conditional field.** "Fill every field" contradicted the
+  relayed-authority field v0.1.9 added, which says to omit it entirely when inapplicable. The
+  preamble now reads "Fill every applicable field" and states that conditional fields are omitted.
+- **`--version` and `.claude-plugin/plugin.json` are both `0.1.10`.** Nothing binds them mechanically;
+  they are moved together by checklist. Noted so the next bump does not strand one.
+
+### Deliberately not changed
+
+- **Installed roots are still not propagated.** `~/.claude`, `~/.agents`, and `~/.codex` continue to
+  hold v0.1.8 bytes. The Claude `/ipc` route loads the source checkout
+  (`~/.claude/commands/ipc.md`), so it runs this release immediately; the installed copies are
+  reached only by a Codex-side skill invocation, of which the session history contains none.
+  Propagation is a separate owner decision — `install --force` deletes each target before copying
+  the 24-file allowlist, which would remove 13 files / 193,121 bytes of test residue per root.
+- Envelope-before-foreground-validation ordering, unbounded Git context enrichment (dormant, not
+  fixed), zero-byte reply certification, and unbound explicit `--reply-path` all remain as disclosed
+  in v0.1.9.
+- `docs/TROUBLESHOOTING.md:23`, the help/version branch's lack of contract-audit coverage, and the
+  wait-hint doc divergence remain open and are recorded here rather than silently carried.
+
 ## [0.1.9] — 2026-07-27
 
 Documentation-coherence patch. **No runtime behavior changes** except one new effect-free

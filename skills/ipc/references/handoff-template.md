@@ -1,6 +1,7 @@
 # Handoff / delegation template
 
-A reusable schema so a delegated lane — a subagent, a Codex session via `/ipc`, or a parallel Claude session — is self-contained and needs no follow-up steering. Fill every field; if one is genuinely N/A, write "N/A" rather than leaving it blank.
+A reusable schema so a delegated lane — a subagent, a Codex session via `/ipc`, or a parallel Claude session — is self-contained and needs no follow-up steering. Fill every applicable field; if one is genuinely N/A, write "N/A" rather than leaving it blank.
+Fields marked conditional are omitted entirely when they do not apply.
 
 Per the `/ipc` workspace-scoping rule, place the FILLED handoff inside the associated repo/worktree (never in a global temp / Downloads / Desktop path). This file is the blank reference schema, not a filled handoff.
 

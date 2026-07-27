@@ -77,7 +77,7 @@ case "${1:-}" in
         exit 0
         ;;
     -v|--version)
-        printf '%s\n' 'handoff_to_codex.sh 0.1.9'
+        printf '%s\n' 'handoff_to_codex.sh 0.1.10'
         exit 0
         ;;
 esac
@@ -222,8 +222,9 @@ case "${1:-}" in
         MODE="ipc"; shift
         if ! is_uuid "${1:-}"; then
             echo "ERROR: --ipc requires a conversationId (UUID): $0 --ipc <conversationId> \"task\"" >&2
-            echo "Find the id in the Codex Desktop thread, or via state inspection. Mechanism injects" >&2
-            echo "straight into that live GUI thread; falls back to file-drop on any failure." >&2
+            echo "Find the id in the Codex Desktop thread, or via state inspection. Nothing was" >&2
+            echo "written for this invocation; rerun with a valid conversationId, or omit --ipc" >&2
+            echo "to use file-drop." >&2
             exit 1
         fi
         IPC_CID="${1}"; shift
@@ -412,7 +413,8 @@ Generated: ${STAMP} on branch \`${BRANCH}\` (dispatch ${DISPATCH_ID})
 
 ## How to use this file
 You (Codex) have been handed follow-up work from a Claude Code session.
-Read the **Task** below and complete it in the associated workspace at:
+Read the **Task** below, set your \`/goal\` to a concise summary of it, then complete it
+in the associated workspace at:
   ${WORKDIR}
 When finished, write your reply/result to this per-dispatch reply file (create it):
   ${INBOUND}

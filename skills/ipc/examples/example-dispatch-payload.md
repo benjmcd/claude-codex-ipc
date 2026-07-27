@@ -6,7 +6,8 @@ Generated: 2026-01-01 12:00:00 UTC on branch `feature/example` (dispatch 1735732
 
 ## How to use this file
 You (Codex) have been handed follow-up work from a Claude Code session.
-Read the **Task** below and complete it in the associated workspace at:
+Read the **Task** below, set your `/goal` to a concise summary of it, then complete it
+in the associated workspace at:
   C:/path/to/your/project
 When finished, write your reply/result to this per-dispatch reply file (create it):
   C:/Users/<you>/.claude/ipc/<claude-session-id>/filedrop/1735732800-12345-0123456789abcdef.reply.md

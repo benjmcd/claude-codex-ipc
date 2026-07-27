@@ -185,7 +185,8 @@ EOF
 chmod +x "$NODE_STUB" "$STUB_BIN/powershell.exe" "$STUB_BIN/codex"
 
 run_wrapper_case(){
-  local scenario="$1" expected_rc="$2" expected_result="$3" label="$4"
+  # $5 (optional): text that MUST NOT appear in the wrapper's combined output.
+  local scenario="$1" expected_rc="$2" expected_result="$3" label="$4" forbidden="${5:-}"
   local case_root="$TMP/$scenario" output rc
   mkdir -p "$case_root/ipc" "$case_root/home"
   output="$(env \
@@ -200,7 +201,12 @@ run_wrapper_case(){
     bash "$WRAPPER" --ipc "$THREAD" "$TASK_TEXT" 2>&1)"
   rc=$?
   if [[ $rc -eq $expected_rc ]] && printf '%s\n' "$output" | grep -Fqx "$expected_result"; then
-    ok "$label"
+    if [[ -n "$forbidden" ]] && printf '%s\n' "$output" | grep -Fq "$forbidden"; then
+      no "$label (forbidden text present: $forbidden)"
+      printf '%s\n' "$output" | sed -n '1,30p'
+    else
+      ok "$label"
+    fi
   else
     no "$label (rc=$rc)"
     printf '%s\n' "$output" | sed -n '1,30p'
@@ -221,10 +227,12 @@ run_wrapper_case no-client 1 \
 # Reporting not-attempted here is what invited a duplicate dispatch.
 run_wrapper_case unknown 1 \
   "RESULT: failed-closed -- reason=router-pipe-failure -- confirmation=unknown" \
-  "unknown client failure is not misclassified as no-client-found"
+  "unknown client failure is not misclassified as no-client-found" \
+  "FALLBACK -- file-drop is ready"
 run_wrapper_case malformed 1 \
   "RESULT: failed-closed -- reason=router-pipe-failure -- confirmation=unknown" \
-  "malformed client failure fails closed as router-pipe-failure"
+  "malformed client failure fails closed as router-pipe-failure" \
+  "FALLBACK -- file-drop is ready"
 
 if [[ ! -s "$TOOL_LOG" ]]; then
   ok "sentinel invoked no Desktop, PowerShell, or Codex transport helper"
