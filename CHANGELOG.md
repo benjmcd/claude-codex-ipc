@@ -4,6 +4,157 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.1.11] — 2026-08-05
+
+**This release CHANGES DEFAULT BEHAVIOR.** The conservative *"No runtime behavior changes"*
+framing used for v0.1.9 and v0.1.10 does not apply and must not be reused here. From this tag on,
+every dispatch payload's three git-context sections are **bounded by default**. A dispatch from a
+dirty tree will carry a truncated `## Uncommitted changes` / `## Files changed vs <main>` /
+`## Commits on this branch` section where it previously carried the whole thing, and the file-drop
+success path can now write to **stderr**, which it never did before. `CODEX_IPC_GIT_CONTEXT=full`
+restores the previous payload byte-for-byte and is the supported rollback.
+
+### Changed — git-context sections are bounded by default (`CODEX_IPC_GIT_CONTEXT`)
+
+- The payload's `RECENT_COMMITS`, `DIFF_STAT` and `UNCOMMITTED` sections were interpolated raw,
+  with no ceiling. This was **disclosed twice and deliberately deferred** — v0.1.9's notes call it
+  *"dormant, not fixed"* and v0.1.10 repeats the deferral — with an in-repo measured instance of
+  **230,175 B** of git context in a single dispatch, 97.16% of that session's stored envelope
+  bytes. Measured against the operator's own transport corpus it was not dormant at all: it fired
+  on **194 of 454** stored packets, continuously, through 2026-08-04.
+
+  `CODEX_IPC_GIT_CONTEXT` now gates it. `bounded` (**the default**) caps each section —
+  `GIT_CONTEXT_RECENT_COMMITS_MAX=4096`, `GIT_CONTEXT_DIFF_STAT_MAX=4096`,
+  `GIT_CONTEXT_UNCOMMITTED_MAX=8192` bytes, notice included — and appends an in-section notice
+  naming bytes kept, bytes total, lines omitted, and the **local** command that recovers the rest.
+  `full` disables the cap and reproduces the pre-0.1.11 payload byte-for-byte. There is no `none`
+  value: a heading that silently vanishes is exactly the failure this change exists to prevent.
+  An unrecognized value **soft-resolves** to `bounded` with one stderr note and an unchanged exit
+  code — the same never-refuse shape `CODEX_IPC_INCLUDE_TRANSCRIPT` already has.
+
+  The caps are **chosen ceilings, not derived ones**. The clean-tree corpus maximum of 12,198 B is
+  a whole-packet figure and was deliberately not reused as a section cap.
+
+- **The truncation is done in-shell on an already-captured variable, and this is the whole
+  engineering content of the change.** The obvious implementation — `git … | head -c N` — is a
+  silent-corruption bug in this script: `set -euo pipefail` turns the SIGPIPE that a short-reading
+  `head` sends git into a nonzero pipeline status, which fires the wrapper's `||` fallback chains.
+  `RECENT_COMMITS` would fall through to `git log --oneline -8` (all history, not branch-only) and
+  `DIFF_STAT` to `git diff --stat HEAD` (working tree, not vs the merge target): **different-but-
+  plausible content no reader could distinguish from the intended output.** `UNCOMMITTED` would
+  fall through to `""`, and its `${UNCOMMITTED:+…}` gate then **deletes the `## Uncommitted
+  changes` heading entirely** — the packet would not show an empty section, it would show no
+  evidence a dirty tree ever existed. Truncation therefore happens in `bound_git_section()`, which
+  has no git process on any pipeline's write end, cuts at a **line boundary** under a byte cap
+  (`local LC_ALL=C` gives `${#s}` and `${s:0:n}` byte rather than character semantics), and
+  reserves the notice's own bytes so the returned section never exceeds its cap.
+
+- **Falsifier discharged, by existence proof.** The bound is only safe if a receiving Codex session
+  can re-run git at its own `WORKDIR` and recover what was trimmed. Nobody had shown that.
+  Reply `~/.claude/ipc/2414bbfd-*/019f6ad7-9a72-*/1784297537-2035-da826d37908e277c.reply.md`
+  reports, in its "Final Git and cleanup state" section, in-sandbox `git status` branch output and
+  `git diff --check main..HEAD` executed by the receiver in its own workspace. That corpus is
+  operator-private and unreachable from CI, so the citation — not a test — is the record. Note the
+  exact command evidenced is `git diff --check`, not the `git diff --stat` the sections carry.
+
+- `skills/ipc/examples/example-dispatch-payload.md` is **unchanged and correct**: bounding adds no
+  heading and removes none, the notice is body text, and the example was generated against a clean
+  tree. `tests/test_payload_mirror_parity.sh` now pins `CODEX_IPC_GIT_CONTEXT` explicitly in both
+  renders (unset for minimal, `full` for maximal) per its own stated contract that every knob the
+  payload reads is pinned, and stays green under both.
+
+### Added — two non-fatal payload advisories (stderr only)
+
+- A dispatch whose payload reaches **102,400 B** now prints one stderr warning naming the byte
+  count, the largest git-context section, the task-text size, and **local** remedies only
+  (`git commit` / `git stash`, or the `CODEX_IPC_GIT_CONTEXT` knob). It never suggests
+  re-dispatching or asking the dispatcher: by the time it fires, the operator running the wrapper
+  *is* the dispatcher. The threshold is not arbitrary — **0 of 454** stored packets fall between
+  100 KB and 200 KB, so it produces no false positive anywhere in the observed corpus. This option
+  saves **zero bytes** by construction; it routes the operator to the only remedy that actually
+  moves a 200 KB mean, which no code change delivers.
+
+- A task that embeds a **whole prior handoff** (both the `# Handoff from Claude Code -> Codex`
+  title and a `## How to use this file` section) now warns as well. A task merely mentioning
+  "handoff", or quoting **one** marker, does not. This is a warning and not a refusal on purpose:
+  envelope-publication-before-foreground-validation is a deliberate invariant this project has
+  twice chosen to keep, a refusal firing after the envelope write would save nothing, and one
+  firing before it would modify that invariant.
+
+- **Both advisories are stderr-only, non-fatal, and leave the exit code and stdout untouched** —
+  asserted by `cmp` on stdout between the warning and non-warning paths. But note the real
+  consequence: the file-drop success path previously wrote **nothing** to stderr, and now can. A
+  consumer that treats any stderr as failure, or merges `2>&1` and parses the combined stream,
+  will observe a change.
+
+### Added — `tests/test_git_context_bound.sh` (DEFAULT_SUITES is now thirteen)
+
+Builds an oversized dirty git fixture in `mktemp` (`HOME` and `CODEX_IPC_ROOT` both redirected into
+it; file-drop only, never `--ipc`) and asserts 29 conditions: the three caps hold; the
+`## Uncommitted changes` heading is present **and** its body carries real status entries; each
+notice's omitted-line count matches fixture truth; every kept line is a **whole** line of the real
+`git status` output; the payload is valid UTF-8 end to end; `full` reproduces both the raw sections
+and — against the pre-bounding wrapper rendered from commit `2855e52` — the whole payload
+byte-for-byte modulo the per-dispatch nonce and timestamp; an unrecognized env value soft-resolves;
+and both advisories fire, and fail to fire, where they should.
+
+Verified non-vacuous: forcing `UNCOMMITTED` empty after bounding (the exact shape the SIGPIPE
+fallback produces) fails 6 assertions; deleting the line-boundary retreat fails the whole-line
+assertion. Recorded honestly in the suite header: the UTF-8 assertion did **not** fire under that
+second mutation — a raw byte cut only splits a character when the boundary lands inside one, which
+is fixture-dependent. The whole-line assertion is the deterministic catcher; UTF-8 is a backstop.
+
+### Added — cross-manifest agreement checks (`gen_release_manifest.sh cross-check`)
+
+Each frozen manifest was verified against **one** source and never against the others, so an
+asymmetric propagation, a root manifest built from a half-propagated root, or a stray file in one
+root and not another passed every gate. `check-all` now also cross-checks the committed bytes:
+`root-claude` ≡ `root-agents`; `root-codex`'s path set equals `final-runtime`'s modulo the
+`skills/ipc/` prefix (24/24); the three roots agree on every shared path's **hash**; and
+`root-claude`'s 13 extra rows are all `base-overlay` paths whose hashes match except **exactly**
+the three declared CRLF fixtures, asserted in both directions so the exception set cannot rot.
+Pure text over committed files, so it runs under `--no-roots` on CI too.
+
+One correspondence is deliberately **reported and not gated**: `root-codex` hashes against
+`final-runtime`. Root manifests are regenerated at *propagation* time, never at release time — repo
+precedent stated verbatim in the `6ca3ae2` and `f40183d` release commits — so between a release and
+its propagation the roots hold the previous release's bytes **by design**. Gating that would be red
+for the whole window and switched off within a week, the same trap a "regenerate at `HEAD` and
+diff" design would have set for the `final-*` pair. It prints `IN SYNC` or `PROPAGATION-PENDING`
+with the differing rows. At this tag it reads PROPAGATION-PENDING for one row
+(`scripts/handoff_to_codex.sh`); the three installed roots still hold v0.1.10 and are **not**
+propagated by this release.
+
+### Fixed — factual correction to the `2855e52` entry below
+
+The v0.1.11-adjacent entry below ("Two invariants that existed only as convention are now gated on
+CI") states *"46 overlay rows there against 48 at `HEAD` today"*. **The correct figure is 49, not
+48** — re-derived with `gen_release_manifest.sh gen --set final-overlay --ref 2855e52`. The
+historical text is left as written; this line is the correction. The point it was making (that the
+`final-*` pair does not track `HEAD` between releases) is unaffected.
+
+### Token-cost note (measured, not estimated)
+
+Figures in this entry are bytes. Where they are converted, the measured ratio on this corpus is
+**~3.5 B/token**, not the ~4 B/token rule of thumb: the 466,606 B payload class is **≈131.7k
+tokens**, where bytes-over-four would have said ≈116.7k. Do not divide bytes by four for this
+content.
+
+### Deliberately not changed
+
+- **No propagation.** The three installed roots (`~/.claude`, `~/.agents`, `~/.codex`) still hold
+  v0.1.10 and are untouched by this release; propagation is a separate act under separate
+  authority, after independent verification. `root-*.manifest` are therefore byte-unchanged, per
+  the precedent set by `6ca3ae2` and `f40183d`.
+- **No retention change**, and no change to the `--ipc` route, the reply contract, or any REQ anchor.
+- `v0.1.8`, `v0.1.9` and `v0.1.10` stay exactly where they are. No tag has ever been moved.
+
+---
+
+*Everything below this rule was staged as `[Unreleased]` before the 0.1.11 cut and ships in this
+release: the two CI gates added by `2855e52`, and the uninstaller dangerous-target guards and their
+sentinels. Section headings are as originally written.*
+
 ### Added
 
 - **Two invariants that existed only as convention are now gated on CI.** Both were

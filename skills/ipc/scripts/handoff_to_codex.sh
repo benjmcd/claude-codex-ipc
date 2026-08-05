@@ -38,6 +38,12 @@
 #                                      pairing ambiguity errs toward retention.
 #   CODEX_IPC_INCLUDE_TRANSCRIPT=1     include the Claude transcript path in the handoff payload
 #                                      (default: omitted; transcript paths expose full session context)
+#   CODEX_IPC_GIT_CONTEXT=bounded|full bound the payload's git-context sections. DEFAULT bounded:
+#                                      recent commits 4096 B, diffstat 4096 B, uncommitted 8192 B,
+#                                      each cut at a line boundary with an in-section notice naming
+#                                      what was omitted and how to get it locally. full restores the
+#                                      pre-0.1.11 unbounded sections byte-for-byte. An unrecognized
+#                                      value resolves to bounded with one stderr note (never a refusal).
 #   CODEX_REASONING_EFFORT=<level>     advisory note added to the handoff when set
 #   CODEX_IPC_FOREGROUND_POLICY=<p>    --ipc foreground policy default: defer|switch|restore-if-known
 #                                      (default defer; the --foreground-policy flag overrides)
@@ -77,7 +83,7 @@ case "${1:-}" in
         exit 0
         ;;
     -v|--version)
-        printf '%s\n' 'handoff_to_codex.sh 0.1.10'
+        printf '%s\n' 'handoff_to_codex.sh 0.1.11'
         exit 0
         ;;
 esac
@@ -175,6 +181,60 @@ atomic_write() {
 }
 
 is_uuid() { [[ "${1:-}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; }
+
+# Byte length of a string, independent of the caller's locale. `${#s}` counts CHARACTERS in
+# a multibyte locale, so every size decision below goes through here instead.
+byte_len() { local LC_ALL=C; printf '%s' "${#1}"; }
+
+# Bound one git-context section to a byte ceiling, cutting at a LINE boundary.
+#
+# The truncation happens HERE, on an already-captured variable, and never as `git ... | head`.
+# `set -euo pipefail` (:54) turns the SIGPIPE that a short-reading `head` sends git into a
+# nonzero pipeline status, which fires the `||` fallback chains in the gather block below:
+# RECENT_COMMITS and DIFF_STAT would silently fall through to `git log --oneline -8` (all
+# history, not branch-only) and `git diff --stat HEAD` (working tree, not vs the merge target)
+# -- different-but-plausible content a reader cannot tell from the intended output -- and
+# UNCOMMITTED would fall through to "", whose `${UNCOMMITTED:+...}` gate then deletes the
+# `## Uncommitted changes` heading outright, forging a clean tree. No pipeline in this function
+# has git on its write end, so none of that is reachable.
+#
+# `local LC_ALL=C` gives `${#text}` and `${text:0:n}` BYTE semantics and is restored on return.
+# The cut then retreats to the last newline, so no UTF-8 sequence is split (git porcelain output
+# is newline-delimited) and no path is ever printed half-formed. Space for the notice is
+# reserved up front, so the returned section -- body plus notice -- never exceeds <max-bytes>.
+#
+# Usage: bound_git_section <text> <max-bytes> <local-recovery-hint>   (echoes the bounded text)
+bound_git_section() {
+    local LC_ALL=C
+    local text="$1" max="$2" hint="$3"
+    local total=${#text} kept notice provisional reserve cut omitted total_lines kept_lines
+    if (( total <= max )); then
+        printf '%s' "$text"
+        return 0
+    fi
+    # Upper bound on the notice: every count is <= total, so no real notice is longer.
+    provisional="[... truncated at ${total} B of ${total} B; ${total} more line(s) omitted -- ${hint}]"
+    reserve=$(( ${#provisional} + 1 ))          # +1 for the newline that joins body and notice
+    cut=$(( max - reserve ))
+    if (( cut < 0 )); then cut=0; fi
+    kept="${text:0:cut}"
+    if [[ "$kept" == *$'\n'* ]]; then
+        kept="${kept%$'\n'*}"                   # retreat to the last COMPLETE line
+    else
+        kept=""                                 # first line already exceeds the budget: keep none
+    fi
+    # printf|wc reads its input to EOF, so pipefail has nothing to trip on here.
+    total_lines=$(printf '%s\n' "$text" | wc -l | tr -d ' ')
+    kept_lines=0
+    if [[ -n "$kept" ]]; then kept_lines=$(printf '%s\n' "$kept" | wc -l | tr -d ' '); fi
+    omitted=$(( total_lines - kept_lines ))
+    notice="[... truncated at ${#kept} B of ${total} B; ${omitted} more line(s) omitted -- ${hint}]"
+    if [[ -n "$kept" ]]; then
+        printf '%s\n%s' "$kept" "$notice"
+    else
+        printf '%s' "$notice"
+    fi
+}
 
 # Test seam: allow a hermetic unit test to SOURCE the helper functions (atomic_write,
 # to_win, uniq_hex, is_uuid) without running any dispatch. It is honored ONLY when the
@@ -362,6 +422,26 @@ INBOUND_MSYS="${CHANNEL_DIR}/${DISPATCH_ID}.reply.md"   # Codex -> Claude Code (
 OUTBOUND="$(to_win "$OUTBOUND_MSYS")"
 INBOUND="$(to_win "$INBOUND_MSYS")"
 
+# --- Git-context bounding policy (CODEX_IPC_GIT_CONTEXT) ---
+# bounded (DEFAULT since 0.1.11): each git-context section is capped, with an in-section
+#   truncation notice naming what was dropped and the LOCAL command that recovers it.
+# full: no cap; reproduces the pre-0.1.11 payload byte-for-byte. This is both the escape
+#   hatch and the rollback property, so it must keep working.
+# The caps are CHOSEN ceilings, not measured ones. An unrecognized value SOFT-RESOLVES to
+# bounded with one stderr note and an unchanged exit code -- the same shape as the
+# CODEX_IPC_INCLUDE_TRANSCRIPT gate below, which also never refuses on a bad value.
+GIT_CONTEXT_UNCOMMITTED_MAX=8192
+GIT_CONTEXT_DIFF_STAT_MAX=4096
+GIT_CONTEXT_RECENT_COMMITS_MAX=4096
+GIT_CONTEXT_MODE="${CODEX_IPC_GIT_CONTEXT:-bounded}"
+case "$GIT_CONTEXT_MODE" in
+    bounded|full) ;;
+    *)
+        echo "NOTE: CODEX_IPC_GIT_CONTEXT=\"${GIT_CONTEXT_MODE}\" is not a recognized value; using \"bounded\" (valid: bounded, full)." >&2
+        GIT_CONTEXT_MODE="bounded"
+        ;;
+esac
+
 # --- Gather git context (payload enrichment only; all optional) ---
 if [[ -n "$PROJECT_ROOT" ]]; then
     BRANCH=$(git branch --show-current 2>/dev/null || echo "unknown")
@@ -378,6 +458,15 @@ else
     BRANCH="(not in a git repository)"; MAIN_BRANCH="main"
     STAMP=$(date '+%Y-%m-%d %H:%M:%S %Z' 2>/dev/null || echo "unknown time")
     RECENT_COMMITS="(no repository context)"; DIFF_STAT="(no repository context)"; UNCOMMITTED=""
+fi
+# Applied AFTER capture, to both branches (a no-op on the short not-a-repo strings).
+if [[ "$GIT_CONTEXT_MODE" == "bounded" ]]; then
+    RECENT_COMMITS="$(bound_git_section "$RECENT_COMMITS" "$GIT_CONTEXT_RECENT_COMMITS_MAX" \
+        "run \`git log --oneline ${MAIN_BRANCH}..HEAD\` in the workspace above for the rest")"
+    DIFF_STAT="$(bound_git_section "$DIFF_STAT" "$GIT_CONTEXT_DIFF_STAT_MAX" \
+        "run \`git diff --stat ${MAIN_BRANCH}\` in the workspace above for the rest")"
+    UNCOMMITTED="$(bound_git_section "$UNCOMMITTED" "$GIT_CONTEXT_UNCOMMITTED_MAX" \
+        "run \`git status --short\` in the workspace above for the rest")"
 fi
 EFFORT_NOTE=""
 [[ -n "${CODEX_REASONING_EFFORT:-}" ]] && EFFORT_NOTE="
@@ -455,6 +544,46 @@ When you reply in ${INBOUND}, include your Codex session/conversation id if it i
 you. (If it is not exposed to you, that is fine: for --ipc handoffs Claude already knows it as the
 conversationId, and can otherwise locate your rollout under ~/.codex/sessions/ by this handoff.)
 EOF
+
+# --- Payload advisories (non-fatal; STDERR ONLY; exit code unchanged) ---
+# Nothing here alters the payload, the envelope, or stdout: stdout is machine-parsed, so a
+# byte of contamination is a contract break. NOTE that this makes success-path stderr
+# non-empty for the first time on the file-drop path; a consumer that merges 2>&1 will see it.
+#
+# The remedies named are LOCAL ones only. By the time this fires the operator running the
+# wrapper IS the dispatcher, so "re-dispatch" or "ask the dispatcher" would be advice to
+# nobody; only committing/stashing the tree, trimming the task, or changing the git-context
+# mode actually moves the number.
+PAYLOAD_WARN_BYTES=102400
+PAYLOAD_BYTES="$(byte_len "$PAYLOAD")"
+if (( PAYLOAD_BYTES >= PAYLOAD_WARN_BYTES )); then
+    DOM_SECTION="Commits on this branch"
+    DOM_BYTES="$(byte_len "$RECENT_COMMITS")"
+    SEC_BYTES="$(byte_len "$DIFF_STAT")"
+    if (( SEC_BYTES > DOM_BYTES )); then DOM_SECTION="Files changed vs ${MAIN_BRANCH}"; DOM_BYTES="$SEC_BYTES"; fi
+    SEC_BYTES="$(byte_len "$UNCOMMITTED")"
+    if (( SEC_BYTES > DOM_BYTES )); then DOM_SECTION="Uncommitted changes"; DOM_BYTES="$SEC_BYTES"; fi
+    TASK_BYTES="$(byte_len "$TASK")"
+    {
+        printf 'WARNING: handoff payload is %s B (advisory threshold %s B). Largest git-context section: "%s" (%s B); task text %s B.\n' \
+            "$PAYLOAD_BYTES" "$PAYLOAD_WARN_BYTES" "$DOM_SECTION" "$DOM_BYTES" "$TASK_BYTES"
+        if [[ "$GIT_CONTEXT_MODE" == "full" ]]; then
+            printf '         Git context is UNBOUNDED here (CODEX_IPC_GIT_CONTEXT=full). Local remedies: commit or stash the working tree (git commit / git stash), or unset CODEX_IPC_GIT_CONTEXT to restore the bounded default.\n'
+        else
+            printf '         Git context is already bounded (CODEX_IPC_GIT_CONTEXT=bounded), so the bulk is elsewhere. Local remedies: commit or stash the working tree (git commit / git stash), or shorten the task text.\n'
+        fi
+        printf '         The envelope is published either way; this is advisory only.\n'
+    } >&2
+fi
+# Nested handoff: the task text carries a whole earlier payload. Both markers are required --
+# one alone (or prose mentioning "handoff") is ordinary task text and must not warn.
+if [[ "$TASK" == *'# Handoff from Claude Code -> Codex'* && "$TASK" == *'## How to use this file'* ]]; then
+    {
+        printf 'WARNING: the task text appears to embed a full prior handoff payload (it carries both the "# Handoff from Claude Code -> Codex" title and a "## How to use this file" section).\n'
+        printf '         The receiver will then see two sets of instructions and two reply paths, and the inner one is stale. Local remedy: pass the task itself, or the absolute path of the earlier envelope, instead of its full text.\n'
+        printf '         The envelope is published either way; this is advisory only.\n'
+    } >&2
+fi
 
 # --- FILE-DROP (default) ---
 if [[ "$MODE" == "filedrop" ]]; then

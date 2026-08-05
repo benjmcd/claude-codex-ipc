@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # CANON-RUNNER (NEXT-STEPS §5.2) — OS-aware release gate runner + checker.
 #
-# Runs all DEFAULT_SUITES (currently twelve), tests/scan_public_safety.sh, and the static
+# Runs all DEFAULT_SUITES (currently thirteen), tests/scan_public_safety.sh, and the static
 # contract audit SEQUENTIALLY. A run records every hard problem and FAILS if any suite:
 #   * exits nonzero; OR
 #   * emits an UNEXPECTED `^SKIP:` line (fail-on-SKIP); OR
@@ -32,7 +32,7 @@
 # attributed by ancestry and escapes the bound.
 #
 # Usage:
-#   run_release_gates.sh                 # all DEFAULT_SUITES (currently 12) + safety + contract audit
+#   run_release_gates.sh                 # all DEFAULT_SUITES (currently 13) + safety + contract audit
 #   run_release_gates.sh [suite ...]     # named suites + safety + contract audit
 #   run_release_gates.sh --no-safety [suite ...]  # skip safety only; contract audit still runs
 set -uo pipefail
@@ -67,6 +67,7 @@ export IPC_INSPECTOR_MS=25000
 
 DEFAULT_SUITES=(
   test_autoload_matrix.sh
+  test_git_context_bound.sh
   test_ipc.sh
   test_ipc_wait.sh
   test_payload_mirror_parity.sh

@@ -84,6 +84,7 @@ Foreground-policy grammar and full operational rules: [skills/ipc/SKILL.md](skil
 | `CODEX_IPC_ROOT` | `~/.claude/ipc` | Transport root for task/reply envelopes |
 | `CODEX_IPC_RETENTION_DAYS` | `0` (keep-only) | Unset/empty/`0` never delete; a positive integer prunes envelopes older than N days on next dispatch |
 | `CODEX_IPC_INCLUDE_TRANSCRIPT` | unset | `1` includes the Claude transcript path (default: omitted) |
+| `CODEX_IPC_GIT_CONTEXT` | `bounded` | `bounded` caps the payload's git-context sections (commits 4096 B, diffstat 4096 B, uncommitted 8192 B) at a line boundary with a truncation notice; `full` restores the pre-0.1.11 unbounded sections. Unrecognized values resolve to `bounded` with a stderr note |
 | `CODEX_IPC_AUTHORIZED_TEST_THREAD` | unset | Operator-owned test thread UUID exempt from `--allow-any-thread` |
 | `CODEX_IPC_FOREGROUND_POLICY` | `defer` | `--ipc` foreground policy: `defer`\|`switch`\|`restore-if-known` |
 | `CODEX_IPC_FOREGROUND_SWITCH_STANDING_APPROVAL` | unset | `1` = standing `switch` ack (printed every send; prefer the per-send flag) |
@@ -134,6 +135,6 @@ process can read and modify them).
 
 ## Status
 
-v0.1.10 · [MIT](LICENSE.md) · [benjmcd/claude-codex-ipc](https://github.com/benjmcd/claude-codex-ipc).
+v0.1.11 · [MIT](LICENSE.md) · [benjmcd/claude-codex-ipc](https://github.com/benjmcd/claude-codex-ipc).
 Re-run `codex_ipc_revalidate.mjs` after any Codex Desktop update. The live route and its bounded
 rollout observation remain experimental; `restore-if-known` remains fail-closed/unvalidated.

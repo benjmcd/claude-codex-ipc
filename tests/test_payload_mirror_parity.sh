@@ -101,7 +101,11 @@ unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
 
 # ---- render ------------------------------------------------------------------------------
 # Sets R_RC / R_OUT / R_FILE. Every environment knob the payload reads is pinned explicitly
-# so an inherited value from the caller's shell cannot change what is rendered.
+# so an inherited value from the caller's shell cannot change what is rendered. That includes
+# CODEX_IPC_GIT_CONTEXT: minimal unsets it (so the render exercises the shipped bounded
+# default), maximal pins `full`. Heading parity must hold under both, since bounding changes
+# section BODIES only and never adds, drops or renames a heading -- which is exactly the
+# property this suite is here to keep true.
 R_RC=0; R_OUT=""; R_FILE=""
 do_render() { # do_render <tag> <optional-env 0|1>
     # Separate declarations: `local` expands ALL of its words before it assigns any of
@@ -113,10 +117,11 @@ do_render() { # do_render <tag> <optional-env 0|1>
         R_OUT="$( cd "$FIX" && env HOME="$fakehome" CODEX_IPC_ROOT="$ipcroot" \
             CLAUDE_SESSION_ID="parity-fixture" CODEX_IPC_RETENTION_DAYS=0 \
             CODEX_IPC_INCLUDE_TRANSCRIPT=1 CODEX_REASONING_EFFORT=high \
+            CODEX_IPC_GIT_CONTEXT=full \
             bash "$WRAPPER" "$TASK_TEXT" 2>&1 )"
     else
         R_OUT="$( cd "$FIX" && env -u CODEX_IPC_INCLUDE_TRANSCRIPT -u CODEX_REASONING_EFFORT \
-            -u CLAUDE_TRANSCRIPT -u CLAUDE_CODE_SESSION_ID \
+            -u CLAUDE_TRANSCRIPT -u CLAUDE_CODE_SESSION_ID -u CODEX_IPC_GIT_CONTEXT \
             HOME="$fakehome" CODEX_IPC_ROOT="$ipcroot" \
             CLAUDE_SESSION_ID="parity-fixture" CODEX_IPC_RETENTION_DAYS=0 \
             bash "$WRAPPER" "$TASK_TEXT" 2>&1 )"

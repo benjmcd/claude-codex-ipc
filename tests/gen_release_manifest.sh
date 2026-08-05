@@ -27,7 +27,10 @@
 #   gen_release_manifest.sh check --root <dir>               --file <file>
 #   gen_release_manifest.sh freeze     # (re)generate all frozen base+root manifests + SHA256SUMS
 #   gen_release_manifest.sh check-all [--no-roots]
-#                                      # re-verify every frozen manifest + its recorded sha256
+#                                      # re-verify every frozen manifest + its recorded sha256,
+#                                      # then cross-check the manifests against each other
+#   gen_release_manifest.sh cross-check
+#                                      # the cross-manifest agreement checks alone (host-free)
 #
 # check-all --no-roots omits ONLY the re-derivation of the three installed-root inventories.
 # Those describe host-local directories (~/.claude, ~/.agents, ~/.codex) that do not exist on
@@ -201,6 +204,114 @@ cmd_freeze() {
   echo "recorded self-hashes -> release/manifests/MANIFEST-SHA256SUMS.txt"
 }
 
+# ---- committed-manifest cross-checks (host-independent; pure text) -----------------------
+# Every check above verifies ONE manifest against ONE source. Nothing verified that the seven
+# agree with EACH OTHER, so a root manifest regenerated from a half-propagated root, an
+# asymmetric propagation, or a stray file in one root and not another was invisible to every
+# gate. These checks read only committed bytes, so they also run on CI, including under
+# --no-roots (which drops only the re-derivation from host directories a runner does not have).
+#
+# SCOPE NOTE -- deliberate, and load-bearing. Root manifests are regenerated at PROPAGATION
+# time, never at release/rebind time. That is repo precedent, stated verbatim in the 6ca3ae2
+# and f40183d release commits ("root-* are byte-unchanged: the installed host roots still hold
+# v0.1.8 and were not propagated by this patch"). Between a release and its propagation the
+# roots therefore hold the PREVIOUS release's bytes BY DESIGN. A check demanding that
+# root-codex hashes equal final-runtime hashes would be red for that entire window and would be
+# switched off within a week -- precisely the trap a "regenerate at HEAD and diff" design would
+# have set for the final-* pair. So the hash equivalence GATED here is the one that holds in
+# both states: the three roots against each other, which are always propagated together. The
+# root-versus-release correspondence is measured and REPORTED, and never gates.
+#
+# The three fixture rows below are the sole declared hash exceptions: the installed copies are
+# CRLF on disk while git stores them LF, so their sha256 cannot equal the blob hash. The
+# exception set is asserted in BOTH directions, so it cannot silently grow or rot.
+DECLARED_ROOT_HASH_EXCEPTIONS='tests/fixtures/rollout/rollout-basic-11111111-1111-4111-8111-111111111111.jsonl
+tests/fixtures/rollout/rollout-nested-22222222-2222-4222-8222-222222222222.jsonl
+tests/fixtures/rollout/rollout-superseded-33333333-3333-4333-8333-333333333333.jsonl'
+
+cmd_cross_check() {
+  local rc=0 tmp t need n
+  [ $# -eq 0 ] || die "cross-check: takes no arguments (got '$1')"
+  for need in root-claude root-agents root-codex final-runtime base-overlay; do
+    [ -f "$MANIFEST_DIR/$need.manifest" ] || {
+      echo "CROSS FAIL: release/manifests/$need.manifest missing; cross-checks cannot run" >&2
+      return 1
+    }
+  done
+  t="$(printf '\t')"
+  tmp="$(mktemp -d)"
+
+  # C1 -- the two overlay roots are one inventory.
+  if cmp -s "$MANIFEST_DIR/root-claude.manifest" "$MANIFEST_DIR/root-agents.manifest"; then
+    echo "CROSS OK: root-claude.manifest and root-agents.manifest are byte-identical"
+  else
+    echo "CROSS FAIL: root-claude.manifest and root-agents.manifest diverged" >&2; rc=1
+  fi
+
+  # path<TAB>sha projections. Root paths are skill-relative; runtime paths carry skills/ipc/.
+  awk -F"$t" -v OFS="$t" '{p=$3; sub(/^skills\/ipc\//,"",p); print p,$2}' \
+    "$MANIFEST_DIR/final-runtime.manifest" | LC_ALL=C sort > "$tmp/final.map"
+  awk -F"$t" -v OFS="$t" '{print $3,$2}' "$MANIFEST_DIR/root-codex.manifest"   | LC_ALL=C sort > "$tmp/codex.map"
+  awk -F"$t" -v OFS="$t" '{print $3,$2}' "$MANIFEST_DIR/root-claude.manifest"  | LC_ALL=C sort > "$tmp/claude.map"
+  awk -F"$t" -v OFS="$t" '{print $3,$2}' "$MANIFEST_DIR/base-overlay.manifest" | LC_ALL=C sort > "$tmp/base.map"
+
+  # C2 -- root-codex carries exactly the runtime allowlist, by path.
+  if LC_ALL=C comm -3 <(cut -f1 "$tmp/final.map") <(cut -f1 "$tmp/codex.map") | grep -q .; then
+    echo "CROSS FAIL: root-codex path set differs from final-runtime (modulo the skills/ipc/ prefix):" >&2
+    LC_ALL=C comm -3 <(cut -f1 "$tmp/final.map") <(cut -f1 "$tmp/codex.map") >&2; rc=1
+  else
+    echo "CROSS OK: root-codex carries exactly the $(wc -l < "$tmp/codex.map" | tr -d ' ') final-runtime paths"
+  fi
+
+  # C3 -- the roots agree with each other on every shared path (version-independent: all three
+  # roots are propagated in one act, so this must hold whichever release they hold).
+  n=$(LC_ALL=C join -t"$t" -j 1 "$tmp/codex.map" "$tmp/claude.map" \
+        | awk -F"$t" '$2!=$3{print $1}' | grep -c . )
+  if [ "$n" -eq 0 ]; then
+    echo "CROSS OK: root-codex and root-claude agree on all $(wc -l < "$tmp/codex.map" | tr -d ' ') shared paths (hashes)"
+  else
+    echo "CROSS FAIL: root-codex and root-claude disagree on $n shared path(s):" >&2
+    LC_ALL=C join -t"$t" -j 1 "$tmp/codex.map" "$tmp/claude.map" | awk -F"$t" '$2!=$3{print "  "$1}' >&2
+    rc=1
+  fi
+
+  # C4 -- root-claude's extra rows are retained overlay residue: every one is a base-overlay
+  # path, and their hashes match base-overlay except exactly the declared CRLF fixtures.
+  LC_ALL=C comm -13 <(cut -f1 "$tmp/codex.map") <(cut -f1 "$tmp/claude.map") > "$tmp/extra.paths"
+  LC_ALL=C join -t"$t" -j 1 "$tmp/extra.paths" "$tmp/claude.map" > "$tmp/extra.map"
+  if [ "$(wc -l < "$tmp/extra.paths" | tr -d ' ')" -ne "$(wc -l < "$tmp/extra.map" | tr -d ' ')" ]; then
+    echo "CROSS FAIL: internal: could not resolve every extra root-claude path to a hash" >&2; rc=1
+  fi
+  if LC_ALL=C comm -23 "$tmp/extra.paths" <(cut -f1 "$tmp/base.map") | grep -q .; then
+    echo "CROSS FAIL: root-claude carries path(s) present in neither final-runtime nor base-overlay:" >&2
+    LC_ALL=C comm -23 "$tmp/extra.paths" <(cut -f1 "$tmp/base.map") | sed 's/^/  /' >&2; rc=1
+  else
+    echo "CROSS OK: all $(wc -l < "$tmp/extra.paths" | tr -d ' ') extra root-claude paths are base-overlay paths"
+  fi
+  LC_ALL=C join -t"$t" -j 1 "$tmp/extra.map" "$tmp/base.map" \
+    | awk -F"$t" '$2!=$3{print $1}' | LC_ALL=C sort > "$tmp/exceptions.actual"
+  printf '%s\n' "$DECLARED_ROOT_HASH_EXCEPTIONS" | LC_ALL=C sort > "$tmp/exceptions.declared"
+  if LC_ALL=C comm -3 "$tmp/exceptions.declared" "$tmp/exceptions.actual" | grep -q .; then
+    echo "CROSS FAIL: root-claude's hash exceptions against base-overlay are not the declared set:" >&2
+    LC_ALL=C comm -3 "$tmp/exceptions.declared" "$tmp/exceptions.actual" >&2; rc=1
+  else
+    echo "CROSS OK: root-claude's residue matches base-overlay except exactly the $(wc -l < "$tmp/exceptions.declared" | tr -d ' ') declared CRLF fixtures"
+  fi
+
+  # C5 -- REPORT ONLY (see SCOPE NOTE): how the roots stand against the current release.
+  n=$(LC_ALL=C join -t"$t" -j 1 "$tmp/codex.map" "$tmp/final.map" \
+        | awk -F"$t" '$2!=$3{print $1}' | grep -c . )
+  if [ "$n" -eq 0 ]; then
+    echo "CROSS NOTE: installed roots are IN SYNC with final-runtime (all paths+hashes match)"
+  else
+    echo "CROSS NOTE: installed roots are PROPAGATION-PENDING against final-runtime -- $n of $(wc -l < "$tmp/codex.map" | tr -d ' ') row(s) differ (expected between a release and its propagation):"
+    LC_ALL=C join -t"$t" -j 1 "$tmp/codex.map" "$tmp/final.map" | awk -F"$t" '$2!=$3{print "  "$1}'
+  fi
+
+  rm -rf "$tmp"
+  return $rc
+}
+
 cmd_check_all() {
   local rc=0 name kind val ref final_ref="" roots_arg=""
   while [ $# -gt 0 ]; do
@@ -236,6 +347,9 @@ cmd_check_all() {
   else
     echo "CHECK FAIL: MANIFEST-SHA256SUMS.txt missing" >&2; rc=1
   fi
+  # Cross-manifest agreement. Pure text over committed bytes, so it runs in BOTH modes --
+  # --no-roots does not weaken it, because it never touches a host directory.
+  cmd_cross_check || rc=1
   return $rc
 }
 
@@ -243,10 +357,11 @@ main() {
   [ $# -ge 1 ] || die "usage: gen_release_manifest.sh <gen|check|freeze|check-all> ..."
   local sub="$1"; shift
   case "$sub" in
-    gen)       cmd_gen "$@" ;;
-    check)     cmd_check "$@" ;;
-    freeze)    cmd_freeze "$@" ;;
-    check-all) cmd_check_all "$@" ;;
+    gen)         cmd_gen "$@" ;;
+    check)       cmd_check "$@" ;;
+    freeze)      cmd_freeze "$@" ;;
+    check-all)   cmd_check_all "$@" ;;
+    cross-check) cmd_cross_check "$@" ;;
     *) die "unknown subcommand '$sub'" ;;
   esac
 }
