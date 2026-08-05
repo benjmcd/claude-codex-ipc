@@ -6,6 +6,42 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **CI has been red on both platforms since `46cbd9b`, and the bash sentinel was the cause.**
+  `tests/test_uninstall_guard.sh` hardcoded one machine's checkout layout, so it failed 6/12 on
+  `ubuntu-latest` and 1/12 on `windows-latest`. Because it gates the job, **every step after it
+  was SKIPPED on every run since `46cbd9b`** — the static contract audit, the public-safety scan,
+  both installer dry-runs, and the PowerShell sentinel `46cbd9b` had just added. That sentinel
+  therefore never executed on CI once, which is the same class of gap it was written to close.
+
+  Three assertion classes encoded Windows path semantics with no precondition check:
+  the MSYS drive-root mount (`/c`), the admin-share UNC spellings, and the case-insensitivity
+  bypass. On a case-sensitive POSIX filesystem those spellings name nothing, so `uninstall.sh`
+  short-circuits at `rc=0 "Nothing to do"` on its not-present check — *before* the guard is
+  reached. Fail-closed and safe, but not a refusal, and asserting one there measures the
+  filesystem rather than the guard. Each now probes its own precondition and skips loudly.
+
+  The single Windows failure was the **UNC respelling of the source tree**, and it was a defect
+  in the test rather than a bypass of the guard. The target was built as `//localhost/c$` plus
+  `$ROOT` with a leading `/c` stripped — correct only for a checkout under `C:`. On the runner
+  (`$ROOT=/d/a/...`) the strip was a no-op and the result was a `c$`-share path naming a
+  `d`-drive location, a string that exists nowhere. The UNC form is now derived from `$ROOT`'s
+  own drive letter and probed for reachability, matching the treatment `6cadd4e` already applied
+  to the PowerShell leg. Where the spelling resolves, the `//*/*` arm refuses it as designed;
+  no guard behavior is changed by this commit and no guard gap was found.
+
+  Skip notes print as `  (SKIP: ...)`, never `^SKIP:` at column 0, which
+  `tests/run_release_gates.sh` treats as a hard gate failure outside its one allowlisted skip.
+  Windows loses no coverage: 17/17 still assert on an NTFS checkout.
+
+  Also corrected: the suite header claimed UNC behavior was "not constructible hermetically
+  without elevation" alongside junctions. UNC is constructible and is now asserted; the junction
+  half was separately wrong and is restated (`mklink /J` needs no elevation, so the
+  ancestor-reparse arm is testable and simply is not tested yet).
+
+- **`tests/run_release_gates.sh` mis-stated its own suite count** in two header comments
+  ("currently ten", "currently 10") while `DEFAULT_SUITES` has listed eleven since
+  `test_uninstall_guard.sh` was added. Comments only; no behavior change.
+
 - **Fourth and fifth guard bypasses, and the process defect behind all of them.** The
   dangerous-target guard was bypassable in two further spellings, both live until this change:
   a **forward-slash UNC** target (`//localhost/c$/dev/.../skills/ipc`) produced a full deletion
