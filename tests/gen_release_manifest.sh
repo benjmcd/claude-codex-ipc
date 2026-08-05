@@ -26,7 +26,15 @@
 #   gen_release_manifest.sh check --set  <...> [--ref <sha>] --file <file>
 #   gen_release_manifest.sh check --root <dir>               --file <file>
 #   gen_release_manifest.sh freeze     # (re)generate all frozen base+root manifests + SHA256SUMS
-#   gen_release_manifest.sh check-all  # re-verify every frozen manifest + its recorded sha256
+#   gen_release_manifest.sh check-all [--no-roots]
+#                                      # re-verify every frozen manifest + its recorded sha256
+#
+# check-all --no-roots omits ONLY the re-derivation of the three installed-root inventories.
+# Those describe host-local directories (~/.claude, ~/.agents, ~/.codex) that do not exist on
+# a CI runner, so re-deriving them there is not merely inconvenient, it is undefined. The
+# committed BYTES of root-*.manifest are still verified, because the MANIFEST-SHA256SUMS.txt
+# check below is unconditional and covers every manifest file. What --no-roots gives up is the
+# "manifest still matches the installed copy" claim, which only a real host can make.
 set -uo pipefail
 
 BASE_SHA="0fbd517fcfbe7c20d34f3ca96eb14624868961f2"
@@ -157,16 +165,20 @@ cmd_check() {
   rm -f "$tmp"; return 1
 }
 
-frozen_targets() {
+frozen_targets() { # frozen_targets [--no-roots]
   # name<TAB>kind<TAB>value<TAB>ref  (ref is used only by set kinds; base sets ignore
   # it and use BASE_SHA, final sets require it). The final pair is pinned to the tested
   # release commit recorded in release/manifests/FINAL_REF so check-all re-derives and
   # verifies them against that exact ref instead of leaving them unchecked.
+  local with_roots=1
+  [ "${1:-}" = "--no-roots" ] && with_roots=0
   printf 'base-runtime\tset\tbase-runtime\t\n'
   printf 'base-overlay\tset\tbase-overlay\t\n'
-  printf 'root-claude\troot\t%s\t\n' "$(root_dir_for root-claude)"
-  printf 'root-agents\troot\t%s\t\n' "$(root_dir_for root-agents)"
-  printf 'root-codex\troot\t%s\t\n'  "$(root_dir_for root-codex)"
+  if [ "$with_roots" -eq 1 ]; then
+    printf 'root-claude\troot\t%s\t\n' "$(root_dir_for root-claude)"
+    printf 'root-agents\troot\t%s\t\n' "$(root_dir_for root-agents)"
+    printf 'root-codex\troot\t%s\t\n'  "$(root_dir_for root-codex)"
+  fi
   local final_ref=""
   [ -f "$MANIFEST_DIR/FINAL_REF" ] && final_ref="$(tr -d ' \t\r\n' < "$MANIFEST_DIR/FINAL_REF")"
   if [ -n "$final_ref" ]; then
@@ -190,7 +202,13 @@ cmd_freeze() {
 }
 
 cmd_check_all() {
-  local rc=0 name kind val ref final_ref=""
+  local rc=0 name kind val ref final_ref="" roots_arg=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --no-roots) roots_arg=--no-roots; shift ;;
+      *) die "check-all: unknown arg '$1'" ;;
+    esac
+  done
   # Fail closed if a final manifest exists on disk but FINAL_REF does not: a missing
   # FINAL_REF would otherwise make frozen_targets silently omit the final-* semantic
   # checks, so a drifted final manifest could pass unverified.
@@ -207,7 +225,8 @@ cmd_check_all() {
     else
       cmd_check --"$kind" "$val" --file "$MANIFEST_DIR/$name.manifest" || rc=1
     fi
-  done < <(frozen_targets)
+  done < <(if [ -n "$roots_arg" ]; then frozen_targets --no-roots; else frozen_targets; fi)
+  [ -n "$roots_arg" ] && echo "NOTE: installed-root inventories not re-derived (--no-roots); their committed bytes are still hash-verified below"
   if [ -f "$MANIFEST_DIR/MANIFEST-SHA256SUMS.txt" ]; then
     if ( cd "$MANIFEST_DIR" && sha256sum -c MANIFEST-SHA256SUMS.txt ) >/dev/null 2>&1; then
       echo "CHECK OK: recorded manifest self-hashes match"

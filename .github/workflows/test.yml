@@ -18,6 +18,12 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history is REQUIRED by the release-manifest step below: the frozen
+          # manifests are re-derived from BASE_SHA and from the commit recorded in
+          # release/manifests/FINAL_REF, and neither is present in the default depth-1
+          # clone. A shallow checkout makes that step die "ref not found", not pass.
+          fetch-depth: 0
 
       - uses: actions/setup-node@v4
         with:
@@ -34,6 +40,8 @@ jobs:
           bash -n tests/test_rollout_reader.sh
           bash -n tests/test_reply_harvest.sh
           bash -n tests/test_session_inspect.sh
+          bash -n tests/test_payload_mirror_parity.sh
+          bash -n tests/gen_release_manifest.sh
           bash -n tests/test_router_contract.sh
           bash -n tests/test_ipc_wait.sh
           bash -n tests/test_wait_contract.sh
@@ -88,6 +96,25 @@ jobs:
 
       - name: Hermetic session-inspect tests
         run: bash tests/test_session_inspect.sh
+
+      - name: Hermetic payload/example mirror parity
+        # Renders a REAL file-drop payload from a throwaway git fixture (mktemp; HOME and
+        # CODEX_IPC_ROOT both redirected into it; never --ipc) and diffs its `## ` headings
+        # against skills/ipc/examples/example-dispatch-payload.md. The example claimed to
+        # mirror the wrapper and nothing enforced it. Run on BOTH legs: the wrapper renders
+        # Windows paths through cygpath on the Windows leg only.
+        run: bash tests/test_payload_mirror_parity.sh
+
+      - name: Release-manifest integrity
+        # Re-derives the frozen base-*/final-* manifests from their pinned refs and verifies
+        # release/manifests/MANIFEST-SHA256SUMS.txt. NOT a "regenerate at HEAD and diff"
+        # check: the final-* pair is deliberately frozen at FINAL_REF and does NOT track
+        # HEAD between releases, so re-deriving it at HEAD would be permanently red by
+        # design. --no-roots drops only the three host-local installed-root inventories,
+        # which cannot exist on a runner; their committed bytes are still hash-verified.
+        # Also the only check that the .gitattributes LF pin on release/manifests/ actually
+        # holds on a Windows checkout with core.autocrlf=true.
+        run: bash tests/gen_release_manifest.sh check-all --no-roots
 
       - name: Hermetic router-contract sentinel
         run: bash tests/test_router_contract.sh

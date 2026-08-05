@@ -4,6 +4,49 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **Two invariants that existed only as convention are now gated on CI.** Both were
+  verifiable by hand and neither was ever verified by a machine, so nothing distinguished
+  "still true" from "nobody looked".
+
+  *Release-manifest integrity.* `tests/gen_release_manifest.sh check-all` re-derives the
+  frozen manifests from their pinned refs and verifies `MANIFEST-SHA256SUMS.txt`. It had
+  never run on CI once — the only evidence it passed was a human saying so. It now runs on
+  both platforms. The obvious mechanism (regenerate at `HEAD`, `git diff --exit-code`) would
+  have been **wrong**: the `final-*` pair is deliberately frozen at the commit recorded in
+  `release/manifests/FINAL_REF` and does not track `HEAD` between releases (46 overlay rows
+  there against 48 at `HEAD` today, by design until a release rebinds it), so that gate would
+  have been red permanently and been disabled within a week. The check re-derives each
+  manifest against **its own** pinned ref instead, which is red only on real drift.
+
+  A new `check-all --no-roots` omits the three installed-root inventories, which describe
+  host-local directories (`~/.claude`, `~/.agents`, `~/.codex`) that do not exist on a
+  runner. Their committed bytes are still hash-verified — the `MANIFEST-SHA256SUMS.txt`
+  check is unconditional and covers every manifest file. What CI gives up is the "manifest
+  still matches the installed copy" claim, which only a real host can make; local
+  `check-all` is unchanged and still checks all seven.
+
+  This also required `fetch-depth: 0` on the checkout. The default depth-1 clone contains
+  neither `BASE_SHA` nor `FINAL_REF`, so the step would have died `ref not found`.
+
+  *Rendered-payload / example mirror parity.* `tests/test_payload_mirror_parity.sh` renders a
+  real file-drop payload from a throwaway git fixture (`mktemp`, with `HOME` and
+  `CODEX_IPC_ROOT` both redirected into it; never `--ipc`, no Codex process, no Desktop) and
+  diffs its `## ` headings against `skills/ipc/examples/example-dispatch-payload.md`. That
+  example claims to mirror what the wrapper emits and nothing enforced the claim; either side
+  could gain, lose or rename a section silently. A minimal render must match the example
+  exactly in both directions; a maximal render (dirty worktree, every optional env set) must
+  be a superset whose extras are all declared in the suite's allowlist together with the
+  variable that gates them — currently `## Uncommitted changes` (`UNCOMMITTED`) and
+  `## Suggested reasoning effort` (`CODEX_REASONING_EFFORT`). Each declared heading is also
+  asserted absent from the minimal render, so a conditional section that quietly became
+  unconditional fails here rather than drifting into the docs.
+
+  Comparison is on rendered text by construction: two headings interpolate `${MAIN_BRANCH}`,
+  so grepping the wrapper for heading literals cannot decide parity. The suite is in
+  `DEFAULT_SUITES` (now twelve) and on both CI legs.
+
 ### Fixed
 
 - **CI has been red on both platforms since `46cbd9b`, and the bash sentinel was the cause.**
