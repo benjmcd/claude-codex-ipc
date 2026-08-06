@@ -318,7 +318,8 @@ this branch`, `## Files changed vs <main>`, `## Uncommitted changes` — are **b
 - `full` removes the caps and reproduces the pre-0.1.11 payload byte-for-byte. Use it when the
   receiver cannot re-run git at the dispatch's workspace.
 - Any unrecognized value **soft-resolves** to `bounded` with one stderr note and an unchanged exit
-  code. There is no `none`: a heading that silently vanishes is the failure the bound prevents.
+  code. Unset and empty are not "unrecognized": both take the `bounded` default silently, with no
+  note. There is no `none`: a heading that silently vanishes is the failure the bound prevents.
 
 A payload of 102,400 B or more also prints one stderr advisory naming the dominant git-context
 section and local remedies (`git commit` / `git stash`, or this knob). Both are advisories on
@@ -359,6 +360,9 @@ stderr only; stdout and the exit code are unchanged, and neither is ever a refus
   exactly correlated rollout provide `source=rollout-fallback`; otherwise the view reports
   `source=none` with a visible reason. Source bodies are not assumed equal. Rollout-derived text is
   stdout-only: the viewer writes, locks, and creates nothing (not even the transport root).
+- Read replies through that view by default: it caps each body at `--max-bytes` (4096 B default) and
+  a truncated body names the full reply path. Open the raw `.reply.md` only when grading or
+  verification needs byte-exact content.
 - Do not modify global Codex config, account state, plugins, marketplace, thread archive state, or
   SQLite directly.
 - Keep all assertions scoped to the evidence actually inspected in the current run.

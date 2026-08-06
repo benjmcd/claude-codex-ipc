@@ -91,7 +91,7 @@ case "${1:-}" in
         exit 0
         ;;
     -v|--version)
-        printf '%s\n' 'handoff_to_codex.sh 0.1.12'
+        printf '%s\n' 'handoff_to_codex.sh 0.1.13'
         exit 0
         ;;
 esac
@@ -645,6 +645,10 @@ if [[ "$MODE" == "ipc" ]]; then
         echo "AMBIGUOUS -- a send was attempted and its outcome is UNKNOWN." >&2
         echo "The task may ALREADY be running in thread ${IPC_CID}." >&2
         echo "Do NOT resend. Inspect the thread first:" >&2
+        # FULL inspector output is deliberate here, NOT --summary: the summary re-truncates each
+        # recent item to 120 chars, which on the default transport root cuts the injected pickup
+        # line inside the conversationId and drops the trailing dispatch id -- the only token that
+        # answers "was it THIS envelope?" -- and it also clamps the requested 5-event tail to 3.
         echo "    node \"${SCRIPT_DIR}/codex_ipc_session_inspect.mjs\" --thread ${IPC_CID} --tail-events 5" >&2
         echo "The envelope is preserved at ${OUTBOUND} -- dispatch it only after" >&2
         echo "confirming the thread did not pick it up." >&2

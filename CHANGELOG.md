@@ -4,6 +4,78 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.1.13] — 2026-08-05
+
+**No runtime behavior change, and no new test.** Every change here is instructional prose, one
+source comment, and the version strings. No script's control flow, output bytes, or exit codes
+move; the 13 hermetic suites are unchanged in count and content.
+
+### Changed — the handoff template reports large payloads by reference (O6-A, broadened)
+
+- The template's completion contract governed *when* a reply is written but said nothing about
+  *how much* of a large result to put in it, so producers transcribed material that already
+  existed on disk. The new **Reply evidence format** field generalizes the rule past replies to a
+  payload of **any** kind — long evidence blocks, diffs, file dumps, command logs: report the
+  path, the **base anchor** it is measured against (base commit SHA, or a pre-image hash where
+  nothing is committed), the **post-image SHA-256**, and a stat/summary line, plus a byte-bounded
+  inline excerpt large enough to judge the result.
+
+- **The escape hatch stays explicit**, because the case that needs it is observed, not
+  hypothetical: full inline content is still correct when the payload **is** the deliverable, or
+  when no on-disk artifact exists to point at — the denied reply write, where a sandbox or
+  worktree boundary blocked the write and the final agent message is the only carrier. Narrowing
+  that would have converted a documented recovery path into a contract violation.
+
+- The clause is placed as a **new field** rather than an edit to the completion contract, so the
+  REQ-018 phrases the contract audit greps byte-for-byte (`Denied reply write`, `attempt to write
+  the printed reply path exactly once`, `the full substantive result`) are untouched by
+  construction. `codex_ipc_contract_audit.mjs` stays **19/19 evidenced** with a requirements block
+  that diffs empty against the pre-change run.
+
+### Changed — SKILL.md prefers the capped reply viewer for reply reading
+
+- A new invariant: read replies through `scripts/codex_ipc_replies.sh`, which caps each body at
+  `--max-bytes` (4096 B default) and, on truncation, prints the full reply path — so the
+  escalation target is already in front of the reader. Open the raw `.reply.md` only when grading
+  or verification needs byte-exact content. This changes no authority ordering: the reply file
+  remains primary and the view remains a read-only derived projection.
+
+### Fixed — two owner-verifier findings
+
+- **F-3 (`handoff_to_codex.sh`, ambiguous-send branch).** The stderr hint prints a full inspector
+  invocation, and the question was whether it should carry `--summary`. **It should not**, and the
+  reason is now a comment at the call site instead of tacit. Measured with the real inspector over
+  a synthetic rollout carrying the exact injected pickup line: the line is 160 chars, `--summary`
+  re-truncates each tail item to 120, and the cut lands **inside the conversationId** — the
+  trailing dispatch id, the only token that answers *"was it THIS envelope?"*, is dropped
+  (`dispatch id present in FULL: true / in SUMMARY: false`). `--summary` also clamps the hint's
+  requested 5-event tail to 3. Selection and candidate fields do survive the projection, but they
+  are not what disambiguates a resend; on a short transport root the id would survive and on the
+  default root it does not, and a check that is silently useful only sometimes is worse than a
+  verbose one in the branch whose whole purpose is resolving ambiguity.
+
+- **F-4 (SKILL.md, `CODEX_IPC_GIT_CONTEXT`).** The doc claimed "any unrecognized value
+  soft-resolves to `bounded` **with one stderr note**". The empty string never reaches that
+  branch: `${CODEX_IPC_GIT_CONTEXT:-bounded}` substitutes the default for unset **and** empty
+  alike, so an empty value resolves silently. Fixed in the wording, not the code — emitting a note
+  for empty would make an unset-equivalent value noisy for no gain.
+
+### Measurement provenance and the escalation trigger
+
+- **AC0 figures are the program's Stage-0 baseline, cited here and not re-derived by this
+  release:** **32.3% / 11.6%**, with **0 of 4** diff-bearing replies read through the capped
+  viewer. The derivation lives in the program record.
+
+- **This clause is prose, and prose is not a control.** The named FUTURES trigger: if verbatim
+  large payloads keep appearing in replies after this clause ships, escalate from instruction to
+  **a script-enforced cap** — the same progression the git-context sections took in v0.1.11, where
+  advisory wording was replaced by an actual bound. Recurrence is the trigger; a single violation
+  is not.
+
+- **Token-figure discipline is unchanged from v0.1.12:** this entry introduces no token counts,
+  and any magnitude quoted anywhere in this project remains an `o200k_base` **proxy**, never a
+  Claude count. Byte ratios and token ratios are not interconvertible.
+
 ## [0.1.12] — 2026-08-05
 
 **No default-behavior change.** Unlike v0.1.11, nothing about the shipped default output moves
