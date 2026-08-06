@@ -79,11 +79,19 @@ case "${1:-}" in
             '  the pickup line is printed only on a proven pre-send failure. After an ambiguous' \
             '  post-attempt result (confirmation=unknown) pickup is suppressed — do not resend.' \
             '  Transport root: ${CODEX_IPC_ROOT:-~/.claude/ipc}. Envelopes are kept by default.' \
-            '  --app/--open/--exec were removed in v0.1.8 (No Codex CLI).'
+            '  --app/--open/--exec were removed in v0.1.8 (No Codex CLI).' \
+            '' \
+            'GIT CONTEXT (CODEX_IPC_GIT_CONTEXT=bounded|full, default bounded):' \
+            '  bounded caps the payload git-context sections (commits 4096 B, diffstat 4096 B,' \
+            '  uncommitted 8192 B) at a whole-line boundary with an in-section notice naming what' \
+            '  was omitted and the LOCAL command that recovers it. full removes the caps and' \
+            '  reproduces the pre-0.1.11 payload byte-for-byte -- it is the rollback for that' \
+            '  default. An unrecognized value soft-resolves to bounded with one stderr note and an' \
+            '  unchanged exit code; there is no "none".'
         exit 0
         ;;
     -v|--version)
-        printf '%s\n' 'handoff_to_codex.sh 0.1.11'
+        printf '%s\n' 'handoff_to_codex.sh 0.1.12'
         exit 0
         ;;
 esac
@@ -216,6 +224,10 @@ bound_git_section() {
     provisional="[... truncated at ${total} B of ${total} B; ${total} more line(s) omitted -- ${hint}]"
     reserve=$(( ${#provisional} + 1 ))          # +1 for the newline that joins body and notice
     cut=$(( max - reserve ))
+    # The <= max guarantee holds for max >= reserve (~130 B at realistic totals); below that the
+    # clamp keeps the notice and the section EXCEEDS max. The three shipped caps clear reserve by
+    # ~30x, so the degenerate branch is unreachable in production -- but do not lower a cap toward
+    # reserve without re-deriving this.
     if (( cut < 0 )); then cut=0; fi
     kept="${text:0:cut}"
     if [[ "$kept" == *$'\n'* ]]; then

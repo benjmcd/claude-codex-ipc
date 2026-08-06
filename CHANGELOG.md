@@ -4,6 +4,113 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.1.12] — 2026-08-05
+
+**No default-behavior change.** Unlike v0.1.11, nothing about the shipped default output moves
+here: `codex_ipc_session_inspect.mjs` with no new flag emits the same bytes it emitted at
+`6cd5653`. The new `--summary` flag is opt-in at the call site, and the only call site changed is
+the `/ipc` preflight documented in `skills/ipc/SKILL.md`.
+
+### Added — `codex_ipc_session_inspect.mjs --summary`, the preflight projection
+
+- The `/ipc` preflight read the inspector's **entire** result object — a full 20-item rollout
+  tail with 600-char texts per item, the session_meta item, two open-ended count maps, the
+  boundary snapshot, and an **unbounded** candidate array that an ambiguous thread serializes
+  **twice** (`rollout.candidates` and `rollout.ambiguousCandidates` are the same array object).
+  Almost none of that is named by the SKILL.md paragraph that tells the agent what to read.
+
+  `--summary` prints the projection instead: the fields SKILL.md actually mandates, plus a
+  bounded 3-item rollout tail, a bounded 5-element candidate list, and the ambiguity/precondition
+  fields (`selection.status`/`.reason`/`.authority`/`.path`/`.candidateCount`/`.aliasCount`,
+  `candidatesAmbiguous`, `primary.parsedOk`). The **true** candidate total is never lost — it
+  stays at `selection.candidateCount`, and the omitted count is `candidateCount − length`, so the
+  cap invents no field.
+
+- **The projection is a field SUBSET, not a second computation.** For any argv `A`, `A --summary`
+  projects the same object `A` produces: every path exists at the identical path in the default
+  output and every shared scalar leaf carries the identical value, with three declared bounded
+  carve-outs (`recentItems` length and 5-of-7 keys; the candidate arrays' length and 3-of-6 keys;
+  the tail texts' 120-char re-truncation). Two structural rules keep that honest rather than
+  merely asserted: `--summary` sets exactly **one boolean** in `parseArgs`, and `projectSummary()`
+  **never receives `opts`** — a function that cannot see the parsing parameters is incapable of
+  shifting one. `--tail-events`, `--max-text-chars`, `--db`, `--sessions-root` and `--thread` all
+  keep their meaning, `readOnly: true` is untouched, and `ok`/the exit code are computed upstream.
+
+  The 120-char re-truncation reuses the existing `truncate()`, which normalizes whitespace and
+  then slices the **original** characters, so `truncate(truncate(s, 600), 120) === truncate(s, 120)`
+  — the mini-tail text equals what `--max-text-chars 120` would emit **without** `maxTextChars`
+  ever changing. `tests/test_session_inspect.sh` proves that against a real
+  `--max-text-chars 120` run rather than against the derivation alone.
+
+- **Measured, not estimated** (`tests/test_session_inspect.sh` scenarios 27–28, same-run
+  baselines): a 34-line rollout with mixed text sizes at `--tail-events 20` gives **2,918 B of
+  16,175 B (18%)**; a 12-candidate ambiguous thread gives **3,960 B of 18,811 B (21%)**.
+
+  The acceptance bars are **ratios (≤40% non-ambiguous, ≤50% ambiguous), not absolute byte
+  counts.** That is an amendment: the design dossier originally set 4,000 B / 6,000 B bars, and a
+  dual adversarial measurement audit found they were round numbers with no decision-need
+  derivation sitting at 8–10% margins — margins that could have forced cuts into the two safety
+  amendments (the bounded tail and the bounded candidate list) to satisfy an arbitrary number.
+  A ratio is tied to the savings claim itself, is immune to fixture-size drift, and is
+  tokenizer-independent. The rule that came with it: never cut a SKILL.md-mandated field, the
+  mini-tail, or the bounded candidate list — a breach with those intact means re-choose the bar.
+
+- **Token magnitudes are an `o200k_base` proxy, measured with `tiktoken`, not a Claude count.**
+  On the same fixture: full 16,092 B / 3,604 tok, summary 2,875 B / 861 tok. Note that the
+  **token** ratio (23.9%) is worse than the **byte** ratio (17.9%): the dropped material is
+  repetitive and tokenizes densely, so a byte saving overstates the token saving. Quote the byte
+  ratio, or quote the token ratio as a proxy — do not convert one into the other.
+
+- SKILL.md's preflight fence, `skills/ipc/examples/quickstart.md` and the README quickstart now
+  pass `--summary`. A flag nobody invokes saves nothing, so adoption is gated inside the same
+  acceptance criterion as the flag. **Line-number note for anything citing SKILL.md:** the new
+  paragraph is inserted after the field-mandate paragraph so `SKILL.md:121-139` (the field
+  mandate itself, cited by the plan, the addendum and the living record) does **not** renumber.
+  Everything from `### Send rule` onward shifts **+7** (`:141` → `:148`), and the new
+  `## Payload git context` section adds a further +19 below it.
+
+### Documented — `CODEX_IPC_GIT_CONTEXT` on both operator-read surfaces
+
+- v0.1.11 made bounded git context the default and `CODEX_IPC_GIT_CONTEXT=full` its rollback, but
+  documented the knob only in the README table and a source comment. It was absent from
+  `skills/ipc/SKILL.md` and from `handoff_to_codex.sh --help` — the two surfaces an operator or
+  agent actually reads at the moment they need it. Both now carry it: SKILL.md gains a
+  `## Payload git context` section covering `bounded`/`full`/soft-resolve and the 102,400 B
+  advisory, and `--help` gains a `GIT CONTEXT` block. The sole rollback switch for a
+  default-behavior change should not be discoverable only by reading the source.
+
+### Changed — test hardening (no runtime effect)
+
+- `bound_git_section()` carries a comment stating the condition under which its ≤ `max` guarantee
+  holds (`max >= reserve`, ~130 B at realistic totals) and that the three shipped caps clear
+  `reserve` by roughly 30×, so the degenerate clamp branch is unreachable in production. Comment
+  only; the function is byte-for-byte unchanged.
+
+- `tests/test_git_context_bound.sh`: every fixture commit subject is now multibyte-dense, and a
+  new assertion (2g) proves the recent-commits truncation boundary actually falls **between two
+  non-ASCII commit subjects**. Previously the fixture's only non-ASCII lived in file paths, so in
+  the one section whose content is commit subjects the UTF-8 assertion had nothing to catch. The
+  suite header now states the roles explicitly and non-reversibly: **2e (whole-line) is the
+  deterministic catcher, 2f (UTF-8) is a backstop that fires only when the cut lands inside a
+  multibyte sequence.** A new leg (7) re-runs the bound at git's **default** `core.quotepath`,
+  where `git status --short` C-escapes non-ASCII paths and the boundary lands elsewhere; the
+  other legs pin `core.quotepath=false` on purpose, which is the harder input but not the
+  configuration real operators run.
+
+- `tests/test_session_inspect.sh` grows from 25 to 36 assertions (scenarios 24–30). Scenario 24
+  is the one worth naming: it diffs the **default** emit against the `6cd5653` inspector across
+  12 (fixture × window) pairs at `--tail-events 1/5/20`, byte for byte, under exactly **one**
+  declared normalization (`generatedAt`, which is per-run by construction). That is not
+  ceremony — `handoff_to_codex.sh` greps the literal pretty-printed `"ok": false` / `"ok": true`
+  / `"archived": 1` out of a `--tail-events 1` inspector run, and any whitespace drift in the
+  default emit turns the unowned-thread auto-load into a fail-closed refusal. Scenario 24 also
+  asserts `6cd5653` **rejects** `--summary`, so "identical default" is not vacuously true.
+
+  Output stays pretty-printed at indent 2. Compact re-serialization of the summary was measured
+  (−24.9% tokens, 214 tok/invocation on the fixture above) and deliberately **not** adopted:
+  indent 0 would break those three literal greps, making a future default-flip a two-file change
+  with a fail-closed failure mode in the middle.
+
 ## [0.1.11] — 2026-08-05
 
 **This release CHANGES DEFAULT BEHAVIOR.** The conservative *"No runtime behavior changes"*

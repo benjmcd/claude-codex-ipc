@@ -32,9 +32,18 @@
 # the SIGPIPE fallback produces) fails 6 assertions including the heading/body conjunct; deleting
 # the line-boundary retreat and keeping the raw byte cut fails the whole-line assertion. The
 # UTF-8 assertion did NOT fire under that second mutation -- a raw byte cut only splits a
-# character when the boundary happens to land inside one, which is fixture-dependent. The
-# whole-line assertion is the deterministic catcher; the UTF-8 one is a backstop. Do not read a
-# green UTF-8 assertion as proof that byte-wise truncation would have been caught.
+# character when the boundary happens to land inside one, which is fixture-dependent.
+#
+# READ THE TWO ASSERTIONS THIS WAY, and do not swap their roles:
+#   * 2e (whole-line) is THE CATCHER. It is deterministic: a byte-wise cut leaves a partial line,
+#     and a partial line is never a whole line of the true git output, whatever bytes it carries.
+#   * 2f (UTF-8 validity) is a BACKSTOP ONLY. It fires solely when the cut lands inside a
+#     multibyte sequence, which depends on where the boundary happens to fall. A green 2f is NOT
+#     evidence that byte-wise truncation would have been caught -- 2e is that evidence.
+#   * 2g exists because a backstop over pure-ASCII content is not a backstop at all. It proves
+#     the boundary actually sits in non-ASCII text in the commits section, so 2f has something to
+#     back up there. Before 2026-08-05 the fixture's only non-ASCII lived in FILE PATHS, so the
+#     RECENT_COMMITS boundary -- whose content is commit subjects -- was pure ASCII.
 #
 # SAFETY: file-drop mode ONLY. Never --ipc, no Codex/Desktop/router process, no focus, no deep
 # link. CODEX_IPC_ROOT and HOME are both redirected into this suite's mktemp dir and the fixture
@@ -138,6 +147,9 @@ NCOMMITS=30
 # $'...' so the bytes reach the FILENAME; a plain "\xc3\xa9" in a redirect target is literal.
 MB_ACCENT=$'caf\xc3\xa9-r\xc3\xa9sum\xc3\xa9-module.js'
 MB_EURO=$'\xe2\x82\xac-pricing-table-component.js'
+# Multibyte filler for COMMIT SUBJECTS (2-byte and 3-byte sequences both represented), so the
+# recent-commits truncation boundary sits in non-ASCII text rather than in ASCII filler.
+MB_SUBJECT_FILL=$'--caf\xc3\xa9-r\xc3\xa9sum\xc3\xa9-\xe2\x82\xac-\xc3\xa9\xc3\xa8\xc3\xaa--'
 build_fixture() {
     mkdir -p "$FIX" || return 1
     git init -q "$FIX" >/dev/null 2>&1 || return 1
@@ -164,11 +176,14 @@ build_fixture() {
     git -C "$FIX" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main || return 1
     git -C "$FIX" checkout -q -b feature/bounding >/dev/null 2>&1 || return 1
     # Long subjects so `git log --oneline main..HEAD` clears its 4096 B cap in few commits.
+    # EVERY subject is multibyte-DENSE, so the RECENT_COMMITS cut necessarily lands between two
+    # non-ASCII lines (asserted in 2g). Sprinkling the fill through the subject rather than
+    # prefixing it once keeps the boundary in non-ASCII text wherever within a subject it falls.
     for ((i=0; i<NCOMMITS; i++)); do
         printf 'module.exports = function widget%03d() { return %d; };\n' "$i" $((i+1000)) \
             > "$FIX/src/module-group-$(printf '%03d' $((i/16)))-component-$(printf '%03d' "$i").js"
         git -C "$FIX" commit -q -am \
-            "fixture: committed change $(printf '%03d' "$i") -- a deliberately long subject line so that git log --oneline over this branch exceeds the recent-commits byte ceiling in few commits" \
+            "fixture: committed change $(printf '%03d' "$i") ${MB_SUBJECT_FILL} a deliberately long subject line ${MB_SUBJECT_FILL} so that git log --oneline over this branch ${MB_SUBJECT_FILL} exceeds the recent-commits byte ceiling ${MB_SUBJECT_FILL} in few commits" \
             >/dev/null 2>&1 || return 1
     done
     # Dirty the whole tree: this is the section that used to be unbounded.
@@ -306,14 +321,29 @@ if [[ -n "$BOUNDED_FILE" ]]; then
         printf '%s\n' "$STRAY" | head -3 | sed 's/^/      /'
     fi
 
-    # 2f. the whole payload is valid UTF-8 (the fixture puts multibyte paths at the boundary).
+    # 2f. the whole payload is valid UTF-8. BACKSTOP ONLY -- see the header: 2e is the catcher,
+    # and this fires only when the cut happens to land inside a multibyte sequence.
     if utf8_ok "$BOUNDED_FILE"; then
         ok "the bounded payload is valid UTF-8 end to end"
     else
         no "the bounded payload contains invalid UTF-8 -- a truncation split a multibyte sequence"
     fi
+
+    # 2g. the backstop has something to back up: the recent-commits boundary sits in non-ASCII
+    # text. Without this, 2f is structurally unable to fire in the one section whose content is
+    # commit subjects, and a green 2f would be reporting on the path sections alone.
+    KEPT_COM_N=$(grep -cv '^\[\.\.\. truncated at ' "$TMP/b-commits")
+    KEPT_COM_LAST="$(grep -v '^\[\.\.\. truncated at ' "$TMP/b-commits" | tail -1)"
+    FIRST_OMITTED_COM="$(sed -n "$((KEPT_COM_N+1))p" "$TMP/truth-commits")"
+    if [[ "$KEPT_COM_N" -gt 0 && -n "$FIRST_OMITTED_COM" ]] \
+       && printf '%s' "$KEPT_COM_LAST"     | LC_ALL=C grep -q '[^ -~]' \
+       && printf '%s' "$FIRST_OMITTED_COM" | LC_ALL=C grep -q '[^ -~]'; then
+        ok "the recent-commits cut falls between two non-ASCII commit subjects (kept ${KEPT_COM_N} lines)"
+    else
+        no "the recent-commits cut does not sit in non-ASCII text -- the UTF-8 backstop is vacuous there"
+    fi
 else
-    no "no bounded envelope to inspect; assertions 2a-2f skipped"
+    no "no bounded envelope to inspect; assertions 2a-2g skipped"
 fi
 
 # ---- 3. soft-resolution of an unrecognized value ---------------------------------------------
@@ -475,7 +505,54 @@ else
     no "the nesting advisory fired on a task merely mentioning 'handoff' (false positive)"
 fi
 
-# ---- 7. containment ---------------------------------------------------------------------------
+# ---- 7. the same bound under git's DEFAULT core.quotepath ------------------------------------
+# Every leg above pins core.quotepath=false so RAW multibyte path bytes reach the truncation
+# boundary -- deliberately the harder input for the cut, but NOT what a real operator runs. At
+# git's default, `git status --short` C-escapes each non-ASCII path byte (\303\251), which
+# LENGTHENS those lines and moves the boundary. The bound, the heading, and the whole-line
+# retreat must hold there too, so the suite exercises both configurations rather than only the
+# one it constructed. Ordered last: it mutates the fixture's git config.
+git -C "$FIX" config --unset core.quotepath >/dev/null 2>&1
+( cd "$FIX" && git status --short ) > "$TMP/truth-uncommitted-qp"
+if LC_ALL=C grep -q '\\3[0-7][0-7]' "$TMP/truth-uncommitted-qp"; then
+    ok "at default core.quotepath git escapes the non-ASCII paths (the leg below is not a rerun)"
+else
+    no "default core.quotepath produced no escaped path; this leg duplicates the quotepath=false one"
+fi
+do_render quotepath-default - "$SMALL_TASK"
+QP_FILE="$R_FILE"
+if [[ "$R_RC" -eq 0 && -n "$QP_FILE" ]]; then
+    ok "default-core.quotepath render exited 0 and published one envelope"
+else
+    no "default-core.quotepath render exited $R_RC / published '$QP_FILE'"
+fi
+if [[ -n "$QP_FILE" ]]; then
+    section_body "$QP_FILE" "## Uncommitted changes" > "$TMP/q-uncommitted"
+    Q_UNC=$(section_bytes "$TMP/q-uncommitted")
+    if [[ "$Q_UNC" -le "$EXPECT_UNCOMMITTED_MAX" ]] \
+       && grep -qax '## Uncommitted changes' "$QP_FILE" \
+       && [[ "$Q_UNC" -gt 0 ]] \
+       && grep -q '^\[\.\.\. truncated at ' "$TMP/q-uncommitted"; then
+        ok "at default core.quotepath the uncommitted section is bounded (${Q_UNC}/${EXPECT_UNCOMMITTED_MAX} B), kept, and noticed"
+    else
+        no "at default core.quotepath the uncommitted section is ${Q_UNC} B / heading or notice missing"
+    fi
+    grep -v '^\[\.\.\. truncated at ' "$TMP/q-uncommitted" > "$TMP/q-uncommitted-body"
+    QSTRAY="$(grep -Fxv -f "$TMP/truth-uncommitted-qp" "$TMP/q-uncommitted-body" 2>/dev/null)"
+    if [[ -z "$QSTRAY" ]]; then
+        ok "at default core.quotepath every kept line is still a whole line of the real git output"
+    else
+        no "at default core.quotepath a kept line is not a whole line of the real git output:"
+        printf '%s\n' "$QSTRAY" | head -3 | sed 's/^/      /'
+    fi
+    if utf8_ok "$QP_FILE"; then
+        ok "the default-core.quotepath payload is valid UTF-8 end to end"
+    else
+        no "the default-core.quotepath payload contains invalid UTF-8"
+    fi
+fi
+
+# ---- 8. containment ---------------------------------------------------------------------------
 ESCAPED=0
 while IFS= read -r f; do
     [[ -n "$f" ]] || continue

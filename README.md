@@ -39,7 +39,7 @@ Details, uninstall, Windows notes: [docs/INSTALL.md](docs/INSTALL.md).
 skills/ipc/scripts/handoff_to_codex.sh "review src/parser.js for edge cases"
 
 # 2. Live Desktop delivery (experimental): explicit UUID only — inspect first, then send
-node skills/ipc/scripts/codex_ipc_session_inspect.mjs --thread <conversation-id> --tail-events 20
+node skills/ipc/scripts/codex_ipc_session_inspect.mjs --thread <conversation-id> --tail-events 20 --summary
 skills/ipc/scripts/handoff_to_codex.sh --ipc <conversation-id> "run the failing test and fix it"
 
 # 3. Replies (read-only, newest first)
@@ -135,6 +135,6 @@ process can read and modify them).
 
 ## Status
 
-v0.1.11 · [MIT](LICENSE.md) · [benjmcd/claude-codex-ipc](https://github.com/benjmcd/claude-codex-ipc).
+v0.1.12 · [MIT](LICENSE.md) · [benjmcd/claude-codex-ipc](https://github.com/benjmcd/claude-codex-ipc).
 Re-run `codex_ipc_revalidate.mjs` after any Codex Desktop update. The live route and its bounded
 rollout observation remain experimental; `restore-if-known` remains fail-closed/unvalidated.

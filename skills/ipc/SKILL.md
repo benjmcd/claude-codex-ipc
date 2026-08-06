@@ -91,7 +91,7 @@ Run the read-only inspector (requires a Node.js version with `node:sqlite`; see
 [references/troubleshooting.md](references/troubleshooting.md)):
 
 ```bash
-node "${CLAUDE_SKILL_DIR}/scripts/codex_ipc_session_inspect.mjs" --thread <conversationId> --tail-events 20
+node "${CLAUDE_SKILL_DIR}/scripts/codex_ipc_session_inspect.mjs" --thread <conversationId> --tail-events 20 --summary
 ```
 
 If Codex Desktop or Codex CLI may have updated since the last proven IPC run, run the validate-only
@@ -137,6 +137,13 @@ wait/watch request, or management request. If the inspector
 is ambiguous, read the referenced rollout JSONL directly with targeted grep/tail before asking the
 user. Ask one concise question only when sending would risk interrupting or misdirecting the wrong
 thread.
+
+`--summary` is the preflight projection: the same computed object under the same parsing
+parameters, restricted to the fields named above plus a bounded 3-item rollout tail and a
+bounded candidate list (`selection.candidateCount` always states the true total). Read it
+whole — never pipe the preflight through `head`/`tail`. Re-run the identical command without
+`--summary` for the full object; that is the first escalation step, before reading the
+rollout JSONL directly.
 
 ### Send rule
 
@@ -297,6 +304,25 @@ session context that may include unrelated material. For `--ipc`, Claude already
 conversationId, which is the rollout id and can be used to find the full Codex JSONL transcript
 under `~/.codex/sessions/`. Use transcript pointers for orientation and verification, not for broad
 disclosure outside the local machine.
+
+## Payload git context
+
+Since v0.1.11 every `handoff_to_codex.sh` payload's three git-context sections — `## Commits on
+this branch`, `## Files changed vs <main>`, `## Uncommitted changes` — are **bounded by default**.
+`CODEX_IPC_GIT_CONTEXT` is the switch, and it is the **rollback** for that default:
+
+- `bounded` (the default) caps each section (recent commits 4096 B, diffstat 4096 B, uncommitted
+  8192 B), cuts at a whole-line boundary, and appends an in-section notice naming bytes kept,
+  bytes total, lines omitted, and the **local** command that recovers the rest at the receiving
+  workspace. Nothing is silently dropped: a bounded section never loses its heading.
+- `full` removes the caps and reproduces the pre-0.1.11 payload byte-for-byte. Use it when the
+  receiver cannot re-run git at the dispatch's workspace.
+- Any unrecognized value **soft-resolves** to `bounded` with one stderr note and an unchanged exit
+  code. There is no `none`: a heading that silently vanishes is the failure the bound prevents.
+
+A payload of 102,400 B or more also prints one stderr advisory naming the dominant git-context
+section and local remedies (`git commit` / `git stash`, or this knob). Both are advisories on
+stderr only; stdout and the exit code are unchanged, and neither is ever a refusal.
 
 ## Invariants
 

@@ -31,6 +31,13 @@ try {
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DEFAULT_TAIL_EVENTS = 20;
 const DEFAULT_MAX_TEXT_CHARS = 600;
+// --- `--summary` projection caps (O3) -------------------------------------------------------
+// These bound the ONLY two open-ended arrays the projection carries. They are projection-time
+// caps: they never reach parseArgs, inspectSession, parseRollout or inferActivitySignals, so
+// they cannot shift a parsing parameter. See projectSummary() for the S1 invariant.
+const SUMMARY_CANDIDATE_CAP = 5;
+const SUMMARY_TAIL_ITEMS = 3;
+const SUMMARY_TEXT_CHARS = 120;
 const THREAD_COLUMNS = [
   "id",
   "rollout_path",
@@ -59,6 +66,11 @@ Options:
   --thread <uuid>        Codex conversation/thread id to inspect. Required.
   --tail-events <n>      Number of recent JSONL events to include. Default: ${DEFAULT_TAIL_EVENTS}
   --max-text-chars <n>   Max extracted text chars per recent item. Default: ${DEFAULT_MAX_TEXT_CHARS}
+  --summary              Print the preflight PROJECTION of the same computed object under the
+                         same parsing parameters: the SKILL.md-mandated fields plus a bounded
+                         ${SUMMARY_TAIL_ITEMS}-item rollout tail and a bounded ${SUMMARY_CANDIDATE_CAP}-element candidate list
+                         (selection.candidateCount always states the true total). Re-run the
+                         identical command without --summary for the full object.
   --db <path>            State DB path. Default: %USERPROFILE%\\.codex\\state_5.sqlite
   --sessions-root <path> Sessions root. Default: %USERPROFILE%\\.codex\\sessions
   --help                 Show this help.
@@ -84,6 +96,9 @@ function parseArgs(argv) {
     maxTextChars: DEFAULT_MAX_TEXT_CHARS,
     dbPath: defaultCodexPath("state_5.sqlite"),
     sessionsRoot: defaultCodexPath("sessions"),
+    // S1 enforcement rule 1: `--summary` sets exactly ONE boolean and has no other parse-time
+    // effect. It is deliberately NOT a value-bearing option and never rewrites another field.
+    summary: false,
     help: false,
   };
 
@@ -104,6 +119,9 @@ function parseArgs(argv) {
         break;
       case "--sessions-root":
         opts.sessionsRoot = takeValue(argv, ++index, arg);
+        break;
+      case "--summary":
+        opts.summary = true;
         break;
       case "--help":
       case "-h":
@@ -692,6 +710,125 @@ function increment(counts, key) {
   counts[key] = (counts[key] || 0) + 1;
 }
 
+// --- `--summary`: the preflight projection (O3) ----------------------------------------------
+//
+// INVARIANT S1 -- SUMMARY IS A PARAMETER-IDENTICAL FIELD-SUBSET. For any argv A, the output of
+// `A --summary` is a projection of the SAME result object that A produces: every JSON path in
+// the summary exists at the identical path in the default output, and every scalar leaf at a
+// shared path carries the identical value, with exactly three declared bounded carve-outs:
+//   C-a  rollout.primary.recentItems -> the LAST <= SUMMARY_TAIL_ITEMS elements, 5 of 7 keys
+//        (envelopeType and turnId dropped; turn correlation is already projected as turnActivity).
+//   C-b  rollout.candidates / rollout.ambiguousCandidates -> the first <= SUMMARY_CANDIDATE_CAP
+//        elements, 3 of 6 keys (path/source/size). The TRUE total is never lost: it stays at
+//        rollout.selection.candidateCount, and the omitted count is candidateCount - length,
+//        so no new field is invented. There is deliberately no per-candidate `authority` key --
+//        none exists in the full output, and emitting one would break the subset invariant.
+//   C-c  recentItems[*].text -> re-truncated to SUMMARY_TEXT_CHARS. This is the ONLY value
+//        deviation, and it is self-evident (the existing "...[truncated]" marker). It is also
+//        provably parameter-free: truncate() normalizes whitespace and then slices the ORIGINAL
+//        characters, so for any n < m, truncate(truncate(s, m), n) === truncate(s, n) -- the
+//        outer slice can never read the inner marker, and the normalization is idempotent. The
+//        mini-tail text therefore equals what `--max-text-chars 120` would emit WITHOUT
+//        maxTextChars ever changing (which would also have altered sessionMeta and every
+//        non-tail item, and is the forbidden parameter shift).
+//
+// S1 enforcement rule 2 (structural): this projection is a PURE FUNCTION THAT NEVER RECEIVES
+// `opts`. It takes one argument, reads no fs/DB/env, and uses only module-level `truncate` plus
+// the three SUMMARY_* caps. A function that cannot see `opts` is structurally incapable of
+// shifting a parsing parameter, and inspectSession/readDbThread/findRolloutCandidates/
+// parseRollout/inferActivitySignals receive no branch at all. `ok` and the exit code are
+// computed upstream and are identical in both modes.
+//
+// The retained field set is mandated by SKILL.md's preflight paragraph (the "Use the inspector
+// output to identify:" paragraph). Any change here must keep tests/test_session_inspect.sh
+// scenario 25 green: it carries the mandated field list AND greps the mandating SKILL.md prose,
+// so a SKILL.md rewrite turns it red rather than letting the two drift apart silently. Scenario
+// 24 separately pins the DEFAULT emit byte-for-byte against the pre-flag inspector.
+function projectSummaryCandidate(candidate) {
+  return { path: candidate.path, source: candidate.source, size: candidate.size };
+}
+
+function projectSummaryItem(item) {
+  return {
+    line: item.line,
+    timestamp: item.timestamp,
+    payloadType: item.payloadType,
+    role: item.role,
+    text: truncate(item.text, SUMMARY_TEXT_CHARS),
+  };
+}
+
+function projectSummary(result) {
+  const db = result.dbThread || {};
+  const thread = db.thread || {};
+  const rollout = result.rollout || {};
+  const selection = rollout.selection || {};
+  const primary = rollout.primary || null;
+  const signals = result.activitySignals || {};
+  // Reads are unconditional and direct: a key absent from the source object projects to
+  // `undefined`, which JSON.stringify omits, so an absent path stays absent (never `null`).
+  return {
+    ok: result.ok,
+    mode: result.mode,
+    generatedAt: result.generatedAt,
+    threadId: result.threadId,
+    dbThread: {
+      exists: db.exists,
+      readOnlyOpenOk: db.readOnlyOpenOk,
+      thread: {
+        exists: thread.exists,
+        id: thread.id,
+        rolloutPath: thread.rolloutPath,
+        cwd: thread.cwd,
+        title: thread.title,
+        model: thread.model,
+        reasoningEffort: thread.reasoningEffort,
+        approvalMode: thread.approvalMode,
+        sandboxPolicy: thread.sandboxPolicy,
+        permissionProfileAdvisory: thread.permissionProfileAdvisory,
+        archived: thread.archived,
+      },
+      warnings: db.warnings,
+    },
+    rollout: {
+      candidates: (rollout.candidates || [])
+        .slice(0, SUMMARY_CANDIDATE_CAP)
+        .map(projectSummaryCandidate),
+      primary: primary && {
+        parsedOk: primary.parsedOk,
+        path: primary.path,
+        lineCount: primary.lineCount,
+        parsedCount: primary.parsedCount,
+        parseErrorCount: primary.parseErrorCount,
+        recentItems: (primary.recentItems || [])
+          .slice(-SUMMARY_TAIL_ITEMS)
+          .map(projectSummaryItem),
+      },
+      candidatesAmbiguous: rollout.candidatesAmbiguous,
+      ambiguousCandidates: (rollout.ambiguousCandidates || [])
+        .slice(0, SUMMARY_CANDIDATE_CAP)
+        .map(projectSummaryCandidate),
+      selection: {
+        status: selection.status,
+        reason: selection.reason,
+        authority: selection.authority,
+        path: selection.path,
+        candidateCount: selection.candidateCount,
+        aliasCount: selection.aliasCount,
+      },
+    },
+    activitySignals: {
+      lastTaskCompleteLine: signals.lastTaskCompleteLine,
+      terminalState: signals.terminalState,
+      lastUserMessageLine: signals.lastUserMessageLine,
+      lastAgentMessageLine: signals.lastAgentMessageLine,
+      maybeMidTurn: signals.maybeMidTurn,
+      turnActivity: signals.turnActivity,
+      conclusion: signals.conclusion,
+    },
+  };
+}
+
 async function main() {
   let opts;
   try {
@@ -709,7 +846,7 @@ async function main() {
   }
 
   const result = await inspectSession(opts);
-  console.log(JSON.stringify(result, null, 2));
+  console.log(JSON.stringify(opts.summary ? projectSummary(result) : result, null, 2));
   if (!result.ok) {
     process.exit(1);
   }

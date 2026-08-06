@@ -17,7 +17,7 @@ writes its reply to the printed per-dispatch `.reply.md` path.
 
 ```bash
 # 1. Inspect the target first (read-only; requires node:sqlite):
-node "${CLAUDE_SKILL_DIR}/scripts/codex_ipc_session_inspect.mjs" --thread <conversation-id> --tail-events 20
+node "${CLAUDE_SKILL_DIR}/scripts/codex_ipc_session_inspect.mjs" --thread <conversation-id> --tail-events 20 --summary
 
 # 2. Send via the wrapper (writes the file-drop fallback first):
 "${CLAUDE_SKILL_DIR}/scripts/handoff_to_codex.sh" --ipc <conversation-id> "run the failing test and fix it"
