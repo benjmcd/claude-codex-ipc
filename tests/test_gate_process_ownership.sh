@@ -166,10 +166,10 @@ echo "== T3: suite-spawned node processes must breach the peak bound =="
 T3OUT="$WORK/t3.out"
 PATH="$SHIM_SAFE:$PATH" "$BASH" "$RUNNER" --no-safety "$WORK/sentinel_spawn3.sh" >"$T3OUT" 2>&1
 T3RC=$?
-if [ "$T3RC" -ne 0 ] && grep -q "owned real-Node peak" "$T3OUT"; then
+if [ "$T3RC" -ne 0 ] && grep -q "owned-node-peak" "$T3OUT"; then
   t_pass "T3 gate FAILed on owned peak breach (rc=$T3RC)"
 else
-  t_fail "T3 expected gate FAIL with 'owned real-Node peak' breach; got rc=$T3RC"
+  t_fail "T3 expected gate FAIL with 'owned-node-peak' breach; got rc=$T3RC"
   sed 's/^/    T3| /' "$T3OUT"
 fi
 
