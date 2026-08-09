@@ -17,8 +17,8 @@
 #       the gate. Guards against an implementation that always measures 0.
 #   T4  mid-suite fail-closed: if enumeration starts failing while a suite is running,
 #       the runner must abort nonzero instead of degrading to a silent 0-measurement.
-#   T5  active monitor timeout: the exclusive runner self-test captures, kills, and reaps
-#       a descendant, emits named diagnostics, and returns within its bound.
+#   T5  active monitor timeout: the exclusive runner self-test captures, force-kills, and
+#       reaps a TERM-resistant descendant, emits named diagnostics, and returns within bound.
 #
 # Hermetic: all state under mktemp dirs; every node process spawned here is short-lived
 # and reaped on exit; no transport roots, no IPC, no installed-root access. Enumeration
@@ -196,7 +196,7 @@ else
 fi
 
 # ---- T5: active outer-monitor timeout kills/reaps captured descendants --------------------
-echo "== T5: active monitor timeout must kill/reap captured descendants =="
+echo "== T5: active monitor timeout must force-kill/reap a TERM-resistant descendant =="
 T5OUT="$WORK/t5.out"
 T5T0=$SECONDS
 "$BASH" "$RUNNER" --self-test-monitor >"$T5OUT" 2>&1

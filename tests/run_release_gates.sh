@@ -281,6 +281,18 @@ kill_owned_tree() {
   done
 }
 
+# Prints the retained POSIX PID subset that is still present. Timeout cleanup sends KILL to
+# each captured survivor at most once, then observes this original set so a reparented
+# descendant cannot disappear from ancestry accounting and produce a false clean result.
+live_captured_posix_pids() {
+  local pids="$1" pid
+  for pid in $pids; do
+    case "$pid" in ''|*[!0-9]*) continue;; esac
+    kill -0 "$pid" 2>/dev/null && printf '%s\n' "$pid"
+  done
+  return 0
+}
+
 # ---- SKIP classification -----------------------------------------------------------------
 # Returns 0 (allowed) only for the one declared platform-conditional skip.
 # skip_line_allowed <suite-basename> <skip-line> <rc>
@@ -302,6 +314,7 @@ MONITOR_EXPECT_TIMEOUT=0
 MONITOR_LAST_RC=0
 MONITOR_LAST_TIMEOUT=0
 MONITOR_LAST_CAPTURED=""
+MONITOR_LAST_CAPTURED_RESIDUAL=""
 MONITOR_LAST_RESIDUAL=0
 record_fail() { FAILURES+=("$1"); echo "  GATE FAIL: $1"; }
 
@@ -309,7 +322,7 @@ record_fail() { FAILURES+=("$1"); echo "  GATE FAIL: $1"; }
 run_monitored() {
   local label="$1"; shift
   local logf spid peak=0 owned t0 rc=0 timed_out=0 deadline remaining
-  local d0 drained=0 residual captured="" reasons=() skips sl text k0 skip_lines=()
+  local d0 drained=0 residual captured="" captured_residual="" live_captured="" reasons=() skips sl text k0 pid skip_lines=()
   [ "$#" -gt 0 ] || { record_fail "$label: rc=2 empty argv"; INFRA_FAILURE=1; return 2; }
   MONITOR_COUNTER=$((MONITOR_COUNTER + 1))
   logf="$RUNDIR/monitor-$MONITOR_COUNTER.log"
@@ -331,12 +344,25 @@ run_monitored() {
       timed_out=1; rc=124
       captured="$(owned_descendant_pids)" || enum_abort "timeout snapshot, $label" "$spid"
       echo "  MONITOR TIMEOUT: $label after ${deadline}s; captured descendant(s): ${captured:-<none>}" >&2
+      k0=$SECONDS
       kill_owned_tree "$captured" || true
       kill "$spid" 2>/dev/null || true
-      k0=$SECONDS
-      while kill -0 "$spid" 2>/dev/null && [ $((SECONDS - k0)) -lt "$KILL_DEADLINE_S" ]; do sleep 0.2; done
-      if kill -0 "$spid" 2>/dev/null; then kill -KILL "$spid" 2>/dev/null || true; fi
-      wait "$spid" 2>/dev/null || true
+      if is_windows; then
+        while kill -0 "$spid" 2>/dev/null && [ $((SECONDS - k0)) -lt "$KILL_DEADLINE_S" ]; do sleep 0.2; done
+        if kill -0 "$spid" 2>/dev/null; then kill -KILL "$spid" 2>/dev/null || true; fi
+        wait "$spid" 2>/dev/null || true
+      else
+        live_captured="$(live_captured_posix_pids "$captured")"
+        for pid in $live_captured; do kill -KILL "$pid" 2>/dev/null || true; done
+        if kill -0 "$spid" 2>/dev/null; then kill -KILL "$spid" 2>/dev/null || true; fi
+        wait "$spid" 2>/dev/null || true
+        while [ $((SECONDS - k0)) -lt "$KILL_DEADLINE_S" ]; do
+          captured_residual="$(live_captured_posix_pids "$captured")"
+          [ -z "$captured_residual" ] && break
+          sleep 0.2
+        done
+        captured_residual="$(live_captured_posix_pids "$captured")"
+      fi
       break
     fi
     sleep "$SAMPLE_INTERVAL_S"
@@ -357,27 +383,29 @@ run_monitored() {
   if [ "$drained" -ne 1 ] || [ "$residual" -ne 0 ]; then
     reasons+=("owned-descendant-residual=$residual>${POST_SUITE_DRAIN_S}s")
   fi
-  if [ -n "$MONITOR_SUITE" ]; then
-    skips="$(grep -nE '^SKIP:' "$logf" || true)"
-    if [ -n "$skips" ]; then
-      mapfile -t skip_lines <<<"$skips"
-      for sl in "${skip_lines[@]}"; do
-        text="${sl#*:}"
-        if skip_line_allowed "$MONITOR_SUITE" "$text" "$rc"; then
-          echo "  allowed platform-conditional skip: $text"
-        else
-          reasons+=("unexpected-SKIP=$text")
-        fi
-      done
-    fi
+  if [ -n "$captured_residual" ]; then
+    reasons+=("captured-descendant-residual=${captured_residual//$'\n'/,}>${KILL_DEADLINE_S}s")
+  fi
+  skips="$(grep -nE '^SKIP:' "$logf" || true)"
+  if [ -n "$skips" ]; then
+    mapfile -t skip_lines <<<"$skips"
+    for sl in "${skip_lines[@]}"; do
+      text="${sl#*:}"
+      if skip_line_allowed "$MONITOR_SUITE" "$text" "$rc"; then
+        echo "  allowed platform-conditional skip: $text"
+      else
+        reasons+=("unexpected-SKIP=$text")
+      fi
+    done
   fi
 
   MONITOR_LAST_RC="$rc"
   MONITOR_LAST_TIMEOUT="$timed_out"
   MONITOR_LAST_CAPTURED="$captured"
+  MONITOR_LAST_CAPTURED_RESIDUAL="$captured_residual"
   MONITOR_LAST_RESIDUAL="$residual"
   if [ "${#reasons[@]}" -gt 0 ]; then
-    if [ "$MONITOR_EXPECT_TIMEOUT" -eq 1 ] && [ "$timed_out" -eq 1 ] && [ "$residual" -eq 0 ]; then
+    if [ "$MONITOR_EXPECT_TIMEOUT" -eq 1 ] && [ "$timed_out" -eq 1 ] && [ "$residual" -eq 0 ] && [ -z "$captured_residual" ]; then
       echo "  MONITOR EXPECTED TIMEOUT: $label; descendants killed/reaped"
       return 124
     fi
@@ -407,7 +435,7 @@ run_monitor_self_test() {
   MONITOR_TIMEOUT_S=2
   MONITOR_EXPECT_TIMEOUT=1
   run_monitored "self-test hanging child" "$BASH_BIN" -c \
-    'sleep 30 & child=$!; printf "%s\n" "$child" >"$1"; wait "$child"' _ "$pidfile"
+    'trap "" TERM; sleep 30 & child=$!; printf "%s\n" "$child" >"$1"; wait "$child"' _ "$pidfile"
   local rc=$?
   MONITOR_EXPECT_TIMEOUT=0
   [ "$rc" -eq 124 ] || { echo "SELF-TEST-MONITOR FAIL: watchdog rc=$rc" >&2; return 1; }
@@ -419,6 +447,7 @@ run_monitor_self_test() {
   if kill -0 "$child" 2>/dev/null; then
     echo "SELF-TEST-MONITOR FAIL: captured descendant $child still alive" >&2; return 1
   fi
+  [ -z "$MONITOR_LAST_CAPTURED_RESIDUAL" ] || { echo "SELF-TEST-MONITOR FAIL: captured descendant residual" >&2; return 1; }
   [ "$MONITOR_LAST_RESIDUAL" -eq 0 ] || { echo "SELF-TEST-MONITOR FAIL: residual descendants" >&2; return 1; }
   [ $((SECONDS - t0)) -le $((MONITOR_TIMEOUT_S + KILL_DEADLINE_S + POST_SUITE_DRAIN_S + 3)) ] \
     || { echo "SELF-TEST-MONITOR FAIL: bounded return exceeded" >&2; return 1; }

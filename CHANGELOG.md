@@ -6,7 +6,7 @@ All notable changes to this project will be documented in this file.
 
 - Documentation and repository gates now enforce the UTF-8/LF text policy and documentation
   contracts. Intentional Unicode is retained. Primary dispatch behavior did not change, no fresh
-  live proof was performed, and no candidate, release, or installed propagation is implied.
+  live proof was performed, and no release or installed propagation is implied.
 
 ## [0.1.13] — 2026-08-05
 
