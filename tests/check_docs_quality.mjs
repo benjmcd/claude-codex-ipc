@@ -2388,9 +2388,9 @@ function runSelfTests() {
   });
   add("Diagnostics are deterministic deduped ASCII and one-line-per-record", () => {
     const raw = [
-      finding("DQ002", "b/\u96ea\t\n\\x", 2, "why\u2603\t"),
+      finding("DQ002", path.join("b", "\u96ea\t\n", "x"), 2, "why\u2603\t"),
       finding("DQ001", "a.md", 10, "alpha"),
-      finding("DQ002", "b/\u96ea\t\n\\x", 2, "why\u2603\t"),
+      finding("DQ002", path.join("b", "\u96ea\t\n", "x"), 2, "why\u2603\t"),
     ];
     const rendered = `${sortAndDedupe(raw).map(formatFinding).join("\n")}\n`;
     const expected = "DQ001 path=a.md line=10 reason=alpha\nDQ002 path=b/\\u96ea\\u0009\\u000a/x line=2 reason=why\\u2603\\u0009\n";
