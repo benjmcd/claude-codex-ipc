@@ -15,6 +15,31 @@
 4. **Hermetic tests only.** Tests must not require Codex Desktop, the Codex CLI, Claude state,
    `node:sqlite`, or the network. Stub external binaries the way `tests/test_ipc.sh` does.
 
+## Text policy and recovery
+
+Repository text is strict UTF-8 without a BOM, uses LF line endings, and ends with a final LF.
+Intentional Unicode is retained; do not normalize or automatically convert it. `.editorconfig`
+declares the editor policy, while `.gitattributes` makes Git normalize governed text to LF.
+
+Mojibake can mean valid UTF-8 displayed with the wrong decoder.
+Stored bytes can instead be invalid or corrupt, or valid UTF-8 can contain a known double-decoding signature.
+On Windows PowerShell 5.1, define the path before inspecting it:
+
+```powershell
+$Path = 'C:\path\to\file.md'
+Get-Content -Raw -Encoding UTF8 -LiteralPath $Path
+```
+
+PowerShell 5.1 `Set-Content -Encoding UTF8` writes a BOM. For BOM-free writes, use a configured
+UTF-8/LF editor, PowerShell 7 `utf8NoBOM`, or `.NET UTF8Encoding(false)`.
+
+Inspect raw bytes first, then apply strict UTF-8 decoding.
+If the bytes are valid, use the correct reader or editor and do not save the misrendered form.
+If the bytes are corrupt, restore or reconstruct from authoritative source; a reconstruction is allowed only when its reviewed byte-to-codepoint mapping is unambiguous.
+Then run index and worktree gates, then semantic tests.
+Never paste broken console text back into a file. There is no automatic transcoder. Preserve
+intentional Unicode; do not normalize or auto-convert it.
+
 ## Dev loop
 
 ```bash
@@ -23,18 +48,46 @@ bash -n skills/ipc/scripts/handoff_to_codex.sh
 bash -n skills/ipc/scripts/codex_ipc_replies.sh
 for f in skills/ipc/scripts/*.mjs; do node --check "$f"; done
 
-# behavior (hermetic)
-bash tests/test_ipc.sh
-bash tests/test_reply_view.sh
+# text policy
+node tests/check_text_integrity.mjs --self-test
+node tests/check_text_integrity.mjs --source index
+node tests/check_text_integrity.mjs --source worktree
+
+# documentation policy
+node tests/check_docs_quality.mjs --self-test
+node tests/check_docs_quality.mjs
+
+# complete repository runner
+bash tests/run_release_gates.sh
+
+# separate process-ownership meta-gate
+bash tests/test_gate_process_ownership.sh
 
 # public-safety scan
 bash tests/scan_public_safety.sh
 
 # static contract audit
 node skills/ipc/scripts/codex_ipc_contract_audit.mjs
+
+# frozen manifests without installed-root access
+bash tests/gen_release_manifest.sh check-all --no-roots
 ```
 
-On Windows, run the above through Git Bash.
+On Windows PowerShell, use this pinned, fail-closed Git Bash procedure:
+
+```powershell
+$GitBash = 'C:\Program Files\Git\bin\bash.exe'
+if (-not (Test-Path -LiteralPath $GitBash -PathType Leaf)) { throw 'Git Bash not found' }
+& $GitBash --version
+if ($LASTEXITCODE -ne 0) { throw 'Git Bash version check failed' }
+& $GitBash -lc 'command -v dirname >/dev/null && command -v git >/dev/null && command -v node >/dev/null && command -v sha256sum >/dev/null'
+if ($LASTEXITCODE -ne 0) { throw 'Git Bash tool preflight failed' }
+& $GitBash -lc 'bash tests/run_release_gates.sh'
+if ($LASTEXITCODE -ne 0) { throw 'release gates failed' }
+```
+
+External links are not fetched by the documentation gate. Hermetic gates do not prove live Codex
+Desktop behavior. Source-candidate commit validation, release rebind and annotated-tag validation, and installed-root propagation are separate states; none implies the next.
 
 ## Live-IPC changes
 

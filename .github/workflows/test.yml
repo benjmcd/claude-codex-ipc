@@ -29,35 +29,37 @@ jobs:
         with:
           node-version: "22"
 
+      - name: Bash and required-tool provenance
+        run: |
+          set -euo pipefail
+          command -v bash
+          bash --version
+          for tool in dirname git node sha256sum; do
+            command -v "$tool" >/dev/null || { echo "missing required tool: $tool" >&2; exit 2; }
+            command -v "$tool"
+          done
+
       - name: Shell syntax (bash -n)
         run: |
-          bash -n skills/ipc/scripts/handoff_to_codex.sh
-          bash -n skills/ipc/scripts/codex_ipc_replies.sh
-          bash -n tests/test_ipc.sh
-          bash -n tests/test_autoload_matrix.sh
-          bash -n tests/test_reply_view.sh
-          bash -n tests/test_retention_sweep.sh
-          bash -n tests/test_rollout_reader.sh
-          bash -n tests/test_reply_harvest.sh
-          bash -n tests/test_session_inspect.sh
-          bash -n tests/test_payload_mirror_parity.sh
-          bash -n tests/test_git_context_bound.sh
-          bash -n tests/gen_release_manifest.sh
-          bash -n tests/test_router_contract.sh
-          bash -n tests/test_ipc_wait.sh
-          bash -n tests/test_wait_contract.sh
-          bash -n tests/test_uninstall_guard.sh
-          bash -n tests/scan_public_safety.sh
-          bash -n install.sh
-          bash -n uninstall.sh
+          set -euo pipefail
+          count=0
+          while IFS= read -r -d '' f; do
+            echo "bash -n $f"
+            bash -n "$f"
+            count=$((count + 1))
+          done < <(git ls-files -z -- '*.sh')
+          [ "$count" -gt 0 ] || { echo "no tracked .sh files" >&2; exit 2; }
 
       - name: Node syntax (node --check)
         run: |
-          set -e
-          for f in skills/ipc/scripts/*.mjs; do
+          set -euo pipefail
+          count=0
+          while IFS= read -r -d '' f; do
             echo "node --check $f"
             node --check "$f"
-          done
+            count=$((count + 1))
+          done < <(git ls-files -z -- '*.mjs')
+          [ "$count" -gt 0 ] || { echo "no tracked .mjs files" >&2; exit 2; }
 
       - name: PowerShell parse check (autoload helper)
         # Parser-only (PSParser::Tokenize) — no execution. Windows leg only: the helper
@@ -67,7 +69,7 @@ jobs:
         shell: pwsh
         run: |
           $errors = $null
-          $null = [System.Management.Automation.PSParser]::Tokenize((Get-Content -Raw 'skills/ipc/scripts/codex_ipc_autoload.ps1'), [ref]$errors)
+          $null = [System.Management.Automation.PSParser]::Tokenize((Get-Content -Raw -Encoding UTF8 'skills/ipc/scripts/codex_ipc_autoload.ps1'), [ref]$errors)
           if ($errors) { $errors | ForEach-Object { Write-Error $_.Message }; exit 1 }
           Write-Output "PowerShell parse: clean"
 
@@ -114,17 +116,6 @@ jobs:
         # and that both new advisories stay on stderr with stdout byte-identical.
         run: bash tests/test_git_context_bound.sh
 
-      - name: Release-manifest integrity
-        # Re-derives the frozen base-*/final-* manifests from their pinned refs and verifies
-        # release/manifests/MANIFEST-SHA256SUMS.txt. NOT a "regenerate at HEAD and diff"
-        # check: the final-* pair is deliberately frozen at FINAL_REF and does NOT track
-        # HEAD between releases, so re-deriving it at HEAD would be permanently red by
-        # design. --no-roots drops only the three host-local installed-root inventories,
-        # which cannot exist on a runner; their committed bytes are still hash-verified.
-        # Also the only check that the .gitattributes LF pin on release/manifests/ actually
-        # holds on a Windows checkout with core.autocrlf=true.
-        run: bash tests/gen_release_manifest.sh check-all --no-roots
-
       - name: Hermetic router-contract sentinel
         run: bash tests/test_router_contract.sh
 
@@ -137,11 +128,81 @@ jobs:
       - name: Uninstaller dangerous-target sentinel
         run: bash tests/test_uninstall_guard.sh
 
+      - name: Text integrity self-test
+        run: node tests/check_text_integrity.mjs --self-test
+
+      - name: Text integrity index
+        run: node tests/check_text_integrity.mjs --source index
+
+      - name: Text integrity worktree
+        run: node tests/check_text_integrity.mjs --source worktree
+
+      - name: Documentation quality self-test
+        run: node tests/check_docs_quality.mjs --self-test
+
+      - name: Documentation quality repository
+        run: node tests/check_docs_quality.mjs
+
+      - name: Release-manifest integrity
+        # Re-derives frozen manifests without reading host-installed roots.
+        run: bash tests/gen_release_manifest.sh check-all --no-roots
+
+      - name: Process-ownership meta-gate
+        run: bash tests/test_gate_process_ownership.sh
+
       - name: Static contract audit
         run: node skills/ipc/scripts/codex_ipc_contract_audit.mjs
 
       - name: Public-safety scan
         run: bash tests/scan_public_safety.sh
+
+      - name: Full install.sh projection and installed docs/text policy
+        run: |
+          set -euo pipefail
+          temp_root="$RUNNER_TEMP"
+          if command -v cygpath >/dev/null 2>&1 && [[ "$temp_root" =~ ^[A-Za-z]:[\\/] ]]; then
+            temp_root="$(cygpath -u "$temp_root")"
+          fi
+          target="$temp_root/ipc-install-sh"
+          expected="$temp_root/ipc-install-sh-expected.manifest"
+          actual="$temp_root/ipc-install-sh-actual.manifest"
+          normalized="$temp_root/ipc-install-sh-normalized.manifest"
+          [ ! -e "$target" ] || { echo "install.sh target already exists" >&2; exit 2; }
+          ./install.sh --target "$target"
+          node tests/check_docs_quality.mjs --installed-root "$target"
+          bash tests/gen_release_manifest.sh gen --set final-runtime --ref HEAD --out "$expected"
+          bash tests/gen_release_manifest.sh gen --root "$target" --out "$actual"
+          awk -F '\t' 'BEGIN { OFS="\t" } { sub(/^skills\/ipc\//, "", $3); print "N/A", $2, $3 }' "$expected" >"$normalized"
+          diff -u "$normalized" "$actual"
+
+      - name: Full install.ps1 and installed docs/text policy
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $target = Join-Path $env:RUNNER_TEMP 'ipc-install-ps'
+          if (Test-Path -LiteralPath $target) { throw 'install.ps1 target already exists' }
+          ./install.ps1 -Target $target
+          node tests/check_docs_quality.mjs --installed-root $target
+          if ($LASTEXITCODE -ne 0) { throw 'installed docs/text policy failed' }
+
+      - name: Full install.ps1 path-hash projection
+        if: runner.os == 'Windows'
+        run: |
+          set -euo pipefail
+          temp_root="$(cygpath -u "$RUNNER_TEMP")"
+          target="$temp_root/ipc-install-ps"
+          expected="$temp_root/ipc-install-ps-expected.manifest"
+          actual="$temp_root/ipc-install-ps-actual.manifest"
+          normalized="$temp_root/ipc-install-ps-normalized.manifest"
+          [ -d "$target" ] || { echo "install.ps1 target missing" >&2; exit 2; }
+          bash tests/gen_release_manifest.sh gen --set final-runtime --ref HEAD --out "$expected"
+          bash tests/gen_release_manifest.sh gen --root "$target" --out "$actual"
+          awk -F '\t' 'BEGIN { OFS="\t" } { sub(/^skills\/ipc\//, "", $3); print "N/A", $2, $3 }' "$expected" >"$normalized"
+          diff -u "$normalized" "$actual"
+
+      - name: PowerShell full-install leg is inapplicable on Ubuntu
+        if: runner.os != 'Windows'
+        run: echo "PowerShell full-install projection is inapplicable on Ubuntu"
 
       - name: Installer dry-run (never a real install on CI)
         run: |

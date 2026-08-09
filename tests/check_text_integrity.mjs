@@ -2,6 +2,7 @@
 
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
+import { constants as BUFFER_CONSTANTS } from "node:buffer";
 import {
   existsSync,
   lstatSync,
@@ -433,25 +434,51 @@ function decodeAsciiStrict(bytes, reason) {
   return bytes.toString("latin1");
 }
 
-function runGitRaw(cwd, args, input, seams, operation) {
+function gitChildEnvironment() {
+  const env = {};
+  for (const [name, value] of Object.entries(process.env)) {
+    if (!/^GIT_/i.test(name)) env[name] = value;
+  }
+  env.GIT_OPTIONAL_LOCKS = "0";
+  env.GIT_CONFIG_NOSYSTEM = "1";
+  env.GIT_CONFIG_GLOBAL = process.platform === "win32" ? "NUL" : "/dev/null";
+  env.GIT_PAGER = "cat";
+  env.GIT_NO_REPLACE_OBJECTS = "1";
+  env.GIT_NO_LAZY_FETCH = "1";
+  env.GIT_ATTR_NOSYSTEM = "1";
+  env.GIT_TERMINAL_PROMPT = "0";
+  return env;
+}
+
+function runGitRaw(cwd, args, input, seams, operation, maxBuffer = undefined) {
   if (seams.gitFailure === operation) failInfrastructure(`git-child-error-${operation}`);
+  if (typeof seams.onGitOperation === "function") {
+    seams.onGitOperation({ operation, args: [...args], input, maxBuffer });
+  }
   const overrideName = {
     "ls-files": "lsFilesBuffer",
     "ita-invisible": "itaInvisibleBuffer",
     "ita-visible": "itaVisibleBuffer",
     "check-attr": "attributeBuffer",
+    "cat-file-batch-check": "batchCheckBuffer",
     "cat-file": "catFileBuffer",
     "show-toplevel": "rootBuffer",
   }[operation];
-  if (overrideName && Object.hasOwn(seams, overrideName)) return seams[overrideName];
-  const result = spawnSync("git", args, {
+  if (overrideName && Object.hasOwn(seams, overrideName)) {
+    const override = seams[overrideName];
+    return typeof override === "function"
+      ? override({ operation, args: [...args], input, maxBuffer }) : override;
+  }
+  const options = {
     cwd,
     input,
     encoding: null,
     shell: false,
     windowsHide: true,
-    env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" },
-  });
+    env: gitChildEnvironment(),
+  };
+  if (maxBuffer !== undefined) options.maxBuffer = maxBuffer;
+  const result = spawnSync("git", args, options);
   if (result.error || result.signal || result.status !== 0 || !Buffer.isBuffer(result.stdout)) {
     failInfrastructure(`git-child-error-${operation}`);
   }
@@ -530,27 +557,76 @@ function assertNoIntentToAdd(cwd, seams) {
   }
 }
 
-function readIndexBlobs(cwd, entries, seams) {
-  const input = Buffer.from(`${entries.map((entry) => entry.oid).join("\n")}\n`, "ascii");
-  const output = runGitRaw(cwd, ["cat-file", "--batch"], input, seams, "cat-file");
-  let cursor = 0;
-  const blobs = new Map();
+function checkedBatchBytes(total, amount) {
+  if (!Number.isSafeInteger(total) || total < 0 || !Number.isSafeInteger(amount) || amount < 0
+      || total > Number.MAX_SAFE_INTEGER - amount) failInfrastructure("cat-file-batch-size-overflow");
+  const next = total + amount;
+  if (next > BUFFER_CONSTANTS.MAX_LENGTH) failInfrastructure("cat-file-batch-size-overflow");
+  return next;
+}
+
+function batchCheckMaxBuffer(entries) {
+  const decimalWidth = String(Number.MAX_SAFE_INTEGER).length;
+  let maximum = 0;
   for (const entry of entries) {
-    const newline = output.indexOf(0x0a, cursor);
+    maximum = checkedBatchBytes(maximum, entry.oid.length + " blob ".length + decimalWidth + 1);
+  }
+  return maximum;
+}
+
+function parseBatchCheck(bytes, entries) {
+  if (!Buffer.isBuffer(bytes) || bytes.length === 0) failInfrastructure("malformed-cat-file-batch-check-framing");
+  let lineFeeds = 0;
+  for (const byte of bytes) if (byte === 0x0a) lineFeeds += 1;
+  if (lineFeeds < entries.length) failInfrastructure("malformed-cat-file-batch-check-framing");
+  if (lineFeeds > entries.length || bytes.at(-1) !== 0x0a) {
+    failInfrastructure("malformed-cat-file-batch-check-trailing-data");
+  }
+  const sizes = [];
+  let cursor = 0;
+  for (const entry of entries) {
+    const newline = bytes.indexOf(0x0a, cursor);
+    if (newline < 0) failInfrastructure("malformed-cat-file-batch-check-framing");
+    const header = decodeAsciiStrict(bytes.subarray(cursor, newline), "non-ascii-cat-file-batch-check-header");
+    const match = /^([0-9a-f]{40}|[0-9a-f]{64}) blob (0|[1-9]\d*)$/.exec(header);
+    if (!match || match[1] !== entry.oid) failInfrastructure("malformed-cat-file-batch-check-header");
+    const size = Number(match[2]);
+    if (!Number.isSafeInteger(size)) failInfrastructure("malformed-cat-file-batch-check-size");
+    sizes.push(size);
+    cursor = newline + 1;
+  }
+  if (cursor !== bytes.length) failInfrastructure("malformed-cat-file-batch-check-trailing-data");
+  return sizes;
+}
+
+function prepareIndexBlobReader(cwd, entries, seams) {
+  const input = Buffer.from(`${entries.map((entry) => entry.oid).join("\n")}\n`, "ascii");
+  const checkedOutput = runGitRaw(cwd, ["cat-file", "--batch-check"], input, seams,
+    "cat-file-batch-check", batchCheckMaxBuffer(entries));
+  const sizes = parseBatchCheck(checkedOutput, entries);
+  const sizeByPath = new Map(entries.map((entry, index) => [entry.path, sizes[index]]));
+  return (entry) => {
+    const size = sizeByPath.get(entry.path);
+    if (!Number.isSafeInteger(size)) failInfrastructure("malformed-cat-file-batch-check-size");
+    let maxBuffer = checkedBatchBytes(0, Buffer.byteLength(`${entry.oid} blob ${size}\n`, "ascii"));
+    maxBuffer = checkedBatchBytes(maxBuffer, size);
+    maxBuffer = checkedBatchBytes(maxBuffer, 1);
+    const bodyInput = Buffer.from(`${entry.oid}\n`, "ascii");
+    const output = runGitRaw(cwd, ["cat-file", "--batch"], bodyInput, seams, "cat-file", maxBuffer);
+    const newline = output.indexOf(0x0a);
     if (newline < 0) failInfrastructure("malformed-cat-file-framing");
-    const header = decodeAsciiStrict(output.subarray(cursor, newline), "non-ascii-cat-file-header");
+    const header = decodeAsciiStrict(output.subarray(0, newline), "non-ascii-cat-file-header");
     const match = /^([0-9a-f]{40}|[0-9a-f]{64}) blob (0|[1-9]\d*)$/.exec(header);
     if (!match || match[1] !== entry.oid) failInfrastructure("malformed-cat-file-header");
-    const size = Number(match[2]);
-    if (!Number.isSafeInteger(size)) failInfrastructure("malformed-cat-file-size");
+    const bodySize = Number(match[2]);
+    if (!Number.isSafeInteger(bodySize)) failInfrastructure("malformed-cat-file-size");
+    if (bodySize !== size) failInfrastructure("cat-file-size-mismatch");
     const start = newline + 1;
-    const end = start + size;
+    const end = start + bodySize;
     if (end >= output.length || output[end] !== 0x0a) failInfrastructure("malformed-cat-file-framing");
-    blobs.set(entry.path, Buffer.from(output.subarray(start, end)));
-    cursor = end + 1;
-  }
-  if (cursor !== output.length) failInfrastructure("malformed-cat-file-trailing-data");
-  return blobs;
+    if (end + 1 !== output.length) failInfrastructure("malformed-cat-file-trailing-data");
+    return Buffer.from(output.subarray(start, end));
+  };
 }
 
 function parseAttributes(bytes, requestedPaths) {
@@ -673,7 +749,9 @@ function readWorktreeFile(root, relativePath, seams) {
     parent = candidate;
   }
   try {
-    return readFileSync(parent);
+    const bytes = readFileSync(parent);
+    if (typeof seams.onWorktreeRead === "function") seams.onWorktreeRead(relativePath);
+    return bytes;
   } catch {
     failInfrastructure("worktree-read-error");
   }
@@ -748,17 +826,18 @@ function scanRepository(source, seams = {}) {
   const entries = parseIndexEntries(indexBytes);
   assertNoIntentToAdd(cwd, seams);
   const attributes = readAttributes(cwd, entries, source, seams);
-  let buffers;
+  let readIndexBlob = null;
+  let moduleEntry = null;
+  let indexedModuleBytes = null;
   if (source === "index") {
-    buffers = readIndexBlobs(cwd, entries, seams);
+    readIndexBlob = prepareIndexBlobReader(cwd, entries, seams);
     const modulePath = path.resolve(seams.modulePath || fileURLToPath(import.meta.url));
     const moduleRelative = path.relative(root, modulePath).split(path.sep).join("/");
     if (moduleRelative !== "tests/check_text_integrity.mjs") failInfrastructure("validator-path-mismatch");
-    const indexModule = buffers.get(moduleRelative);
-    if (!indexModule) failInfrastructure("validator-not-tracked");
-    if (!readFileSync(modulePath).equals(indexModule)) failInfrastructure("validator-index-divergence");
-  } else {
-    buffers = new Map(entries.map((entry) => [entry.path, readWorktreeFile(root, entry.path, seams)]));
+    moduleEntry = entries.find((entry) => entry.path === moduleRelative) || null;
+    if (moduleEntry === null) failInfrastructure("validator-not-tracked");
+    indexedModuleBytes = readIndexBlob(moduleEntry);
+    if (!readFileSync(modulePath).equals(indexedModuleBytes)) failInfrastructure("validator-index-divergence");
   }
   const binaryPaths = validateBinaryPolicy(entries, attributes);
   const selectedPaths = new Set(entries.map((entry) => entry.path));
@@ -766,9 +845,23 @@ function scanRepository(source, seams = {}) {
   const globalExceptionState = { used: new Set(), failures: new Map() };
   const findings = [...global.findings];
   for (const entry of entries) {
-    if (binaryPaths.has(entry.path)) continue;
+    const binary = binaryPaths.has(entry.path);
     const exceptions = global.byPath.get(entry.path) || [];
-    findings.push(...scanTextBufferWithPolicy(buffers.get(entry.path), {
+    let bytes;
+    if (source === "index") {
+      if (binary) continue;
+      if (entry === moduleEntry && indexedModuleBytes !== null) {
+        bytes = indexedModuleBytes;
+        indexedModuleBytes = null;
+      } else {
+        bytes = readIndexBlob(entry);
+      }
+    } else {
+      bytes = readWorktreeFile(root, entry.path, seams);
+      if (binary) continue;
+    }
+    if (typeof seams.onScanBuffer === "function") seams.onScanBuffer(source, entry.path);
+    findings.push(...scanTextBufferWithPolicy(bytes, {
       source,
       path: entry.path,
       deferSort: true,
@@ -1258,6 +1351,226 @@ function runSelfTests() {
     const repo = selfTestCreateRepo(tempParent, "index-ok");
     selfTestExpectGate(repo, "index", 0);
   });
+  add("repository acquisition ignores ambient Git redirects without trace writes", () => {
+    const repo = selfTestCreateRepo(tempParent, "ambient-git-env");
+    const tracePath = path.join(tempParent, "ambient-git-trace.log");
+    const bogusIndex = path.join(tempParent, "ambient-bogus.index");
+    const prior = new Map(["GIT_TRACE", "GIT_INDEX_FILE"].map((name) =>
+      [name, Object.hasOwn(process.env, name) ? process.env[name] : undefined]));
+    try {
+      process.env.GIT_TRACE = tracePath;
+      process.env.GIT_INDEX_FILE = bogusIndex;
+      const result = selfTestExpectGate(repo, "index", 0);
+      if (JSON.stringify(result.stdout) !== JSON.stringify(["TEXT-INTEGRITY PASS source=index tracked=3"])) {
+        throw new Error(`stdout=${asciiEscape(result.stdout.join("|"))}`);
+      }
+      if (existsSync(tracePath)) throw new Error("ambient-git-trace-was-written");
+    } finally {
+      for (const [name, value] of prior) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+      if (existsSync(tracePath)) unlinkSync(tracePath);
+      if (existsSync(bogusIndex)) unlinkSync(bogusIndex);
+    }
+  });
+  add("index acquisition ignores Git replacement objects", () => {
+    const repo = selfTestCreateRepo(tempParent, "replace-object");
+    const originalOid = selfTestGit(repo, ["rev-parse", ":plain.txt"]).toString("ascii").trim();
+    const replacementOid = selfTestGit(repo, ["hash-object", "-w", "--stdin"], Buffer.from([0xff, 0x0a]))
+      .toString("ascii").trim();
+    selfTestGit(repo, ["replace", originalOid, replacementOid]);
+    const result = selfTestExpectGate(repo, "index", 0);
+    if (JSON.stringify(result.stdout) !== JSON.stringify(["TEXT-INTEGRITY PASS source=index tracked=3"])) {
+      throw new Error(`stdout=${asciiEscape(result.stdout.join("|"))}`);
+    }
+  });
+  add("Git child sanitizer overrides hostile mixed-case values", () => {
+    const hostile = new Map([
+      ["gIt_No_RePlAcE_ObJeCtS", "0"],
+      ["gIt_No_LaZy_FeTcH", "0"],
+      ["GiT_AtTr_NoSyStEm", "0"],
+      ["git_terminal_prompt", "1"],
+      ["gIt_PaGeR", "hostile"],
+    ]);
+    const hostileNames = new Set([...hostile.keys()].map((name) => name.toLowerCase()));
+    const prior = new Map(Object.entries(process.env).filter(([name]) => hostileNames.has(name.toLowerCase())));
+    try {
+      for (const [name, value] of hostile) process.env[name] = value;
+      const env = gitChildEnvironment();
+      const expected = new Map([
+        ["GIT_NO_REPLACE_OBJECTS", "1"],
+        ["GIT_NO_LAZY_FETCH", "1"],
+        ["GIT_ATTR_NOSYSTEM", "1"],
+        ["GIT_TERMINAL_PROMPT", "0"],
+        ["GIT_OPTIONAL_LOCKS", "0"],
+        ["GIT_CONFIG_NOSYSTEM", "1"],
+        ["GIT_CONFIG_GLOBAL", process.platform === "win32" ? "NUL" : "/dev/null"],
+        ["GIT_PAGER", "cat"],
+      ]);
+      for (const [name, value] of expected) {
+        if (env[name] !== value) throw new Error(`${name}=${env[name] || "missing"}`);
+      }
+      for (const name of Object.keys(env)) {
+        if (/^git_/i.test(name) && !expected.has(name)) throw new Error(`unexpected-git-env=${name}`);
+      }
+    } finally {
+      for (const name of Object.keys(process.env)) if (hostileNames.has(name.toLowerCase())) delete process.env[name];
+      for (const [name, value] of prior) process.env[name] = value;
+    }
+  });
+  add("index cat-file aggregate above one MiB succeeds with exact tracked count", () => {
+    const largeText = (size) => {
+      const bytes = Buffer.alloc(size, 0x61);
+      bytes[bytes.length - 1] = 0x0a;
+      return bytes;
+    };
+    const repo = selfTestCreateRepo(tempParent, "index-large-batch", {
+      files: {
+        "large-a.txt": largeText(700 * 1024),
+        "large-b.txt": largeText(400 * 1024),
+      },
+    });
+    const entries = parseIndexEntries(selfTestGit(repo, ["ls-files", "--stage", "-z"]));
+    const input = Buffer.from(`${entries.map((entry) => entry.oid).join("\n")}\n`, "ascii");
+    const checked = selfTestGit(repo, ["cat-file", "--batch-check"], input).toString("ascii").trimEnd().split("\n");
+    const framedBytes = checked.reduce((total, header) => {
+      const match = /^([0-9a-f]{40}|[0-9a-f]{64}) blob (0|[1-9]\d*)$/.exec(header);
+      if (!match) throw new Error(`bad-precondition-header=${header}`);
+      return total + Buffer.byteLength(header, "ascii") + 1 + Number(match[2]) + 1;
+    }, 0);
+    if (framedBytes <= 1_048_576) throw new Error(`precondition-framed-bytes=${framedBytes}`);
+    const result = selfTestExpectGate(repo, "index", 0);
+    if (JSON.stringify(result.stdout) !== JSON.stringify(["TEXT-INTEGRITY PASS source=index tracked=4"])) {
+      throw new Error(`stdout=${asciiEscape(result.stdout.join("|"))}`);
+    }
+  });
+  add("index single text blob above one MiB succeeds", () => {
+    const bytes = Buffer.alloc(1_100_000, 0x62);
+    bytes[bytes.length - 1] = 0x0a;
+    const repo = selfTestCreateRepo(tempParent, "index-large-single", { files: { "large.txt": bytes } });
+    const result = selfTestExpectGate(repo, "index", 0);
+    if (JSON.stringify(result.stdout) !== JSON.stringify(["TEXT-INTEGRITY PASS source=index tracked=3"])) {
+      throw new Error(`stdout=${asciiEscape(result.stdout.join("|"))}`);
+    }
+  });
+  add("index body acquisition uses exactly one OID per call", () => {
+    const repo = selfTestCreateRepo(tempParent, "index-one-oid", {
+      files: { "a.txt": Buffer.from("a\n"), "b.txt": Buffer.from("b\n") },
+    });
+    const entries = parseIndexEntries(selfTestGit(repo, ["ls-files", "--stage", "-z"]));
+    const moduleEntry = entries.find((entry) => entry.path === "tests/check_text_integrity.mjs");
+    const expectedBodyOrder = [moduleEntry, ...entries.filter((entry) => entry !== moduleEntry)].map((entry) => `${entry.oid}\n`);
+    const bodyInputs = [];
+    const batchCheckInputs = [];
+    selfTestExpectGate(repo, "index", 0, null, {
+      onGitOperation: ({ operation, input }) => {
+        if (operation === "cat-file") bodyInputs.push(input.toString("ascii"));
+        if (operation === "cat-file-batch-check") batchCheckInputs.push(input.toString("ascii"));
+      },
+    });
+    if (JSON.stringify(bodyInputs) !== JSON.stringify(expectedBodyOrder)) {
+      throw new Error(`body-inputs=${JSON.stringify(bodyInputs)}`);
+    }
+    const expectedBatchCheck = `${entries.map((entry) => entry.oid).join("\n")}\n`;
+    if (JSON.stringify(batchCheckInputs) !== JSON.stringify([expectedBatchCheck])) {
+      throw new Error(`batch-check-inputs=${JSON.stringify(batchCheckInputs)}`);
+    }
+  });
+  add("duplicate OID paths are each fetched and scanned", () => {
+    const bytes = Buffer.from(`${String.fromCodePoint(0x00e2, 0x20ac, 0x201d)}\n`, "utf8");
+    const repo = selfTestCreateRepo(tempParent, "duplicate-oid-paths", {
+      files: { "a.txt": bytes, "b.txt": bytes },
+    });
+    const entries = parseIndexEntries(selfTestGit(repo, ["ls-files", "--stage", "-z"]));
+    const duplicateOid = entries.find((entry) => entry.path === "a.txt").oid;
+    const bodyInputs = [];
+    const result = selfTestExpectGate(repo, "index", 1, "TXT006", {
+      onGitOperation: ({ operation, input }) => {
+        if (operation === "cat-file") bodyInputs.push(input.toString("ascii").trim());
+      },
+    });
+    if (bodyInputs.filter((oid) => oid === duplicateOid).length !== 2) {
+      throw new Error(`duplicate-oid-fetches=${JSON.stringify(bodyInputs)}`);
+    }
+    const findingPaths = result.stderr.filter((line) => line.startsWith("TXT006 ")).map((line) =>
+      line.match(/ path=([^ ]+)/)?.[1]);
+    if (JSON.stringify(findingPaths) !== JSON.stringify(["a.txt", "b.txt"])) {
+      throw new Error(`finding-paths=${JSON.stringify(findingPaths)}`);
+    }
+  });
+  add("worktree acquisition reads and scans each path sequentially", () => {
+    const repo = selfTestCreateRepo(tempParent, "worktree-sequential", {
+      files: { "b.txt": Buffer.from("b\r\n"), "a.txt": Buffer.from("a\r\n") },
+    });
+    const entries = parseIndexEntries(selfTestGit(repo, ["ls-files", "--stage", "-z"]));
+    const events = [];
+    const result = selfTestExpectGate(repo, "worktree", 1, "TXT003", {
+      onWorktreeRead: (relativePath) => events.push(`read:${relativePath}`),
+      onScanBuffer: (_source, relativePath) => events.push(`scan:${relativePath}`),
+    });
+    const expectedEvents = entries.flatMap((entry) => [`read:${entry.path}`, `scan:${entry.path}`]);
+    if (JSON.stringify(events) !== JSON.stringify(expectedEvents)) throw new Error(`events=${JSON.stringify(events)}`);
+    const findingPaths = result.stderr.filter((line) => line.startsWith("TXT003 ")).map((line) =>
+      line.match(/ path=([^ ]+)/)?.[1]);
+    if (JSON.stringify([...new Set(findingPaths)]) !== JSON.stringify(["a.txt", "b.txt"])) {
+      throw new Error(`finding-paths=${JSON.stringify(findingPaths)}`);
+    }
+  });
+  const addBatchCheckMutant = (name, mutate, reason) => add(`batch-check ${name} fails closed`, () => {
+    const repo = selfTestCreateRepo(tempParent, `batch-check-${name.replace(/[^a-z0-9]+/gi, "-")}`);
+    const entries = parseIndexEntries(selfTestGit(repo, ["ls-files", "--stage", "-z"]));
+    const input = Buffer.from(`${entries.map((entry) => entry.oid).join("\n")}\n`, "ascii");
+    const canonical = selfTestGit(repo, ["cat-file", "--batch-check"], input);
+    selfTestExpectGate(repo, "index", 2, reason, { batchCheckBuffer: mutate(Buffer.from(canonical)) });
+  });
+  const rewriteBatchCheckLine = (bytes, lineIndex, rewrite) => {
+    const lines = bytes.toString("ascii").slice(0, -1).split("\n");
+    lines[lineIndex] = rewrite(lines[lineIndex]);
+    return Buffer.from(`${lines.join("\n")}\n`, "ascii");
+  };
+  addBatchCheckMutant("wrong-oid", (bytes) => rewriteBatchCheckLine(bytes, 0, (line) =>
+    `${line[0] === "0" ? "1" : "0"}${line.slice(1)}`), "malformed-cat-file-batch-check-header");
+  addBatchCheckMutant("missing-record", (bytes) => Buffer.from(`${bytes.toString("ascii").split("\n").slice(1, -1).join("\n")}\n`, "ascii"),
+    "malformed-cat-file-batch-check-framing");
+  addBatchCheckMutant("extra-record", (bytes) => Buffer.concat([bytes, bytes.subarray(0, bytes.indexOf(0x0a) + 1)]),
+    "malformed-cat-file-batch-check-trailing-data");
+  addBatchCheckMutant("reordered-oid", (bytes) => {
+    const lines = bytes.toString("ascii").slice(0, -1).split("\n");
+    [lines[0], lines[1]] = [lines[1], lines[0]];
+    return Buffer.from(`${lines.join("\n")}\n`, "ascii");
+  }, "malformed-cat-file-batch-check-header");
+  addBatchCheckMutant("non-blob", (bytes) => rewriteBatchCheckLine(bytes, 0, (line) => line.replace(" blob ", " tree ")),
+    "malformed-cat-file-batch-check-header");
+  addBatchCheckMutant("leading-zero-size", (bytes) => rewriteBatchCheckLine(bytes, 0, (line) => line.replace(/ (\d+)$/, " 0$1")),
+    "malformed-cat-file-batch-check-header");
+  addBatchCheckMutant("negative-size", (bytes) => rewriteBatchCheckLine(bytes, 0, (line) => line.replace(/ (\d+)$/, " -$1")),
+    "malformed-cat-file-batch-check-header");
+  addBatchCheckMutant("unsafe-size", (bytes) => rewriteBatchCheckLine(bytes, 0, (line) => line.replace(/ (\d+)$/, " 9007199254740992")),
+    "malformed-cat-file-batch-check-size");
+  addBatchCheckMutant("missing-final-lf", (bytes) => bytes.subarray(0, bytes.length - 1),
+    "malformed-cat-file-batch-check-framing");
+  addBatchCheckMutant("trailing-data", (bytes) => Buffer.concat([bytes, Buffer.from("x")]),
+    "malformed-cat-file-batch-check-trailing-data");
+  addBatchCheckMutant("high-bit-header", (bytes) => {
+    bytes[0] |= 0x80;
+    return bytes;
+  }, "non-ascii-cat-file-batch-check-header");
+  addBatchCheckMutant("body-size-mismatch", (bytes) => rewriteBatchCheckLine(bytes, 0, (line) =>
+    line.replace(/ (\d+)$/, (_match, size) => ` ${Number(size) + 1}`)), "cat-file-size-mismatch");
+  addBatchCheckMutant("safe-arithmetic-overflow", (bytes) => {
+    const lines = bytes.toString("ascii").slice(0, -1).split("\n").map((line) =>
+      line.replace(/ (\d+)$/, ` ${Number.MAX_SAFE_INTEGER}`));
+    return Buffer.from(`${lines.join("\n")}\n`, "ascii");
+  }, "cat-file-batch-size-overflow");
+  add("batch-check child failure is distinct", () => {
+    const repo = selfTestCreateRepo(tempParent, "batch-check-child-error");
+    selfTestExpectGate(repo, "index", 2, "git-child-error-cat-file-batch-check", { gitFailure: "cat-file-batch-check" });
+  });
+  add("body cat-file child failure remains distinct", () => {
+    const repo = selfTestCreateRepo(tempParent, "batch-body-child-error");
+    selfTestExpectGate(repo, "index", 2, "git-child-error-cat-file", { gitFailure: "cat-file" });
+  });
   add("native Unicode Git filename succeeds in both modes", () => {
     const unicodePath = `caf${String.fromCodePoint(0x00e9)}.txt`;
     const repo = selfTestCreateRepo(tempParent, "unicode-name", {
@@ -1326,11 +1639,15 @@ function runSelfTests() {
     );
     if (mutated === original) throw new Error("policy mutation did not apply");
     writeFileSync(modulePath, mutated);
-    const result = selfTestExpectGate(repo, "index", 2, "validator-index-divergence");
+    let scans = 0;
+    const result = selfTestExpectGate(repo, "index", 2, "validator-index-divergence", {
+      onScanBuffer: () => { scans += 1; },
+    });
     const expected = "TXT900 source=index path=<none> byte=0 codepoint=0 reason=validator-index-divergence";
     if (result.stdout.length !== 0 || JSON.stringify(result.stderr) !== JSON.stringify([expected])) {
       throw new Error(`stdout=${asciiEscape(result.stdout.join("|"))} stderr=${asciiEscape(result.stderr.join("|"))}`);
     }
+    if (scans !== 0) throw new Error(`scans-before-validator-identity=${scans}`);
   });
   add("zero object identity parser seam fails closed", () => {
     const repo = selfTestCreateRepo(tempParent, "zero-oid");
@@ -1455,14 +1772,26 @@ function runSelfTests() {
     ])));
     const sorted = parseIndexEntries(indexBuffer);
     const moduleBytes = readFileSync(path.join(repo, "tests", "check_text_integrity.mjs"));
-    const catFileBuffer = Buffer.concat(sorted.flatMap((entry) => {
+    const bytesByOid = new Map(sorted.map((entry) => [
+      entry.oid, entry.path === specialPath ? Buffer.from("bad\r\n") : moduleBytes,
+    ]));
+    const catFileBuffer = ({ input }) => {
+      const oid = input.toString("ascii").trim();
+      const bytes = bytesByOid.get(oid);
+      if (!bytes) throw new Error(`unexpected-oid=${oid}`);
+      return Buffer.concat([
+        Buffer.from(`${oid} blob ${bytes.length}\n`, "ascii"), bytes, Buffer.from("\n"),
+      ]);
+    };
+    const batchCheckBuffer = Buffer.concat(sorted.map((entry) => {
       const bytes = entry.path === specialPath ? Buffer.from("bad\r\n") : moduleBytes;
-      return [Buffer.from(`${entry.oid} blob ${bytes.length}\n`, "ascii"), bytes, Buffer.from("\n")];
+      return Buffer.from(`${entry.oid} blob ${bytes.length}\n`, "ascii");
     }));
     const attributeFields = sorted.flatMap((entry) =>
       [entry.path, "text", "unspecified", entry.path, "eol", "unspecified"]);
     const result = selfTestExpectGate(repo, "index", 1, "TXT003", {
       lsFilesBuffer: indexBuffer,
+      batchCheckBuffer,
       catFileBuffer,
       attributeBuffer: Buffer.from(`${attributeFields.join("\0")}\0`, "utf8"),
     });
@@ -1668,7 +1997,9 @@ function runSelfTests() {
   add("strict cat-file parser rejects header size truncation and trailing mutants", () => {
     const repo = selfTestCreateRepo(tempParent, "cat-mutants");
     const entries = parseIndexEntries(selfTestGit(repo, ["ls-files", "--stage", "-z"]));
-    const input = Buffer.from(`${entries.map((entry) => entry.oid).join("\n")}\n`, "ascii");
+    const entry = entries.find((candidate) => candidate.path === "tests/check_text_integrity.mjs");
+    if (!entry) throw new Error("missing-validator-entry");
+    const input = Buffer.from(`${entry.oid}\n`, "ascii");
     const batch = selfTestGit(repo, ["cat-file", "--batch"], input);
     const newline = batch.indexOf(0x0a);
     const header = batch.subarray(0, newline).toString("latin1");
@@ -1679,7 +2010,7 @@ function runSelfTests() {
     selfTestExpectGate(repo, "index", 2, "malformed-cat-file-header", {
       catFileBuffer: withHeader(`${headerOid} tree ${size}`),
     });
-    selfTestExpectGate(repo, "index", 2, "malformed-cat-file-framing", {
+    selfTestExpectGate(repo, "index", 2, "cat-file-size-mismatch", {
       catFileBuffer: withHeader(`${headerOid} blob ${Number(size) + 1}`),
     });
     selfTestExpectGate(repo, "index", 2, "malformed-cat-file-framing", {
@@ -1704,7 +2035,9 @@ function runSelfTests() {
   add("strict cat-file parser rejects high-bit header bytes", () => {
     const repo = selfTestCreateRepo(tempParent, "cat-high-bit");
     const entries = parseIndexEntries(selfTestGit(repo, ["ls-files", "--stage", "-z"]));
-    const input = Buffer.from(`${entries.map((entry) => entry.oid).join("\n")}\n`, "ascii");
+    const entry = entries.find((candidate) => candidate.path === "tests/check_text_integrity.mjs");
+    if (!entry) throw new Error("missing-validator-entry");
+    const input = Buffer.from(`${entry.oid}\n`, "ascii");
     const batch = Buffer.from(selfTestGit(repo, ["cat-file", "--batch"], input));
     batch[0] |= 0x80;
     selfTestExpectGate(repo, "index", 2, "non-ascii-cat-file-header", { catFileBuffer: batch });

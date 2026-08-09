@@ -8,10 +8,12 @@ adds repo/install-level triage.
 
 | Symptom | Cause / fix |
 |---|---|
-| `install.sh: refusing to overwrite existing install` | An `ipc` skill already exists at the target. Re-run with `--force` (it prints what it deletes) after checking the existing copy isn't a modified one you want to keep. |
+| `install.sh: refusing to overwrite existing install` | An `ipc` skill already exists at the target. Force replacement removes the entire existing target and provides no automatic backup or rollback. Run dry-run first and follow the preservation procedure in [INSTALL.md](INSTALL.md). |
 | Installed but `/ipc` not found | Standalone target must be exactly `~/.claude/skills/ipc/` (or `%USERPROFILE%\.claude\skills\ipc\`). For plugin installs the invocation is `/codex-ipc:ipc`. Restart/reload Claude Code after installing. |
 | Scripts fail with `\r: command not found` | CRLF line endings were introduced (editor or git config). The repo's `.gitattributes` forces LF for `*.sh`/`*.mjs`; re-checkout or `dos2unix` the scripts. |
 | `Permission denied` running `.sh` | `bash path/to/script.sh` works regardless of the execute bit; or `chmod +x` the scripts. |
+
+Before force replacement, run the matching preview: `./install.sh --dry-run --force` or `.\install.ps1 -DryRun -Force`.
 
 ## Runtime issues
 
@@ -48,7 +50,7 @@ determination exits 0.
 |---|---|
 | `done` | The named dispatch's own turn reached `task_complete`. This is named-dispatch completion, NOT proof the thread is idle now. Source-aware callers read `replySource` / the `reply-source` diagnostic, or open the dual-source viewer; an opt-in `done` is never proof the reply path exists. |
 | `pending` | No determination yet (single-shot, or budget expired with the turn still open). Wait longer or re-inspect; do not resend. |
-| `reply-missing` | Under `--accept-rollout-fallback` the waiter already exhausted BOTH body sources (reply file and rollout store). Inspect its diagnostics/thread; do not re-harvest, auto-resend, or hand-roll rollout/report-file polling. resuming the goal in a fresh, unmarked turn will NOT re-certify the original dispatch id; machine re-certification requires a NEW dispatch with a new marker. |
+| `reply-missing` | Only a genuinely absent reply is eligible for waiter rollout fallback. A present-but-invalid reply returns `reply-missing` without consulting rollout fallback. An absent reply with no certifiable rollout body exhausts the eligible sources. Inspect its diagnostics/thread; do not re-harvest, auto-resend, or hand-roll rollout/report-file polling. resuming the goal in a fresh, unmarked turn will NOT re-certify the original dispatch id; machine re-certification requires a NEW dispatch with a new marker. |
 | `aborted` | The dispatch's own turn ended in `turn_aborted` (any reply is unverified). Surface it; do not wait. resuming the goal in a fresh, unmarked turn will NOT re-certify the original dispatch id; machine re-certification requires a NEW dispatch with a new marker. |
 | `superseded` | A newer `task_started` opened before the dispatch turn's terminal. A later, unrelated terminal never certifies it; issue a NEW dispatch if the goal still matters. |
 | `unavailable` | No authoritative rollout candidate, or rollout/reply-scan ambiguity / schema failure. Re-inspect the thread; never infer non-delivery or auto-resend. |
@@ -60,6 +62,30 @@ determination exits 0.
 | `tests/test_ipc.sh` fails at git-dependent checks | The harness creates its own throwaway repo; it needs `git` on PATH (identity is set locally by the harness). |
 | Tests pass locally, CI safety scan fails | You introduced a private-looking pattern (personal path, real-looking UUID, key-like string). See `tests/scan_public_safety.sh` for the exact patterns. |
 | `test_reply_view.sh` T12 fails on macOS | The viewer and harness assume GNU `find`/`date`. Run in a GNU userland (Linux CI image or Git Bash). |
+
+## Encoding and mojibake recovery
+
+Valid stored UTF-8 may display with the wrong decoder.
+Stored bytes may instead be invalid or corrupt.
+Valid UTF-8 may also contain a known double-decoding signature.
+
+Windows PowerShell 5.1 reads BOM-free UTF-8 correctly with:
+
+```powershell
+$Path = 'C:\path\to\file.md'
+Get-Content -Raw -Encoding UTF8 -LiteralPath $Path
+```
+
+Windows PowerShell 5.1 `Set-Content -Encoding UTF8` writes a BOM. For BOM-free writes, use a
+configured UTF-8/LF editor, PowerShell 7 `utf8NoBOM`, or `.NET UTF8Encoding(false)`.
+
+Inspect raw bytes first, then apply strict UTF-8 decoding.
+If the bytes are valid, use the correct reader or editor and do not save the misrendered form.
+If the bytes are corrupt, restore or reconstruct from authoritative source; a reconstruction is allowed only when its reviewed byte-to-codepoint mapping is unambiguous.
+Then run index and worktree gates, then semantic tests.
+Never paste broken console text back into a file.
+There is no automatic transcoder.
+Preserve intentional Unicode; do not normalize or auto-convert it.
 
 ## After a Codex Desktop update
 

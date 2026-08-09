@@ -22,6 +22,9 @@ pruning happens only when you set an explicit positive integer. Envelopes theref
 indefinitely unless you opt in. This is deliberate — silently age-deleting a reply nobody
 harvested is unrecoverable data loss — but it means plaintext exposure grows without bound and
 disposal is your responsibility, not the transport's.
+Pruning reduces ordinary accumulation but is not confidentiality or secure deletion. Backups,
+sync tools, snapshots, and filesystem recovery may retain deleted content after transport pruning
+or manual removal.
 
 ### Optional Claude transcript path exposure
 

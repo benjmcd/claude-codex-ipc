@@ -12,6 +12,13 @@ Repo-level triage lives in `docs/TROUBLESHOOTING.md`; this is the bundled quick 
 | Inspector says `State DB was not found` | No Codex Desktop state on this machine (or non-default path) | Pass `--db`/`--sessions-root`, or accept that inspection is unavailable |
 | `autoload helper unavailable` warning | Not Windows, or `powershell.exe` missing | Expected off-Windows: open `codex://threads/<id>` manually, or use file-drop |
 
+## Before first use
+
+Task envelopes and replies are plaintext and can be read and modified by same-user processes; task text must not contain secrets.
+Keep-only retention may retain them indefinitely.
+Pruning reduces ordinary accumulation but is not confidentiality or secure deletion.
+Backups, sync tools, snapshots, and filesystem recovery may retain deleted content.
+
 ## Delivery triage (`--ipc`)
 
 Results carry machine tokens: `RESULT: <top> -- reason=<token> -- confirmation=<token>`. Key
@@ -82,9 +89,12 @@ determination exits 0.
   idleness. Source-aware callers read `replySource` / the `reply-source` diagnostic or the
   dual-source viewer; an opt-in `done` never proves the reply path exists.
 - `pending`: no determination yet — wait longer or re-inspect; do not resend.
-- `reply-missing`: under `--accept-rollout-fallback` the waiter already exhausted BOTH body
-  sources (reply file and rollout store). Inspect its diagnostics/thread; do not re-harvest,
-  auto-resend, or hand-roll rollout/report-file polling. Recovery caveat:
+- `reply-missing`: Only a genuinely absent reply is eligible for waiter rollout fallback.
+  A present-but-invalid reply returns `reply-missing` without consulting rollout fallback.
+  An absent reply with no certifiable rollout body exhausts the eligible sources.
+  Inspect its
+  diagnostics/thread; do not re-harvest, auto-resend, or hand-roll rollout/report-file polling.
+  Recovery caveat:
   resuming the goal in a fresh, unmarked turn will NOT re-certify the original dispatch id; machine re-certification requires a NEW dispatch with a new marker.
 - `aborted`: the dispatch's own turn ended in `turn_aborted` (any reply is unverified) — surface
   it, do not wait. Recovery caveat:
@@ -93,6 +103,30 @@ determination exits 0.
   never certifies it. Issue a NEW dispatch if the goal still matters.
 - `unavailable`: no authoritative rollout candidate or rollout/reply-scan ambiguity — re-inspect;
   never infer non-delivery or auto-resend.
+
+## Encoding and mojibake recovery
+
+Valid stored UTF-8 may display with the wrong decoder.
+Stored bytes may instead be invalid or corrupt.
+Valid UTF-8 may also contain a known double-decoding signature.
+
+Windows PowerShell 5.1 reads BOM-free UTF-8 correctly with:
+
+```powershell
+$Path = 'C:\path\to\file.md'
+Get-Content -Raw -Encoding UTF8 -LiteralPath $Path
+```
+
+Windows PowerShell 5.1 `Set-Content -Encoding UTF8` writes a BOM. For BOM-free writes, use a
+configured UTF-8/LF editor, PowerShell 7 `utf8NoBOM`, or `.NET UTF8Encoding(false)`.
+
+Inspect raw bytes first, then apply strict UTF-8 decoding.
+If the bytes are valid, use the correct reader or editor and do not save the misrendered form.
+If the bytes are corrupt, restore or reconstruct from authoritative source; a reconstruction is allowed only when its reviewed byte-to-codepoint mapping is unambiguous.
+Then run index and worktree gates, then semantic tests.
+Never paste broken console text back into a file.
+There is no automatic transcoder.
+Preserve intentional Unicode; do not normalize or auto-convert it.
 
 ## Reply viewer
 

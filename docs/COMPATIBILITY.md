@@ -2,6 +2,10 @@
 
 Per-feature support, dependencies, stability, live-state impact, and fallback behavior.
 
+## Current feature matrix
+
+Current-host confidence requires validate-only revalidation; live proof remains separately authorized.
+
 "Experimental" means: built on undocumented Codex Desktop internals (named pipe framing, router
 methods, `codex://` deep links, window focus APIs) that can change or break in **any** Codex
 Desktop update, silently. Revalidate experimental features with
@@ -85,9 +89,10 @@ Desktop delivery; there is no headless execution path in this tool.
 | Touches live Desktop state | Only the write-proof **live** path (one marker turn); everything else read-only |
 | Fallback | Dry-run/static modes always available |
 
-## Host-identity ledger
+## Dated historical evidence, not current certification
 
-Observed Codex Desktop host-identity changes that affect foreground detection and validation.
+The following rows preserve dated observations and do not certify the current host. Observed Codex
+Desktop host-identity changes affect foreground detection and validation.
 "Codex Desktop" remains this project's stable label for the app hosting the private IPC surfaces,
 whatever its current product branding.
 

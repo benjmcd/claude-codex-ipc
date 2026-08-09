@@ -4,11 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- Documentation and repository gates now enforce the UTF-8/LF text policy and documentation
+  contracts. Intentional Unicode is retained. Primary dispatch behavior did not change, no fresh
+  live proof was performed, and no candidate, release, or installed propagation is implied.
+
 ## [0.1.13] — 2026-08-05
 
-**No runtime behavior change, and no new test.** Every change here is instructional prose, one
-source comment, and the version strings. No script's control flow, output bytes, or exit codes
-move; the 13 hermetic suites are unchanged in count and content.
+Normal dispatch control flow and operational output did not change; effect-free --version changed to 0.1.13.
 
 ### Changed — the handoff template reports large payloads by reference (O6-A, broadened)
 
