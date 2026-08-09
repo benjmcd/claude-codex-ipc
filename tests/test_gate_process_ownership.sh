@@ -23,8 +23,10 @@
 # Hermetic: all state under mktemp dirs; every node process spawned here is short-lived
 # and reaped on exit; no transport roots, no IPC, no installed-root access. Enumeration
 # outages are injected via PATH shims (Windows: powershell.exe; POSIX: ps). On Windows,
-# every runner invocation additionally gets a no-op taskkill shim so a runner that
+# T1-T4 runner invocations additionally get a no-op taskkill shim so a runner that
 # mis-scopes foreign PIDs as "owned" cannot kill processes this fixture does not own.
+# T5 must use the real taskkill because killing and reaping its owned descendant is
+# the behavior under test.
 set -uo pipefail
 
 TDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -197,7 +199,7 @@ fi
 echo "== T5: active monitor timeout must kill/reap captured descendants =="
 T5OUT="$WORK/t5.out"
 T5T0=$SECONDS
-PATH="$SHIM_SAFE:$PATH" "$BASH" "$RUNNER" --self-test-monitor >"$T5OUT" 2>&1
+"$BASH" "$RUNNER" --self-test-monitor >"$T5OUT" 2>&1
 T5RC=$?
 T5ELAPSED=$((SECONDS - T5T0))
 if [ "$T5RC" -eq 0 ] \
