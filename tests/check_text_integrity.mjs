@@ -831,8 +831,15 @@ function scanRepository(source, seams = {}) {
   let indexedModuleBytes = null;
   if (source === "index") {
     readIndexBlob = prepareIndexBlobReader(cwd, entries, seams);
-    const modulePath = path.resolve(seams.modulePath || fileURLToPath(import.meta.url));
-    const moduleRelative = path.relative(root, modulePath).split(path.sep).join("/");
+    let canonicalRoot;
+    let modulePath;
+    try {
+      canonicalRoot = realpathSync.native(root);
+      modulePath = realpathSync.native(path.resolve(seams.modulePath || fileURLToPath(import.meta.url)));
+    } catch {
+      failInfrastructure("validator-path-mismatch");
+    }
+    const moduleRelative = path.relative(canonicalRoot, modulePath).split(path.sep).join("/");
     if (moduleRelative !== "tests/check_text_integrity.mjs") failInfrastructure("validator-path-mismatch");
     moduleEntry = entries.find((entry) => entry.path === moduleRelative) || null;
     if (moduleEntry === null) failInfrastructure("validator-not-tracked");

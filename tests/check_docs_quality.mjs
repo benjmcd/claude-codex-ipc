@@ -1162,8 +1162,15 @@ function acquireRepositoryCorpus(seams = {}) {
     ["diff", "--cached", "--name-only", "-z", "--ita-visible-in-index"], undefined, seams, "ita-visible"), "malformed-ita-visible");
   if (JSON.stringify(itaInvisible) !== JSON.stringify(itaVisible)) failInfrastructure("intent-to-add");
   const byPath = new Map(entries.map((entry) => [entry.path, entry]));
-  const modulePath = path.resolve(seams.modulePath || MODULE_PATH);
-  const moduleRelative = path.relative(root, modulePath).split(path.sep).join("/");
+  let canonicalRoot;
+  let modulePath;
+  try {
+    canonicalRoot = realpathSync.native(root);
+    modulePath = realpathSync.native(path.resolve(seams.modulePath || MODULE_PATH));
+  } catch {
+    failInfrastructure("validator-path-mismatch");
+  }
+  const moduleRelative = path.relative(canonicalRoot, modulePath).split(path.sep).join("/");
   if (moduleRelative !== "tests/check_docs_quality.mjs") failInfrastructure("validator-path-mismatch");
   const moduleEntry = byPath.get(moduleRelative);
   if (!moduleEntry) failInfrastructure("validator-not-staged");
