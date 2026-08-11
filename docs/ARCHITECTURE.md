@@ -64,11 +64,11 @@ no cache, reconstructed reply file, transport-root write, lock, or retention sid
    host-identity drift: since 2026-07-09 the Codex Desktop GUI runs as `ChatGPT.exe` under the
    unchanged `OpenAI.Codex` package family, so foreground/GUI identification is positive
    (executable path + package), never process-name-only (see `docs/COMPATIBILITY.md`,
-   "Host-identity ledger").
+   "Dated historical evidence, not current certification").
    (The CLI-backed `--exec`/`--app`/`--open` modes were removed in v0.1.8; there is no headless
    execution path.)
 
-## Inspection and validation surfaces (all read-only)
+## Inspection surfaces (read-only)
 
 - `codex_ipc_session_inspect.mjs` — thread row + rollout tail + mid-turn heuristics.
 - `codex_ipc_thread_locator.mjs` — candidate discovery for new-session mode (never send
@@ -76,10 +76,12 @@ no cache, reconstructed reply file, transport-root write, lock, or retention sid
 - `codex_ipc_snapshot.mjs` — config/DB hashing for before/after isolation evidence.
 - `codex_ipc_revalidate.mjs` — post-update validate-only checks (pipe connect only with
   `--allow-live-ipc-read`, sending `initialize` only).
-- `codex_ipc_write_proof.mjs` — dry-run-first controlled live-write proof (inspect → revalidate →
-  snapshot → one marker send → poll → snapshot → compare); live path gated behind
-  `--send --ack-live-write [--allow-any-thread]`.
 - `codex_ipc_contract_audit.mjs` — static requirement matrix over the bundled skill files.
+
+## Authorized write proof
+
+`codex_ipc_write_proof.mjs` is dry-run by default. Its controlled live path performs inspect →
+revalidate → snapshot → one marker send → poll → snapshot → compare, and requires explicit authorization through `--send --ack-live-write [--allow-any-thread]`.
 
 ## Design invariants
 

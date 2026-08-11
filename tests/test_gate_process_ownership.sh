@@ -4,7 +4,7 @@
 # The runner's process bound is only meaningful if (a) "owned" node processes are
 # attributed by ancestry to THIS runner (not by a global before/after snapshot), and
 # (b) an enumeration outage can never be silently measured as "0 owned". This fixture
-# pins both properties with four checks:
+# pins both properties with five checks:
 #
 #   T1  startup fail-closed: with process enumeration broken before any suite runs,
 #       the runner must ERROR nonzero, never emit RELEASE GATES: PASS off a silent
@@ -17,12 +17,16 @@
 #       the gate. Guards against an implementation that always measures 0.
 #   T4  mid-suite fail-closed: if enumeration starts failing while a suite is running,
 #       the runner must abort nonzero instead of degrading to a silent 0-measurement.
+#   T5  active monitor timeout: the exclusive runner self-test captures, force-kills, and
+#       reaps a TERM-resistant descendant, emits named diagnostics, and returns within bound.
 #
 # Hermetic: all state under mktemp dirs; every node process spawned here is short-lived
 # and reaped on exit; no transport roots, no IPC, no installed-root access. Enumeration
 # outages are injected via PATH shims (Windows: powershell.exe; POSIX: ps). On Windows,
-# every runner invocation additionally gets a no-op taskkill shim so a runner that
+# T1-T4 runner invocations additionally get a no-op taskkill shim so a runner that
 # mis-scopes foreign PIDs as "owned" cannot kill processes this fixture does not own.
+# T5 must use the real taskkill because killing and reaping its owned descendant is
+# the behavior under test.
 set -uo pipefail
 
 TDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -162,10 +166,10 @@ echo "== T3: suite-spawned node processes must breach the peak bound =="
 T3OUT="$WORK/t3.out"
 PATH="$SHIM_SAFE:$PATH" "$BASH" "$RUNNER" --no-safety "$WORK/sentinel_spawn3.sh" >"$T3OUT" 2>&1
 T3RC=$?
-if [ "$T3RC" -ne 0 ] && grep -q "owned real-Node peak" "$T3OUT"; then
+if [ "$T3RC" -ne 0 ] && grep -q "owned-node-peak" "$T3OUT"; then
   t_pass "T3 gate FAILed on owned peak breach (rc=$T3RC)"
 else
-  t_fail "T3 expected gate FAIL with 'owned real-Node peak' breach; got rc=$T3RC"
+  t_fail "T3 expected gate FAIL with 'owned-node-peak' breach; got rc=$T3RC"
   sed 's/^/    T3| /' "$T3OUT"
 fi
 
@@ -191,10 +195,29 @@ else
   sed 's/^/    T4| /' "$T4OUT"
 fi
 
+# ---- T5: active outer-monitor timeout kills/reaps captured descendants --------------------
+echo "== T5: active monitor timeout must force-kill/reap a TERM-resistant descendant =="
+T5OUT="$WORK/t5.out"
+T5T0=$SECONDS
+"$BASH" "$RUNNER" --self-test-monitor >"$T5OUT" 2>&1
+T5RC=$?
+T5ELAPSED=$((SECONDS - T5T0))
+if [ "$T5RC" -eq 0 ] \
+   && [ "$T5ELAPSED" -le 15 ] \
+   && grep -q "MONITOR TIMEOUT: self-test hanging child" "$T5OUT" \
+   && grep -q "captured descendant(s):" "$T5OUT" \
+   && grep -q "descendants killed/reaped" "$T5OUT" \
+   && grep -q "SELF-TEST-MONITOR PASS: active timeout; captured descendant killed/reaped; bounded return" "$T5OUT"; then
+  t_pass "T5 watchdog timed out actively, killed/reaped captured descendants, and returned in ${T5ELAPSED}s"
+else
+  t_fail "T5 expected rc=0 + timeout/capture/kill/reap/bounded diagnostics; got rc=$T5RC elapsed=${T5ELAPSED}s"
+  sed 's/^/    T5| /' "$T5OUT"
+fi
+
 echo ""
 if [ "$FAILN" -eq 0 ]; then
-  echo "test_gate_process_ownership: ALL PASS (4 checks)"
+  echo "test_gate_process_ownership: ALL PASS (5 checks)"
   exit 0
 fi
-echo "test_gate_process_ownership: $FAILN of 4 checks FAILED"
+echo "test_gate_process_ownership: $FAILN of 5 checks FAILED"
 exit 1

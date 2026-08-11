@@ -4,11 +4,19 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- Documentation and repository gates now enforce the UTF-8/LF text policy and documentation
+  contracts. Intentional Unicode is retained. Primary dispatch behavior did not change, no fresh
+  live proof was performed, and no release or installed propagation is implied.
+- Public-readiness hardening makes the repository safety scan fail closed, documents private
+  vulnerability reporting, and runs CI with read-only permissions and commit-pinned official
+  actions.
+- Before public visibility, Git object history and annotated tags are being re-created to remove
+  personal mailbox metadata. Release names and content intent remain unchanged, but commit and
+  tag object IDs necessarily change; private rollback mappings remain outside the public repo.
+
 ## [0.1.13] — 2026-08-05
 
-**No runtime behavior change, and no new test.** Every change here is instructional prose, one
-source comment, and the version strings. No script's control flow, output bytes, or exit codes
-move; the 13 hermetic suites are unchanged in count and content.
+Normal dispatch control flow and operational output did not change; effect-free --version changed to 0.1.13.
 
 ### Changed — the handoff template reports large payloads by reference (O6-A, broadened)
 
@@ -326,7 +334,8 @@ content.
   authority, after independent verification. `root-*.manifest` are therefore byte-unchanged, per
   the precedent set by `6ca3ae2` and `f40183d`.
 - **No retention change**, and no change to the `--ipc` route, the reply contract, or any REQ anchor.
-- `v0.1.8`, `v0.1.9` and `v0.1.10` stay exactly where they are. No tag has ever been moved.
+- At the time of this release, `v0.1.8`, `v0.1.9` and `v0.1.10` stayed exactly where they were.
+  The later privacy rewrite disclosed under `[Unreleased]` necessarily re-created tag objects.
 
 ---
 

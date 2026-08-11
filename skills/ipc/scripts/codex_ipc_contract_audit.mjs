@@ -98,6 +98,13 @@ function check(id, requirement, evidenceChecks, residualRisk = null) {
 
 function main() {
   const files = Object.fromEntries(REQUIRED_FILES.map((relPath) => [relPath, fileInfo(relPath)]));
+  const waiterContractSentences = [
+    "Only a genuinely absent reply is eligible for waiter rollout fallback.",
+    "A present-but-invalid reply returns `reply-missing` without consulting rollout fallback.",
+    "An absent reply with no certifiable rollout body exhausts the eligible sources.",
+    "resuming the goal in a fresh, unmarked turn will NOT re-certify the original dispatch id; machine re-certification requires a NEW dispatch with a new marker.",
+  ];
+  const hasWaiterContract = (relPath) => waiterContractSentences.every((sentence) => contains(relPath, sentence));
   const handoffText = readText("scripts/handoff_to_codex.sh");
   // Anchor on the ACTUAL transport-root assignment, not the earlier doc-comment mention
   // of CODEX_IPC_ROOT=<dir>. The removed-mode errors must fire before this line runs.
@@ -467,17 +474,19 @@ function main() {
         ok: contains("references/troubleshooting.md", "codex_ipc_wait"),
       },
       {
-        label: "the OQ-4 re-certification caveat is present verbatim on the recovery surfaces",
+        label: "SKILL.md carries both waiter branches, eligible-source exhaustion, and the OQ-4 marker",
+        file: "SKILL.md",
+        ok: hasWaiterContract("SKILL.md"),
+      },
+      {
+        label: "the bundled quickstart carries both waiter branches, eligible-source exhaustion, and the OQ-4 marker",
+        file: "examples/quickstart.md",
+        ok: hasWaiterContract("examples/quickstart.md"),
+      },
+      {
+        label: "bundled troubleshooting carries both waiter branches, eligible-source exhaustion, and the OQ-4 marker",
         file: "references/troubleshooting.md",
-        ok:
-          contains(
-            "references/troubleshooting.md",
-            "resuming the goal in a fresh, unmarked turn will NOT re-certify the original dispatch id; machine re-certification requires a NEW dispatch with a new marker.",
-          ) &&
-          contains(
-            "SKILL.md",
-            "resuming the goal in a fresh, unmarked turn will NOT re-certify the original dispatch id; machine re-certification requires a NEW dispatch with a new marker.",
-          ),
+        ok: hasWaiterContract("references/troubleshooting.md"),
       },
       {
         label: "the wrapper prints the runnable WAIT: hint only on accepted live --ipc success",

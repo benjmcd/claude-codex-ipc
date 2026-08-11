@@ -37,6 +37,13 @@ directory, so they work from any current working directory. If the bundled toolk
 missing, do not reach into an unrelated project — repair the skill bundle (re-copy `scripts/`) or
 fall back to a manually pasted file-drop handoff.
 
+## Before first use
+
+Task envelopes and replies are plaintext and can be read and modified by same-user processes; task text must not contain secrets.
+Keep-only retention may retain them indefinitely.
+Pruning reduces ordinary accumulation but is not confidentiality or secure deletion.
+Backups, sync tools, snapshots, and filesystem recovery may retain deleted content.
+
 `handoff_to_codex.sh` writes its transport ENVELOPE — a per-dispatch `<dispatchId>.task.md`, plus
 the `<dispatchId>.reply.md` Codex writes back — to a machine-local, repo-independent root keyed per
 `(claudeSessionId, conversationId, dispatchId)`:
@@ -232,8 +239,11 @@ A bounded example (30-minute budget, opt-in rollout fallback):
 `node scripts/codex_ipc_wait.mjs --thread <uuid> --dispatch <dispatchId> --reply-path <path>
 --accept-rollout-fallback --budget-ms 1800000 --interval-ms 1000`. A `done` token is
 **named-dispatch completion, never current thread idleness** — `terminalState` and a per-dispatch
-`done` both describe past turns. With `--accept-rollout-fallback`, `reply-missing` means the waiter
-already exhausted **both** body sources (reply file and rollout store): inspect its
+`done` both describe past turns.
+Only a genuinely absent reply is eligible for waiter rollout fallback.
+A present-but-invalid reply returns `reply-missing` without consulting rollout fallback.
+An absent reply with no certifiable rollout body exhausts the eligible sources.
+Inspect its
 diagnostics/thread; do not re-harvest, auto-resend, or hand-roll rollout/report-file polling. On
 `reply-missing`/`aborted`:
 resuming the goal in a fresh, unmarked turn will NOT re-certify the original dispatch id; machine re-certification requires a NEW dispatch with a new marker.

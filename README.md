@@ -13,26 +13,49 @@ tooling and revalidation harnesses.
 internals — unaffiliated with OpenAI); not a production message broker (plaintext files + a local
 pipe; no queueing guarantees, no multi-user security model).
 
-| | Stable core | Experimental extras |
+| Update-sensitivity class | Surfaces | Required confidence step |
 |---|---|---|
-| What | File-backed dispatch/reply, reply viewer, read-only inspection | Desktop named-pipe injection, `codex://` autoload, focus snapback |
-| Depends on | bash, coreutils (Node optional for rollout fallback/inspection) | Private Codex Desktop internals, Windows, PowerShell |
-| After a Codex Desktop update | Unaffected | **Assume broken until revalidated** (`codex_ipc_revalidate.mjs`) |
+| Desktop-independent file transport | File-backed dispatch/reply and the file-primary viewer | Run the hermetic repository gates; these surfaces do not depend on private Desktop schema or live routing. |
+| Read-only private-schema-dependent | Inspector, locator, snapshot, and rollout-derived fallback | Re-run validate-only checks after a Desktop update because private schema and rollout layout may drift. |
+| Experimental live Desktop | Named-pipe delivery, `codex://` autoload, focus handling, and write proof | Assume drift until validate-only revalidation; run live proof only with separate explicit authorization. |
 
-Live Desktop IPC was point-in-time validated (2026-07-08: write-proof harness, `defer` and
-`switch`+ack paths, reply loop). `restore-if-known` is fail-closed/unvalidated. Revalidate on your
-own machine before relying on it, and after every Codex Desktop update.
+Historical proof is point-in-time evidence, not current certification. Live Desktop IPC was
+observed on 2026-07-08 with the write-proof harness, `defer` and `switch`+ack paths, and the reply
+loop. Validate-only revalidation comes first; live proof remains separately authorized.
 
 ## Install
 
+`claude --plugin-dir /path/to/claude-codex-ipc` is a session-local plugin-development launch whose invocation is `/codex-ipc:ipc` for that Claude session.
+
+The install block below runs from the repository root.
+
 ```bash
-claude plugin add /path/to/claude-codex-ipc   # plugin → invoke as /codex-ipc:ipc
-./install.sh --dry-run && ./install.sh        # standalone → invoke as /ipc  (PowerShell: .\install.ps1)
+claude --plugin-dir /path/to/claude-codex-ipc
 ```
 
+The persistent supported local path is the standalone installer, invoked as `/ipc` after a new or restarted session.
+
+```bash
+./install.sh --dry-run && ./install.sh        # PowerShell: .\install.ps1
+```
+
+No marketplace metadata is shipped. The `--plugin-dir` form is current-version guidance verified
+against the currently tested Claude Code CLI; it is not an eternal compatibility guarantee.
+Force replacement removes the complete existing target, does not preserve local changes, and has
+no automatic backup or rollback; preview it with `./install.sh --dry-run --force` or
+`.\install.ps1 -DryRun -Force`, then follow the preservation procedure in INSTALL.
 Details, uninstall, Windows notes: [docs/INSTALL.md](docs/INSTALL.md).
 
+## Before first use
+
+Task envelopes and replies are plaintext and can be read and modified by same-user processes; task text must not contain secrets.
+Keep-only retention may retain them indefinitely.
+Pruning reduces ordinary accumulation but is not confidentiality or secure deletion.
+Backups, sync tools, snapshots, and filesystem recovery may retain deleted content.
+
 ## Quickstart
+
+The repository-relative Quickstart block below runs from the repository root.
 
 ```bash
 # 1. File-drop (stable): paste the printed pickup line into your Codex session
@@ -52,10 +75,12 @@ node skills/ipc/scripts/codex_ipc_wait.mjs --thread <conversation-id> --dispatch
 
 `codex_ipc_wait` prints exactly one of six tokens on stdout — `done`, `aborted`, `superseded`,
 `reply-missing`, `pending`, `unavailable`. `done` certifies that the **named dispatch's own turn**
-completed; it is never proof that the thread is idle now. With `--accept-rollout-fallback`,
-`reply-missing` means the waiter already exhausted **both** body sources (reply file and rollout
-store): inspect its diagnostics/thread rather than re-harvesting or hand-rolling a poll. On
-`reply-missing`/`aborted`:
+completed; it is never proof that the thread is idle now.
+Only a genuinely absent reply is eligible for waiter rollout fallback.
+A present-but-invalid reply returns `reply-missing` without consulting rollout fallback.
+An absent reply with no certifiable rollout body exhausts the eligible sources.
+Inspect diagnostics/thread rather than re-harvesting,
+auto-resending, or hand-rolling a poll. On `reply-missing`/`aborted`:
 resuming the goal in a fresh, unmarked turn will NOT re-certify the original dispatch id; machine re-certification requires a NEW dispatch with a new marker.
 After an accepted live `--ipc` send the wrapper prints a ready-to-run `WAIT:` line before its final
 `RESULT:` line. Flagless (no `--accept-rollout-fallback`) is the legacy file-primary contract.
@@ -77,7 +102,9 @@ Fallback is stdout-only; it does not create a cache or reconstruct a reply file,
 bodies are not assumed equal.
 Foreground-policy grammar and full operational rules: [skills/ipc/SKILL.md](skills/ipc/SKILL.md).
 
-## Configuration (all env vars; none required for file-drop)
+## Primary wrapper variables
+
+Component-specific options are documented by each tool's --help and [bundled references in the skill guide](skills/ipc/SKILL.md).
 
 | Variable | Default | Effect |
 |---|---|---|
@@ -116,6 +143,30 @@ disclosure opt-in. Threat model: [SECURITY.md](SECURITY.md). Failure triage:
 [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
 
 ## Testing
+
+The canonical complete local gate command is bash tests/run_release_gates.sh.
+
+```bash
+bash tests/run_release_gates.sh
+```
+
+On Windows PowerShell, use this pinned, fail-closed Git Bash procedure:
+
+```powershell
+$GitBash = 'C:\Program Files\Git\bin\bash.exe'
+if (-not (Test-Path -LiteralPath $GitBash -PathType Leaf)) { throw 'Git Bash not found' }
+& $GitBash --version
+if ($LASTEXITCODE -ne 0) { throw 'Git Bash version check failed' }
+& $GitBash -lc 'command -v dirname >/dev/null && command -v git >/dev/null && command -v node >/dev/null && command -v sha256sum >/dev/null'
+if ($LASTEXITCODE -ne 0) { throw 'Git Bash tool preflight failed' }
+& $GitBash -lc 'bash tests/run_release_gates.sh'
+if ($LASTEXITCODE -ne 0) { throw 'release gates failed' }
+```
+
+The full runner covers 13 behavioral suites, text self-test/index/worktree, docs self-test/repository, manifest, public safety, and static contract audit.
+The separate process-ownership meta-gate is nonrecursive, outside the full runner, and runs separately as bash tests/test_gate_process_ownership.sh.
+
+The following four commands are only a partial smoke set:
 
 ```bash
 bash tests/test_ipc.sh
