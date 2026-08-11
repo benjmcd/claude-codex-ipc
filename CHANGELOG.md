@@ -10,9 +10,15 @@ All notable changes to this project will be documented in this file.
 - Public-readiness hardening makes the repository safety scan fail closed, documents private
   vulnerability reporting, and runs CI with read-only permissions and commit-pinned official
   actions.
-- Before public visibility, Git object history and annotated tags are being re-created to remove
+- Before public visibility, Git object history and annotated tags were re-created to remove
   personal mailbox metadata. Release names and content intent remain unchanged, but commit and
   tag object IDs necessarily change; private rollback mappings remain outside the public repo.
+- The public-safety gate now rejects shallow or empty Git history and requires syntactically valid
+  GitHub no-reply formats in raw author, committer, and annotated-tag headers across every
+  reachable commit and tag (with GitHub's service identity allowed as a committer only). This is a
+  privacy-format check, not account or commit authentication. The repository-only safeguard
+  changes no IPC runtime behavior, supplies no fresh live IPC proof, and implies no installed-root
+  propagation.
 
 ## [0.1.13] — 2026-08-05
 

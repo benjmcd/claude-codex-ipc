@@ -89,6 +89,39 @@ if ($LASTEXITCODE -ne 0) { throw 'release gates failed' }
 External links are not fetched by the documentation gate. Hermetic gates do not prove live Codex
 Desktop behavior. Source-candidate commit validation, release rebind and annotated-tag validation, and installed-root propagation are separate states; none implies the next.
 
+## Commit identity privacy
+
+The repository owner should configure this repository, rather than relying on a machine-wide
+identity:
+
+```bash
+git config --local user.name 'benjmcd'
+git config --local user.email '201677302+benjmcd@users.noreply.github.com'
+test "$(git config --local --get user.name)" = 'benjmcd'
+test "$(git config --local --get user.email)" = '201677302+benjmcd@users.noreply.github.com'
+```
+
+Run the two exact checks immediately before committing, and inspect the resulting commit before
+pushing (`git show --no-patch --format=fuller HEAD`). External contributors must configure their
+own name and their own GitHub no-reply address; never copy or impersonate the maintainer identity
+shown above. Both modern `ID+USERNAME@users.noreply.github.com` and legacy
+`USERNAME@users.noreply.github.com` addresses are accepted when they use GitHub's documented
+username syntax.
+
+In GitHub's email settings, also enable **Keep my email addresses private** and **Block command
+line pushes that expose my email**. The repository scanner permits syntactically valid GitHub
+no-reply formats for authors, committers, and taggers, plus GitHub's exact service identity as a
+committer only. It audits raw headers for every commit reachable through the checkout's refs and
+every annotated tag, and rejects shallow or empty history. This is a privacy-format gate, not
+proof that an account exists, that a numeric ID belongs to a username, or that a commit is
+authentic.
+
+The scanner cannot inspect unreachable objects, forks, other clones, or provider caches and
+pull-request refs that are absent from the checkout. A `.mailmap` only changes how some Git tools
+display identities; it does not erase the original bytes. Removing persisted metadata requires a
+disruptive history rewrite, changes commit and tag object IDs, invalidates old clones and links,
+and requires separate hosting-provider cache cleanup where applicable.
+
 ## Live-IPC changes
 
 Changes to the experimental Desktop route (`codex_ipc_client.mjs`, autoload, probes) cannot be
