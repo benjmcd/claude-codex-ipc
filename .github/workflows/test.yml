@@ -4,7 +4,11 @@ name: test
 
 on:
   push:
+    branches: [main]
   pull_request:
+
+permissions:
+  contents: read
 
 jobs:
   test:
@@ -17,27 +21,36 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           # Full history is REQUIRED by the release-manifest step below: the frozen
           # manifests are re-derived from BASE_SHA and from the commit recorded in
           # release/manifests/FINAL_REF, and neither is present in the default depth-1
           # clone. A shallow checkout makes that step die "ref not found", not pass.
           fetch-depth: 0
+          persist-credentials: false
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "22"
 
       - name: Bash and required-tool provenance
         run: |
           set -euo pipefail
-          command -v bash
-          bash --version
-          for tool in dirname git node sha256sum; do
+          # Direct external dependencies of tests/run_release_gates.sh and
+          # tests/scan_public_safety.sh, plus the manifest hash primitive invoked by the
+          # runner. Keep the scanner subset synchronized with its own fail-closed preflight.
+          for tool in awk basename bash dirname find git grep mktemp node ps rm sed sha256sum sh sleep sort tail tr uname; do
             command -v "$tool" >/dev/null || { echo "missing required tool: $tool" >&2; exit 2; }
             command -v "$tool"
           done
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            for tool in powershell.exe taskkill; do
+              command -v "$tool" >/dev/null || { echo "missing required Windows tool: $tool" >&2; exit 2; }
+              command -v "$tool"
+            done
+          fi
+          bash --version
 
       - name: Shell syntax (bash -n)
         run: |

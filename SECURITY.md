@@ -88,6 +88,13 @@ explicit operator approval.
 
 ## Reporting
 
-Report issues through the repository's issue tracker
-(<https://github.com/benjmcd/claude-codex-ipc/issues>) — or, for anything sensitive, directly to
-the maintainer ([benjmcd](https://github.com/benjmcd)) out of band.
+Do not disclose suspected vulnerabilities in a public issue, discussion, pull request, or other
+public channel.
+
+While this repository is private, contact the maintainer
+([benjmcd](https://github.com/benjmcd)) through a non-public contact method they have made
+available. Do not send vulnerability details through the public issue tracker.
+
+After the repository becomes public and GitHub Private Vulnerability Reporting is enabled, use
+the repository's **Security** tab and select **Report a vulnerability**. Use the public issue
+tracker only for non-sensitive bugs and documentation problems.
