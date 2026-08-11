@@ -167,6 +167,10 @@ jobs:
         run: node skills/ipc/scripts/codex_ipc_contract_audit.mjs
 
       - name: Public-safety scan
+        env:
+          # pull_request checks run on a provider-generated merge commit. Audit the publishable
+          # contributor head explicitly; the scanner intentionally ignores synthetic merge refs.
+          PUBLIC_SAFETY_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: bash tests/scan_public_safety.sh
 
       - name: Full install.sh projection and installed docs/text policy

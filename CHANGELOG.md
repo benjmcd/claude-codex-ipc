@@ -15,10 +15,11 @@ All notable changes to this project will be documented in this file.
   tag object IDs necessarily change; private rollback mappings remain outside the public repo.
 - The public-safety gate now rejects shallow or empty Git history and requires syntactically valid
   GitHub no-reply formats in raw author, committer, and annotated-tag headers across every
-  reachable commit and tag (with GitHub's service identity allowed as a committer only). This is a
-  privacy-format check, not account or commit authentication. The repository-only safeguard
-  changes no IPC runtime behavior, supplies no fresh live IPC proof, and implies no installed-root
-  propagation.
+  commit reachable from publishable local/origin branch or tag refs, plus the explicit PR head
+  supplied by CI (with GitHub's service identity allowed as a committer only). Provider-generated
+  synthetic merge commits are excluded. This is a privacy-format check, not account or commit
+  authentication. The repository-only safeguard changes no IPC runtime behavior, supplies no
+  fresh live IPC proof, and implies no installed-root propagation.
 
 ## [0.1.13] — 2026-08-05
 

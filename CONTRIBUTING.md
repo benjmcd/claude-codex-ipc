@@ -111,16 +111,20 @@ username syntax.
 In GitHub's email settings, also enable **Keep my email addresses private** and **Block command
 line pushes that expose my email**. The repository scanner permits syntactically valid GitHub
 no-reply formats for authors, committers, and taggers, plus GitHub's exact service identity as a
-committer only. It audits raw headers for every commit reachable through the checkout's refs and
-every annotated tag, and rejects shallow or empty history. This is a privacy-format gate, not
-proof that an account exists, that a numeric ID belongs to a username, or that a commit is
-authentic.
+committer only. It audits raw headers for every commit reachable from publishable checkout refs
+(`refs/heads/*`, `refs/remotes/origin/*`, and `refs/tags/*`) and from the explicit PR head SHA
+supplied by CI. It also validates every annotated tag and rejects shallow or rootless history.
+This is a privacy-format gate, not proof that an account exists, that a numeric ID belongs to a
+username, or that a commit is authentic.
 
-The scanner cannot inspect unreachable objects, forks, other clones, or provider caches and
-pull-request refs that are absent from the checkout. A `.mailmap` only changes how some Git tools
-display identities; it does not erase the original bytes. Removing persisted metadata requires a
+Detached HEAD and provider-only pull/merge refs are not publishable roots. In particular, CI does
+not treat GitHub's synthetic PR merge commit as repository-authored history; it audits the PR head
+instead. Synthetic-commit metadata is governed by the account's privacy settings, so enable the
+two GitHub controls above before merging. The scanner also cannot inspect unreachable objects,
+forks, other clones, or provider caches. A `.mailmap` only changes how some Git tools display
+identities; it does not erase the original bytes. Removing persisted metadata requires a
 disruptive history rewrite, changes commit and tag object IDs, invalidates old clones and links,
-and requires separate hosting-provider cache cleanup where applicable.
+and may require GitHub Support to clear cached views or provider-managed PR refs.
 
 ## Live-IPC changes
 

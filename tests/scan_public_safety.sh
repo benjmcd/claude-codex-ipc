@@ -159,10 +159,49 @@ case "$is_shallow" in
     *) fatal "unexpected shallow-repository result" ;;
 esac
 
+publishable_refs=""
+capture_required publishable_refs "publishable-ref enumeration" \
+    git -C "$ROOT" for-each-ref --format='%(refname)' \
+        refs/heads refs/remotes/origin refs/tags
+
+audit_roots=()
+if [[ -n "$publishable_refs" ]]; then
+    while IFS= read -r publishable_ref; do
+        case "$publishable_ref" in
+            refs/heads/*|refs/remotes/origin/*|refs/tags/*) ;;
+            *) fatal "invalid ref from publishable-ref enumeration" ;;
+        esac
+        root_oid=""
+        capture_required root_oid "publishable-ref resolution for $publishable_ref" \
+            git -C "$ROOT" rev-parse --verify "$publishable_ref^{commit}"
+        [[ "$root_oid" =~ ^[0-9a-f]{40,64}$ ]] \
+            || fatal "invalid object id for publishable ref $publishable_ref"
+        audit_roots+=("$root_oid")
+    done <<<"$publishable_refs"
+fi
+
+pr_head_sha="${PUBLIC_SAFETY_PR_HEAD_SHA-}"
+if [[ -n "$pr_head_sha" ]]; then
+    [[ "$pr_head_sha" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]] \
+        || fatal "PUBLIC_SAFETY_PR_HEAD_SHA is not a lowercase commit object id"
+    pr_head_kind=""
+    capture_required pr_head_kind "PUBLIC_SAFETY_PR_HEAD_SHA object read" \
+        git -C "$ROOT" cat-file -t "$pr_head_sha"
+    [[ "$pr_head_kind" == "commit" ]] \
+        || fatal "PUBLIC_SAFETY_PR_HEAD_SHA does not directly identify a commit"
+    audit_roots+=("$pr_head_sha")
+fi
+
+(( ${#audit_roots[@]} > 0 )) || fatal "no publishable Git history roots"
+sorted_roots=""
+capture_required sorted_roots "publishable-root deduplication" sort -u \
+    <<<"$(printf '%s\n' "${audit_roots[@]}")"
+mapfile -t audit_roots <<<"$sorted_roots"
+
 commit_oids=""
-capture_required commit_oids "reachable commit enumeration" \
-    git -C "$ROOT" rev-list --all
-[[ -n "$commit_oids" ]] || fatal "no reachable Git history"
+capture_required commit_oids "publishable commit enumeration" \
+    git -C "$ROOT" rev-list "${audit_roots[@]}"
+[[ -n "$commit_oids" ]] || fatal "no commits reachable from publishable roots"
 
 while IFS= read -r oid; do
     [[ "$oid" =~ ^[0-9a-f]{40,64}$ ]] || fatal "invalid commit object id from rev-list"
