@@ -54,14 +54,16 @@ exact dispatch occurrence completed; `latestOccurrence` reports the newest exact
 and global freshness additionally requires that occurrence to be certifiably complete with no
 opaque malformed/unknown-schema suffix after its boundary. A valid primary reply remains selected
 for viewing, but opaque later schema keeps the waiter machine token `unavailable`. Two distinct
-exact marker occurrences are dispatch-ID reuse: the single reply path cannot identify its writer,
-so the waiter remains `unavailable` even when one or both occurrences completed. The viewer may
-still show a primary reply, but marks supersession `unavailable` and cautions that the body may be
-stale; it never supplies a rollout-fallback body or a positive/negative supersession conclusion for
-the reused ID. Same-item mirror records collapsed into one logical occurrence are not reuse.
-Absent reuse, rollout fallback and a negative supersession claim require settled freshness. An
-exact positive `REPLY-SUPERSEDED` completion remains positive when later uncertainty is not another
-exact occurrence, and discloses that uncertainty rather than erasing it.
+bound-turn exact marker occurrences are dispatch-ID reuse: the single reply path cannot identify
+its writer, so the waiter remains `unavailable` even when one or both occurrences completed. The
+viewer may still show a primary reply, but marks supersession `unavailable` and cautions that the
+body may be stale; it never supplies a rollout-fallback body or a positive/negative supersession
+conclusion for the reused ID. Same-item mirror records collapsed into one logical occurrence are
+not reuse. A distinct later user item in the same turn invalidates binding as
+`intervening-user-message`; identical text alone does not create a separately bound reuse
+occurrence. Absent reuse, rollout fallback and a negative supersession claim require settled
+freshness. An exact positive `REPLY-SUPERSEDED` completion remains positive when later uncertainty
+is not another exact occurrence, and discloses that uncertainty rather than erasing it.
 
 ## Delivery routes on top of the transport
 

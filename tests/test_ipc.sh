@@ -609,8 +609,27 @@ sid_run "00000000-0000-4000-8000-000000000000" \
 echo "== 31. A5 producer denied-reply protocol lands in the generated payload (E1 fixture) =="
 # E1 (sanitized): a managed-sandbox reply write is denied. The generated payload must instruct the
 # follower to attempt the printed reply path exactly once, not retry, and put the FULL substantive
-# result in its final agent message. Assert the branch is present in BOTH a filedrop and an --ipc
-# envelope (both share the one PAYLOAD scaffold).
+# result in its final agent message. It must also distinguish token-only waiter certification from
+# read-only dual-source viewer body retrieval and reject the stale full-message-via-waiter claim.
+# Assert both contracts in BOTH a filedrop and an --ipc envelope (they share one PAYLOAD scaffold).
+assert_recovery_guidance(){ # $1 payload, $2 carrier label
+  local payload="$1" carrier="$2"
+  if [[ -n "$payload" ]] \
+    && grep -Fq "certifies named-dispatch completion" "$payload" \
+    && grep -Fq "replySource=rollout-fallback" "$payload" \
+    && grep -Fq "intentionally emits no body" "$payload" \
+    && grep -Fq "retrieve and render" "$payload" \
+    && grep -Fq "read-only dual-source scripts/codex_ipc_replies.sh" "$payload" \
+    && grep -Fq "display at 4096 bytes by default" "$payload" \
+    && grep -Fq "if it reports truncation" "$payload" \
+    && grep -Fq "rerun it with a sufficient --max-bytes" "$payload" \
+    && ! grep -Fq "dispatcher recovers a full final message only via" "$payload"; then
+    ok "$carrier payload distinguishes waiter certification from viewer body retrieval"
+  else
+    no "$carrier payload misstates waiter/body recovery"
+  fi
+}
+
 run "$REPO" "sessE1" "review the sandboxed change and reply"
 E1_FD=$(find "$IPCROOT/sessE1/filedrop" -name '*.task.md' 2>/dev/null | head -1)
 if [[ -n "$E1_FD" ]] \
@@ -622,6 +641,7 @@ if [[ -n "$E1_FD" ]] \
 else
   no "filedrop payload missing the denied-reply protocol"
 fi
+assert_recovery_guidance "$E1_FD" "filedrop"
 
 : > "$TMP/nodeargs.log"
 run "$REPO" "sessE1ipc" --ipc "$UUID" --allow-any-thread "review the sandboxed change and reply"
@@ -634,6 +654,7 @@ if [[ -n "$E1_IPC" ]] \
 else
   no "--ipc payload missing the denied-reply protocol"
 fi
+assert_recovery_guidance "$E1_IPC" "--ipc"
 
 assert_no_codex_cli
 

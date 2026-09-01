@@ -18,6 +18,15 @@ All notable changes to this project will be documented in this file.
 - Documentation and repository gates now enforce the UTF-8/LF text policy and documentation
   contracts. Intentional Unicode is retained. Primary dispatch behavior did not change, no fresh
   live proof was performed, and no release or installed propagation is implied.
+- Current recovery documentation supersedes older dated shorthand that described a blocked reply
+  as recovered through `codex_ipc_wait --accept-rollout-fallback`. The waiter certifies
+  named-dispatch completion and `replySource=rollout-fallback` but intentionally emits no body;
+  the existing read-only dual-source `scripts/codex_ipc_replies.sh` viewer retrieves and renders
+  it. Display is capped at 4096 bytes by default; if truncation is reported, rerun with a
+  sufficient `--max-bytes`. The one-attempt, no-substitute, no-resend producer protocol,
+  delivery/refusal behavior, and waiter/viewer recovery-tool control flow are unchanged;
+  generated payload guidance bytes intentionally change, and older release entries remain as
+  historical context.
 - Public-readiness hardening makes the repository safety scan fail closed, documents private
   vulnerability reporting, and runs CI with read-only permissions and commit-pinned official
   actions.

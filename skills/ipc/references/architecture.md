@@ -58,12 +58,14 @@ matches one body; missing, empty, or nonmatching terminal evidence remains unava
 
 Historical completion is monotone evidence for that occurrence. A readable primary reply therefore
 remains selected for viewing when later schema makes freshness opaque, but it may be stale and the
-waiter returns `unavailable`. Two distinct exact marker occurrences reuse one dispatch ID; the one
-reply path cannot identify its writer, so the waiter remains `unavailable` even if one or both
-occurrences completed. The viewer may still show a primary reply, but it marks supersession
+waiter returns `unavailable`. Two distinct bound-turn exact marker occurrences reuse one dispatch
+ID; the one reply path cannot identify its writer, so the waiter remains `unavailable` even if one
+or both occurrences completed. The viewer may still show a primary reply, but it marks supersession
 `unavailable`, emits a stale-body caution, and never supplies a rollout-fallback body or a
 positive/negative supersession conclusion for the reused ID. Same-item mirror records collapsed to
-one logical occurrence are not reuse. Absent reuse, rollout fallback and a negative claim that
+one logical occurrence are not reuse. A distinct later user item in the same turn invalidates
+binding as `intervening-user-message`; identical text alone does not create a separately bound
+reuse occurrence. Absent reuse, rollout fallback and a negative claim that
 `REPLY-SUPERSEDED` was not seen require settled freshness, so neither can borrow an older completed
 occurrence. An exact positive `REPLY-SUPERSEDED` completion remains positive only when later
 uncertainty is not another exact occurrence; that uncertainty is disclosed separately.

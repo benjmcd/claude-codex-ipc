@@ -70,9 +70,12 @@ explicit conversationId and compares before/after isolation evidence.
 
 Expected, not an error. The injected follower turn can run under a sandbox that blocks the
 per-dispatch `.reply.md` write. The producer states the denial in one line and puts the full
-substantive result in its final agent message; recover it with
-`codex_ipc_wait --accept-rollout-fallback` on a known-UUID `--ipc` dispatch (flagless and filedrop
-do not auto-recover). The inspector's stored `sandboxPolicy`/`approvalMode` are advisory only
+substantive result in its final agent message. On a known-UUID `--ipc` dispatch,
+`codex_ipc_wait --accept-rollout-fallback` certifies named-dispatch completion and
+`replySource=rollout-fallback` but intentionally emits no body; retrieve and render the body with
+the existing read-only dual-source `scripts/codex_ipc_replies.sh` viewer. Display is capped at 4096
+bytes by default; if truncation is reported, rerun with a sufficient `--max-bytes`. Flagless and
+filedrop do not auto-recover. The inspector's stored `sandboxPolicy`/`approvalMode` are advisory only
 (`permissionProfileAdvisory`): they may differ from the effective turn and never predict
 reply-writability.
 

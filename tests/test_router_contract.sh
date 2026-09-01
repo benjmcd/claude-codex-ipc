@@ -252,8 +252,8 @@ case "$name" in
         exit 1
         ;;
       no-client-orphan)
-        printf '%s\n' '{"ok":false,"dbThread":{"exists":true,"readOnlyOpenOk":true,"thread":{"exists":false}},"rollout":{"primary":{"parsedOk":true}}}'
-        exit 1
+        printf '%s\n' '{"ok":true,"dbThread":{"exists":true,"readOnlyOpenOk":true,"thread":{"exists":false}},"rollout":{"primary":{"parsedOk":true}}}'
+        exit 0
         ;;
       no-client-archived)
         printf '{"ok":true,"dbThread":{"exists":true,"readOnlyOpenOk":true,"thread":{"exists":true,"id":"%s","archived":1}}}\n' "$target"
@@ -333,8 +333,8 @@ run_wrapper_case no-client 1 \
   "RESULT: failed-closed -- reason=target-not-found -- confirmation=not-attempted" \
   "no-client-found reaches guarded ownership handling"
 run_wrapper_case no-client-orphan 1 \
-  "RESULT: failed-closed -- reason=target-not-found -- confirmation=not-attempted" \
-  "orphan rollout evidence cannot substitute for a DB target row"
+  "RESULT: failed-closed -- reason=target-inspection-ambiguous -- confirmation=not-attempted" \
+  "parseable orphan without a trusted DB row fails ambiguous without autoload"
 run_wrapper_case no-client-archived 1 \
   "RESULT: failed-closed -- reason=target-archived -- confirmation=not-attempted" \
   "exact archived DB state blocks autoload"

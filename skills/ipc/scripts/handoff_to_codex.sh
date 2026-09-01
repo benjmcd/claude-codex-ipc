@@ -530,9 +530,11 @@ Reply-write policy (a denied write is EXPECTED, not an error): first self-verify
 attempt to write the printed reply path exactly once. If that write is denied by a sandbox or
 permission boundary, do NOT retry, debug, request escalation, or substitute another file. Instead,
 state the denial in one line AND put the full substantive result (not just the denial) in your final
-agent message, then complete the turn. A one-line denial with no result is a contract violation; the
-dispatcher recovers a full final message only via the opt-in codex_ipc_wait.mjs
---accept-rollout-fallback path.
+agent message, then complete the turn. A one-line denial with no result is a contract violation. The
+opt-in codex_ipc_wait.mjs --accept-rollout-fallback path certifies named-dispatch completion and
+replySource=rollout-fallback but intentionally emits no body. The dispatcher must retrieve and render
+the body with the existing read-only dual-source scripts/codex_ipc_replies.sh viewer. The viewer caps
+display at 4096 bytes by default; if it reports truncation, rerun it with a sufficient --max-bytes.
 
 ## Branch
 ${BRANCH}  (merge target: ${MAIN_BRANCH})

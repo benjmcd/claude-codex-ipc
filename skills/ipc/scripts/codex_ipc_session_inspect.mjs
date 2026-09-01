@@ -310,8 +310,10 @@ function summarizeThread(row) {
     // / `threads.sandbox_policy` columns (permission-profile-shaped: observed `disabled`/`managed`).
     // They are the stored thread row, NOT the effective next-turn `turn_context.sandbox_policy`, so
     // they may differ from the turn that actually runs and MUST NOT gate a dispatch or be read as a
-    // reply-writability prediction. A blocked reply write is a non-event recovered via
-    // `codex_ipc_wait --accept-rollout-fallback` (A1), never a policy gate. Completion-time
+    // reply-writability prediction. A blocked reply write is a non-event: the opt-in waiter
+    // certifies named-dispatch completion and `replySource=rollout-fallback` but intentionally emits
+    // no body; retrieval belongs to the read-only dual-source `codex_ipc_replies.sh` viewer, never a
+    // policy gate. Completion-time
     // re-stamping was observed evidence, not a stable timing contract.
     approvalMode: row.approval_mode || null,
     sandboxPolicy: parseJsonColumn(row.sandbox_policy),

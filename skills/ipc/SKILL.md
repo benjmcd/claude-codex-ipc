@@ -129,9 +129,12 @@ Use the inspector output to identify: the target title, cwd/project, model, reas
 archived flag, and rollout path; the thread's stored `approvalMode`/`sandboxPolicy` (carried
 alongside `permissionProfileAdvisory`) — advisory context only: they are the stored thread row,
 may differ from the effective turn, and MUST NOT gate the dispatch or be read as a
-reply-writability prediction. A blocked reply write is expected, not an error, and is recovered
-via `codex_ipc_wait --accept-rollout-fallback` (a known-UUID `--ipc` dispatch), never a policy
-gate; the latest
+reply-writability prediction. A blocked reply write is expected, not an error. For a known-UUID
+`--ipc` dispatch, `codex_ipc_wait --accept-rollout-fallback` certifies named-dispatch completion
+and `replySource=rollout-fallback` but intentionally emits no body; retrieve and render the body
+with the existing read-only dual-source `scripts/codex_ipc_replies.sh` viewer. Display is capped at
+4096 bytes by default; if truncation is reported, rerun with a sufficient `--max-bytes`. This is
+never a policy gate. Identify the latest
 user/agent/task-complete signals; and `activitySignals.turnActivity` — the authoritative
 open/closed/ambiguous read of the latest turn boundary from the shared turn-boundary machine over
 the FULL rollout stream (`open` = a start/user turn with no matching terminal; `closed` = the
@@ -290,12 +293,14 @@ noncomplete or uncertifiable. Global `freshness` is settled only when that newes
 certifiably complete and no later malformed or unknown-schema record makes the post-boundary
 suffix opaque. A readable primary reply remains selected for viewing when historical completion is
 proven, but it may be stale: opaque post-occurrence schema keeps the waiter `unavailable`. Two
-distinct exact marker occurrences are dispatch-ID reuse; because one reply path cannot identify
+distinct bound-turn exact marker occurrences are dispatch-ID reuse; because one reply path cannot identify
 which occurrence wrote it, the waiter returns `unavailable` even if one or both occurrences are
 complete. The viewer may still show a primary reply, but it marks supersession `unavailable`, emits
 a stale-body caution, and never supplies a rollout-fallback body or a positive/negative
 supersession conclusion for that reused ID. Same-item mirror records that collapse to one logical
-occurrence are not reuse. Absent reuse, rollout fallback and a negative claim that
+occurrence are not reuse. A distinct later user item in the same turn invalidates binding as
+`intervening-user-message`; identical text alone does not create a separately bound reuse
+occurrence. Absent reuse, rollout fallback and a negative claim that
 `REPLY-SUPERSEDED` was not seen require settled freshness; they never borrow the older completion.
 Conversely, an exact positive `REPLY-SUPERSEDED` completion remains positive when later
 non-occurrence freshness is unknown, with uncertainty disclosed.
@@ -363,10 +368,12 @@ payload instructs the follower to self-verify, then attempt the printed reply pa
 a sandbox/permission denial the follower must NOT retry, debug, request escalation, or substitute
 another file — it states the denial in one line AND puts the full substantive result (not just the
 denial) in its final agent message, then completes. A one-line denial with no result is a contract
-violation. On the dispatcher side, a full final message is recoverable only via the opt-in
-`codex_ipc_wait.mjs --accept-rollout-fallback` path on a known-UUID `--ipc` dispatch (it certifies
-`done` with `replySource=rollout-fallback`); flagless invocation stays file-primary and filedrop is not
-auto-recoverable. Dispatch never changes the target thread's model, reasoning, sandbox, or approval.
+violation. On the dispatcher side, the opt-in `codex_ipc_wait.mjs --accept-rollout-fallback` path
+on a known-UUID `--ipc` dispatch certifies named-dispatch `done` with
+`replySource=rollout-fallback` but intentionally emits no body. Retrieve and render the full final
+message with the existing read-only dual-source `scripts/codex_ipc_replies.sh` viewer; flagless
+invocation stays file-primary and filedrop is not auto-recoverable. Dispatch never changes the
+target thread's model, reasoning, sandbox, or approval.
 
 ## New-session mode
 
@@ -402,9 +409,11 @@ attempt to override them through the delivery route, the client flags, or any ot
 never mutate. Consistent with the advisory rule above, do NOT treat a stored `sandboxPolicy` or
 `approvalMode` as a prediction that the reply write will fail: a stored `managed` sandbox is not a
 reason to pick a different thread. A blocked reply write is expected, not an error, and is
-recovered via `codex_ipc_wait --accept-rollout-fallback`. Reserve "choose another thread or ask the
-operator" for cases the inspector proves — missing, archived, or identity-mismatched targets — not
-for stored policy rows. Model/reasoning tier guidance in a task belongs to the thread's
+certified as named-dispatch completion with `replySource=rollout-fallback` by
+`codex_ipc_wait --accept-rollout-fallback`; the waiter intentionally emits no body, so retrieve and
+render it with the read-only dual-source `scripts/codex_ipc_replies.sh` viewer. Reserve "choose
+another thread or ask the operator" for cases the inspector proves — missing, archived, or
+identity-mismatched targets — not for stored policy rows. Model/reasoning tier guidance in a task belongs to the thread's
 SUBAGENT deployment instructions, not to the thread itself.
 
 ## Cross-session context

@@ -28,9 +28,13 @@ Per the `/ipc` workspace-scoping rule, place the FILLED handoff inside the assoc
   denied by a sandbox or permission boundary, do NOT retry, debug, request escalation, or substitute
   another file — state the denial in one line AND put the full substantive result (not just the
   denial) in your final agent message, then complete. A one-line denial with no result is a contract
-  violation. The dispatcher recovers that final message only via the opt-in `codex_ipc_wait.mjs
-  --accept-rollout-fallback` path (a known UUID `--ipc` dispatch); flagless and filedrop do not
-  recover it automatically. If a post-reply amendment ever becomes
+  violation. On a known UUID `--ipc` dispatch, the opt-in `codex_ipc_wait.mjs
+  --accept-rollout-fallback` waiter certifies named-dispatch completion and
+  `replySource=rollout-fallback` but intentionally emits no body. The dispatcher retrieves and
+  renders the body with the existing read-only dual-source `scripts/codex_ipc_replies.sh` viewer.
+  Its display is capped at 4096 bytes by default; if it reports truncation, rerun it with a
+  sufficient `--max-bytes`. Flagless and filedrop do not recover the denied-write fallback
+  automatically. If a post-reply amendment ever becomes
   unavoidable, supersede explicitly: state `REPLY-SUPERSEDED` as the FIRST LINE of a final
   message (the harvester's marker detection is first-line exact-token by design) and overwrite
   the same dispatch's reply file. KNOWN LIMITATION: reply viewing is file-primary by design, so
