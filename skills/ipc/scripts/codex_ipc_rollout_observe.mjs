@@ -3,6 +3,8 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import {
   DEFAULT_MAX_RECORD_BYTES,
+  inspectRolloutNoGrowth,
+  isCompleteReaderCursor,
   locateRollout,
   readRolloutFile,
 } from "./codex_ipc_rollout_reader.mjs";
@@ -51,14 +53,19 @@ function admissionSeen(records, dispatchId) {
 export async function observeRollout(options, injected = {}) {
   const now = injected.now || Date.now;
   const sleep = injected.sleep || defaultSleep;
+  const readRolloutFileImpl = injected.readRolloutFile || readRolloutFile;
+  const inspectNoGrowth = injected.inspectRolloutNoGrowth || inspectRolloutNoGrowth;
   const budgetMs = options.budgetMs;
   const intervalMs = options.intervalMs;
   const maxIterations = Math.ceil(budgetMs / intervalMs) + 1;
   const startedAt = now();
   let candidatePath = null;
+  let candidateIdentityKey = null;
   let cursor = null;
   let readableCandidate = false;
-  let schemaFailure = false;
+  let softSchemaDrift = false;
+  let hardReadFailure = false;
+  let admissionObserved = false;
   const diagnostics = [];
 
   for (let iteration = 0; iteration < maxIterations; iteration += 1) {
@@ -77,38 +84,70 @@ export async function observeRollout(options, injected = {}) {
       }
       if (located.status === "found") {
         candidatePath = located.path;
+        candidateIdentityKey = located.candidates?.[0]?.identityKey || null;
         readableCandidate = true;
       }
     }
 
     if (candidatePath) {
-      let admission = false;
-      const parsed = readRolloutFile(candidatePath, {
-        ...(cursor ? { cursor } : {}),
-        maxRecordBytes: options.maxRecordBytes,
-        deadlineAt: startedAt + budgetMs,
-        now,
-        retainRecords: false,
-        onRecord: (item) => {
-          if (admissionSeen([item], options.dispatchId)) admission = true;
-        },
-      });
-      diagnostics.push(...(parsed.diagnostics || []));
-      const trustedRead = parsed.ok || (
-        parsed.reason === "deadline-exceeded" && parsed.integrityValidated
-      );
-      if (trustedRead && admission) {
-        return { token: "rollout-hit", diagnostics };
-      }
-      if (parsed.ok) {
-        readableCandidate = true;
-        cursor = parsed.cursor;
-        if (parsed.parseErrorCount > 0) schemaFailure = true;
-      } else if (parsed.reason === "deadline-exceeded") {
-        if (readableCandidate) break;
-        return { token: "rollout-unavailable", diagnostics };
-      } else if (parsed.reason !== "missing") {
-        schemaFailure = true;
+      const attemptStartedAt = now();
+      const forceFullRead =
+        iteration + 1 >= maxIterations ||
+        attemptStartedAt + intervalMs >= startedAt + budgetMs;
+      if (
+        cursor &&
+        isCompleteReaderCursor(cursor) &&
+        !forceFullRead &&
+        inspectNoGrowth(candidatePath, cursor).unchanged
+      ) {
+        // A metadata-only no-growth observation is never evidence. It may skip an intermediate
+        // full read solely to keep waiting; growth/change and any final or budget-edge attempt
+        // that begins before the deadline return to the hash-validating reader below. A deadline
+        // that elapses during sleep returns unavailable/pending evidence without certification.
+      } else {
+        let readAdmission = false;
+        const parsed = readRolloutFileImpl(candidatePath, {
+          ...(cursor ? { cursor } : {}),
+          rolloutThreadId: options.threadId,
+          ...(candidateIdentityKey ? { expectedIdentityKey: candidateIdentityKey } : {}),
+          maxRecordBytes: options.maxRecordBytes,
+          deadlineAt: startedAt + budgetMs,
+          now,
+          retainRecords: false,
+          onRecord: (item) => {
+            if (admissionSeen([item], options.dispatchId)) readAdmission = true;
+          },
+        });
+        diagnostics.push(...(parsed.diagnostics || []));
+        const completeRead = parsed.ok && isCompleteReaderCursor(parsed.cursor);
+        const readDiagnostics = parsed.diagnostics || [];
+        if (readDiagnostics.some((item) => item.code === "schema-drift")) {
+          softSchemaDrift = true;
+        }
+        if (
+          parsed.parseErrorCount > 0 ||
+          readDiagnostics.some((item) => item.code === "malformed-json") ||
+          (!parsed.ok && parsed.reason !== "deadline-exceeded")
+        ) {
+          hardReadFailure = true;
+        }
+        if (parsed.ok && readAdmission) admissionObserved = true;
+        // `onRecord` receives only normalized, owner-bound, known-form records. Once an exact
+        // user admission from a trusted read is carried to a stable EOF, unrelated schema drift
+        // elsewhere remains diagnostic but cannot erase that positive admission proof. Drift or
+        // malformed bytes that merely contain the basename never reach `onRecord`. Any parse or
+        // hard reader/integrity failure vetoes a hit even if an earlier exact admission was seen.
+        if (completeRead && admissionObserved && !hardReadFailure) {
+          return { token: "rollout-hit", diagnostics };
+        }
+        if (parsed.ok) {
+          readableCandidate = true;
+          cursor = parsed.cursor;
+          if (!completeRead) diagnostics.push({ code: "rollout-read-not-at-eof" });
+        } else if (parsed.reason === "deadline-exceeded") {
+          if (readableCandidate) break;
+          return { token: "rollout-unavailable", diagnostics };
+        }
       }
     }
 
@@ -117,7 +156,7 @@ export async function observeRollout(options, injected = {}) {
     await sleep(Math.min(intervalMs, Math.max(1, budgetMs - elapsed)));
   }
 
-  if (schemaFailure || !readableCandidate) {
+  if (hardReadFailure || softSchemaDrift || !readableCandidate) {
     return { token: "rollout-unavailable", diagnostics };
   }
   return { token: "rollout-pending", diagnostics };

@@ -32,6 +32,11 @@ Desktop update, silently. Revalidate experimental features with
 | Touches live Desktop state | No |
 | Source precedence | A readable regular non-symlink per-dispatch `*.reply.md` is primary; only when it is absent or unreadable may an exactly correlated completed rollout provide stdout-only fallback; otherwise `source=none` is visible |
 
+Rollout observation/fallback requires the requested thread ID to own the selected physical rollout.
+If Desktop remaps that target ID to a differently owned physical rollout, the tools return
+`unavailable` rather than infer an untrusted alias. File-primary replies and the preserved file-drop
+envelope remain available.
+
 ## Session inspector (`codex_ipc_session_inspect.mjs`)
 
 | | |
@@ -60,7 +65,7 @@ Same dependencies as the inspector for snapshot mode; `--compare` mode is pure J
 | Dependencies | Node.js; Codex Desktop running; private router protocol (`initialize`, `thread-follower-start-turn`, uint32le framing) |
 | Stability | **Experimental** — private internals; assume broken after any Desktop update until revalidated |
 | Touches live Desktop state | **Yes** — a live send starts a real model turn in the target thread |
-| Fallback | File-drop envelope is written first in every outcome; its pickup line is printed only on a proven pre-send failure. After an ambiguous post-attempt result (`confirmation=unknown`) pickup is suppressed — do not resend |
+| Fallback | File-drop envelope is written first in every outcome; its pickup line is printed only when structured evidence proves no follower was admitted. `confirmation=not-attempted` does not imply that no router request occurred. After an ambiguous post-attempt result (`confirmation=unknown`) pickup is suppressed — do not resend |
 
 ## `codex://` autoload + PowerShell focus restore (`codex_ipc_autoload.ps1`)
 
@@ -71,7 +76,7 @@ Same dependencies as the inspector for snapshot mode; `--compare` mode is pure J
 | Stability | **Experimental** — UX-level automation over private behavior; foreground-policy-aware (default `defer` never navigates the visible Codex app; `switch` requires explicit acknowledgement; `restore-if-known` fail-closed; unidentifiable foreground defers). Foreground identity is positive (process name + `WindowsApps\OpenAI.Codex_*` executable path), covering the pre-merge `Codex.exe` GUI and the post-2026-07-09 `ChatGPT.exe` GUI; an ambiguous `ChatGPT`-named foreground (unreadable path) is gated as Codex and defers. Hermetic behavioral matrix: `tests/test_autoload_matrix.sh` |
 | Exit codes | `0` deep-link done (or dry-run), `1` focus restore unverified, `2` deferred, `4` restore unproven, `5` switch unacknowledged — wrapper maps all; unknown codes fail closed |
 | Touches live Desktop state | Yes — loads the target thread (background window on the default path; the VISIBLE window under authorized `switch` — disclosed residue) |
-| Fallback | Wrapper reports `gui-unowned`/`failed-closed` with reason token and manual `codex://threads/<id>` remediation. The file-drop pickup line is printed only when the failure is proven pre-send (`confirmation=not-attempted`). A post-autoload retry can end `failed-closed -- reason=retry-ambiguous-outcome -- confirmation=unknown`; there the envelope is preserved but no pickup line is printed — do not resend |
+| Fallback | Wrapper reports `gui-unowned`/`failed-closed` with reason token and manual `codex://threads/<id>` remediation. The file-drop pickup line is printed only when structured evidence proves no follower was admitted (`confirmation=not-attempted`; an exact `no-client-found` request may still have occurred). A post-autoload retry can end `failed-closed -- reason=retry-ambiguous-outcome -- confirmation=unknown`; there the envelope is preserved but no pickup line is printed — do not resend |
 
 ## Removed in v0.1.8: `--app` / `--open` / `--exec`
 

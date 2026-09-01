@@ -5,12 +5,19 @@ set -uo pipefail
 
 TDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INSPECT=""
+SNAPSHOT=""
 for candidate in \
   "$TDIR/../skills/ipc/scripts/codex_ipc_session_inspect.mjs" \
   "$TDIR/../scripts/codex_ipc_session_inspect.mjs"; do
   [[ -f "$candidate" ]] && INSPECT="$candidate" && break
 done
 [[ -n "$INSPECT" ]] || { echo "FATAL: codex_ipc_session_inspect.mjs not found" >&2; exit 1; }
+for candidate in \
+  "$TDIR/../skills/ipc/scripts/codex_ipc_snapshot.mjs" \
+  "$TDIR/../scripts/codex_ipc_snapshot.mjs"; do
+  [[ -f "$candidate" ]] && SNAPSHOT="$candidate" && break
+done
+[[ -n "$SNAPSHOT" ]] || { echo "FATAL: codex_ipc_snapshot.mjs not found" >&2; exit 1; }
 
 if ! command -v node >/dev/null 2>&1; then
   echo "SKIP: node is unavailable; session-inspector suite not applicable"
@@ -25,6 +32,9 @@ fi
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 THREAD="11111111-1111-4111-8111-111111111111"
+PAGE="00000000-0000-4000-8000-00000000c0de"
+HISTORY_BASE="33333333-3333-4333-8333-333333333333"
+OTHER_THREAD="22222222-2222-4222-8222-222222222222"
 PASS=0
 FAIL=0
 OUT=""
@@ -65,6 +75,30 @@ try {
 }
 EOF
 
+SNAPSHOT_DB_BUILDER="$TMP/build-snapshot-db.mjs"
+cat > "$SNAPSHOT_DB_BUILDER" <<'EOF'
+import { DatabaseSync } from "node:sqlite";
+import fs from "node:fs";
+
+const [dbPath, ...threadIds] = process.argv.slice(2);
+const columns = [
+  "id", "rollout_path", "created_at", "updated_at", "source", "model_provider", "cwd",
+  "title", "sandbox_policy", "approval_mode", "tokens_used", "has_user_event", "archived",
+  "git_sha", "git_branch", "cli_version", "first_user_message", "agent_nickname", "agent_role",
+  "memory_mode", "model", "reasoning_effort", "agent_path", "created_at_ms", "updated_at_ms",
+  "thread_source", "preview",
+];
+fs.rmSync(dbPath, { force: true });
+const db = new DatabaseSync(dbPath);
+try {
+  db.exec(`create table threads (${columns.map((name) => `${name} text`).join(", ")})`);
+  const insert = db.prepare("insert into threads (id, archived) values (?, ?)");
+  for (const threadId of threadIds) insert.run(threadId, 0);
+} finally {
+  db.close();
+}
+EOF
+
 ALIAS_BUILDER="$TMP/build-alias.mjs"
 cat > "$ALIAS_BUILDER" <<'EOF'
 import fs from "node:fs";
@@ -80,6 +114,25 @@ if (process.platform === "win32") {
 } else {
   fs.symlinkSync(target, aliasPath);
   process.stdout.write(aliasPath);
+}
+EOF
+
+ROOT_SYMLINK_BUILDER="$TMP/build-root-symlink.mjs"
+cat > "$ROOT_SYMLINK_BUILDER" <<'EOF'
+import fs from "node:fs";
+import path from "node:path";
+
+const target = path.resolve(process.argv[2]);
+const aliasPath = path.resolve(process.argv[3]);
+try {
+  if (process.platform === "win32") {
+    fs.symlinkSync(target, aliasPath, "file");
+  } else {
+    fs.symlinkSync(target, aliasPath);
+  }
+} catch (error) {
+  process.stderr.write(`symlink unavailable: ${error.code || error.message}\n`);
+  process.exit(77);
 }
 EOF
 
@@ -107,8 +160,8 @@ assert("primary" in value.rollout, "backward rollout.primary missing");
 switch (testCase) {
   case "abort-terminal":
     assert(value.activitySignals.lastTaskCompleteLine === null, "task_complete field must remain null");
-    assert(value.activitySignals.lastTurnAbortedLine === 2, "turn_aborted line mismatch");
-    assert(value.activitySignals.lastTerminalLine === 2, "terminal line mismatch");
+    assert(value.activitySignals.lastTurnAbortedLine === 3, "turn_aborted line mismatch");
+    assert(value.activitySignals.lastTerminalLine === 3, "terminal line mismatch");
     assert(value.activitySignals.lastTerminalType === "turn_aborted", "terminal type mismatch");
     assert(value.activitySignals.terminalState === "aborted", "terminal state mismatch");
     assert(value.activitySignals.hasTurnAbortedInTail === true, "abort presence missing");
@@ -116,19 +169,24 @@ switch (testCase) {
     assert(value.activitySignals.maybeMidTurn === false, "abort must close the inferred turn");
     break;
   case "complete-terminal":
-    assert(value.activitySignals.lastTaskCompleteLine === 2, "task_complete backward field changed");
+    assert(value.activitySignals.lastTaskCompleteLine === 3, "task_complete backward field changed");
     assert(value.activitySignals.lastTurnAbortedLine === null, "unexpected abort line");
-    assert(value.activitySignals.lastTerminalLine === 2, "terminal line mismatch");
+    assert(value.activitySignals.lastTerminalLine === 3, "terminal line mismatch");
     assert(value.activitySignals.lastTerminalType === "task_complete", "terminal type mismatch");
     assert(value.activitySignals.terminalState === "completed", "terminal state mismatch");
     assert(value.activitySignals.hasTaskCompleteInTail === true, "completion presence changed");
     assert(value.activitySignals.hasTerminalInTail === true, "terminal presence missing");
     assert(value.activitySignals.maybeMidTurn === false, "completion must remain terminal");
     break;
+  case "canonical-thread":
+    assert(value.threadId === "11111111-1111-4111-8111-111111111111", "top-level thread id was not canonicalized");
+    assert(value.dbThread.thread.id === value.threadId, "canonical target did not retain DB authority");
+    assert(value.rollout.selection?.authority === "db.rollout_path", "uppercase target lost DB rollout authority");
+    break;
   case "user-after-terminal":
-    assert(value.activitySignals.lastTurnAbortedLine === 2, "abort line mismatch");
-    assert(value.activitySignals.lastTerminalLine === 2, "terminal line mismatch");
-    assert(value.activitySignals.lastUserMessageLine === 3, "latest user line mismatch");
+    assert(value.activitySignals.lastTurnAbortedLine === 3, "abort line mismatch");
+    assert(value.activitySignals.lastTerminalLine === 3, "terminal line mismatch");
+    assert(value.activitySignals.lastUserMessageLine === 4, "latest user line mismatch");
     assert(value.activitySignals.maybeMidTurn === true, "newer user must remain potentially active");
     break;
   case "ambiguous-candidates":
@@ -141,6 +199,18 @@ switch (testCase) {
     assert(value.rollout.selection?.reason === "multiple-candidates", "selection reason mismatch");
     assert(value.rollout.selection?.authority === "sessions-root-match", "authority mismatch");
     break;
+  case "unresolved-candidate-set":
+    assert(value.rollout.candidates.length === 1, "expected one valid discovered candidate");
+    assert(value.rollout.primary === null, "an unresolved candidate set must select no primary");
+    assert(value.rollout.candidatesAmbiguous === true, "unresolved candidate-set ambiguity flag missing");
+    assert(value.rollout.selection?.status === "ambiguous", "selection status mismatch");
+    assert(value.rollout.selection?.reason === "candidate-set-unresolved", "selection reason mismatch");
+    assert(value.rollout.selection?.authority === "sessions-root-match", "authority mismatch");
+    assert(value.rollout.selection?.rejectedCandidateCount === 1, "rejected sibling count missing");
+    assert(value.rollout.selection?.scanIssueCount === 0, "unexpected scan issue count");
+    assert(value.warnings.some((item) => item.includes("rejected target candidates")), "unresolved warning missing");
+    assert(!value.warnings.some((item) => item.includes("Multiple distinct")), "false equal-authority warning retained");
+    break;
   case "db-authority":
     assert(value.rollout.candidates.length === 2, "expected DB candidate plus distinct discovered candidate");
     assert(value.rollout.candidatesAmbiguous === false, "DB authority must resolve selection");
@@ -149,6 +219,16 @@ switch (testCase) {
     assert(value.rollout.selection?.reason === "db-rollout-path", "selection reason mismatch");
     assert(value.rollout.selection?.authority === "db.rollout_path", "DB authority missing");
     assert(value.rollout.primary?.path === value.dbThread.thread.rolloutPath, "DB rollout was not parsed");
+    break;
+  case "paginated-db-authority":
+    assert(value.rollout.candidates.length === 1, "expected one DB-designated paginated candidate");
+    assert(value.rollout.candidates[0].source === "db.rollout_path", "paginated candidate lost DB source");
+    assert(value.rollout.selection?.status === "found", "paginated DB rollout was not selected");
+    assert(value.rollout.selection?.reason === "db-rollout-path", "paginated DB selection reason mismatch");
+    assert(value.rollout.selection?.authority === "db.rollout_path", "paginated DB authority missing");
+    assert(value.rollout.primary?.path === value.dbThread.thread.rolloutPath, "paginated DB rollout path mismatch");
+    assert(value.rollout.primary?.parsedOk === true, "paginated DB rollout was not parsed");
+    assert(value.activitySignals?.turnActivity === "closed", "paginated DB rollout activity was not reported");
     break;
   case "physical-alias":
     assert(value.rollout.candidates.length === 1, "physical aliases were not deduplicated");
@@ -170,6 +250,26 @@ switch (testCase) {
       );
     }
     break;
+  case "root-symlink-distinct":
+    assert(value.rollout.candidates.length === 2, "root scan omitted a distinct symlink target");
+    assert(value.rollout.primary === null, "distinct symlink target must not select a primary");
+    assert(value.rollout.candidatesAmbiguous === true, "distinct symlink target ambiguity missing");
+    assert(value.rollout.ambiguousCandidates.length === 2, "distinct symlink ambiguity list missing");
+    assert(value.rollout.selection?.status === "ambiguous", "distinct symlink selection status mismatch");
+    assert(value.rollout.selection?.reason === "multiple-candidates", "distinct symlink selection reason mismatch");
+    assert(value.rollout.selection?.authority === "sessions-root-match", "distinct symlink authority mismatch");
+    assert(value.rollout.selection?.aliasCount === 2, "distinct symlink alias count mismatch");
+    break;
+  case "root-symlink-alias":
+    assert(value.rollout.candidates.length === 1, "same-target root symlink was not deduplicated");
+    assert(value.rollout.candidates[0].aliases.length === 2, "same-target root alias spellings missing");
+    assert(value.rollout.primary?.parsedOk === true, "same-target root alias did not retain a primary");
+    assert(value.rollout.candidatesAmbiguous === false, "same-target root aliases cannot be ambiguous");
+    assert(value.rollout.selection?.status === "found", "same-target root alias selection status mismatch");
+    assert(value.rollout.selection?.reason === "single-candidate", "same-target root alias selection reason mismatch");
+    assert(value.rollout.selection?.authority === "sessions-root-match", "same-target root alias authority mismatch");
+    assert(value.rollout.selection?.aliasCount === 2, "same-target root alias count mismatch");
+    break;
   case "single-candidate":
     assert(value.rollout.candidates.length === 1, "single candidate missing");
     assert(value.rollout.candidatesAmbiguous === false, "single candidate cannot be ambiguous");
@@ -186,6 +286,32 @@ switch (testCase) {
     assert(value.rollout.primary?.path === value.dbThread.thread.rolloutPath, "DB rollout was not parsed");
     assert(value.rollout.primary?.parsedOk === false, "malformed DB rollout validity was hidden");
     assert(value.rollout.primary?.parseErrors?.length === 1, "malformed DB parse error missing");
+    break;
+  case "invalid-db-identity":
+    assert(value.rollout.primary === null, "identity-invalid DB rollout must not be parsed");
+    assert(value.rollout.selection?.status === "unavailable", "identity-invalid DB rollout must be unavailable");
+    assert(value.rollout.selection?.path === null, "identity-invalid DB rollout must select no path");
+    assert(
+      value.rollout.selection?.authority !== "sessions-root-match",
+      "identity-invalid DB authority must not fall back to a sessions-root match",
+    );
+    break;
+  case "suffix-decoy":
+    assert(value.rollout.candidates.length === 0, "suffix decoy must not be a rollout candidate");
+    assert(value.rollout.primary === null, "suffix decoy must not be parsed");
+    assert(value.rollout.candidatesAmbiguous === true, "suffix decoy must keep discovery unresolved");
+    assert(value.rollout.selection?.status === "ambiguous", "suffix decoy must be fail-visible");
+    assert(value.rollout.selection?.reason === "candidate-set-unresolved", "suffix decoy reason mismatch");
+    assert(value.rollout.selection?.rejectedCandidateCount === 1, "suffix decoy diagnostic count missing");
+    assert(value.rollout.selection?.scanIssueCount === 0, "unexpected suffix-decoy scan issue count");
+    assert(value.rollout.selection?.path === null, "suffix decoy must select no path");
+    break;
+  case "unusable-db-authority":
+    assert(value.rollout.candidates.length === 0, "unusable DB authority must not expose a fallback candidate");
+    assert(value.rollout.primary === null, "unusable DB authority must not parse a fallback");
+    assert(value.rollout.selection?.status === "unavailable", "unusable DB authority must be unavailable");
+    assert(value.rollout.selection?.authority === "db.rollout_path", "DB authority attribution was lost");
+    assert(value.rollout.selection?.path === null, "unusable DB authority must select no path");
     break;
   case "advisory": {
     // A2: stored approvalMode/sandboxPolicy names+values are preserved byte-for-byte, and the
@@ -219,12 +345,12 @@ make_db(){
 }
 
 run_inspect(){
-  local db_path="$1" sessions_root="$2"
+  local db_path="$1" sessions_root="$2" thread_id="${3:-$THREAD}"
   local err_path="$TMP/inspect.stderr"
   OUT="$("$NODE_BIN" "$INSPECT" \
     --db "$db_path" \
     --sessions-root "$sessions_root" \
-    --thread "$THREAD" \
+    --thread "$thread_id" \
     --tail-events 20 2>"$err_path")"
   RC=$?
   ERR="$(cat "$err_path")"
@@ -244,6 +370,7 @@ assert_case(){
 write_user_abort(){
   local file_path="$1"
   cat > "$file_path" <<EOF
+{"type":"session_meta","payload":{"id":"$THREAD"}}
 {"type":"event_msg","payload":{"type":"user_message","message":"task"}}
 {"type":"event_msg","payload":{"type":"turn_aborted","turn_id":"turn-a"}}
 EOF
@@ -252,6 +379,7 @@ EOF
 write_user_complete(){
   local file_path="$1"
   cat > "$file_path" <<EOF
+{"type":"session_meta","payload":{"id":"$THREAD"}}
 {"type":"event_msg","payload":{"type":"user_message","message":"task"}}
 {"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-a"}}
 EOF
@@ -260,6 +388,7 @@ EOF
 write_user_after_abort(){
   local file_path="$1"
   cat > "$file_path" <<EOF
+{"type":"session_meta","payload":{"id":"$THREAD"}}
 {"type":"event_msg","payload":{"type":"user_message","message":"task one"}}
 {"type":"event_msg","payload":{"type":"turn_aborted","turn_id":"turn-a"}}
 {"type":"event_msg","payload":{"type":"user_message","message":"task two"}}
@@ -281,6 +410,82 @@ write_user_complete "$ROLLOUT"
 make_db "$CASE/state.sqlite" "$ROLLOUT"
 run_inspect "$CASE/state.sqlite" "$CASE/sessions"
 assert_case complete-terminal "task_complete retains existing fields and gains terminal parity fields"
+
+echo "== 2b. inspector canonicalizes case-insensitive UUID input before authority lookup =="
+run_inspect "$CASE/state.sqlite" "$CASE/sessions" "${THREAD^^}"
+assert_case canonical-thread "uppercase target retains the exact lowercase DB row and rollout authority"
+
+echo "== 2c. snapshot canonicalizes target/other/allowlist UUIDs and binds compare identity =="
+SNAP_CASE="$TMP/snapshot-case"; mkdir -p "$SNAP_CASE"
+"$NODE_BIN" "$SNAPSHOT_DB_BUILDER" "$SNAP_CASE/state.sqlite" "$THREAD" "$OTHER_THREAD" >/dev/null 2>&1
+printf '%s\n' 'model = "synthetic"' > "$SNAP_CASE/config.toml"
+SNAP_OUT="$("$NODE_BIN" "$SNAPSHOT" --db "$SNAP_CASE/state.sqlite" --config "$SNAP_CASE/config.toml" \
+  --thread "${THREAD^^}" --other-thread "${OTHER_THREAD^^}" 2>/dev/null)"; SNAP_RC=$?
+if [[ $SNAP_RC -eq 0 ]] && printf '%s' "$SNAP_OUT" | "$NODE_BIN" -e '
+const fs = require("node:fs");
+const value = JSON.parse(fs.readFileSync(0, "utf8"));
+const thread = process.argv[1];
+const other = process.argv[2];
+process.exit(value.ok === true && value.targetThreadId === thread &&
+  value.otherThreadIds?.[0] === other && value.db?.threads?.target?.id === thread &&
+  value.db?.threads?.otherThreads?.[other]?.id === other ? 0 : 1);
+' "$THREAD" "$OTHER_THREAD" >/dev/null 2>&1; then
+  ok "snapshot resolves uppercase target and other-thread inputs to canonical DB identities"
+else
+  no "snapshot UUID canonicalization failed (rc=$SNAP_RC)"
+fi
+
+SNAP_BEFORE="$SNAP_CASE/before.json"
+SNAP_AFTER="$SNAP_CASE/after.json"
+SNAP_MISMATCH="$SNAP_CASE/mismatch.json"
+SNAP_BEFORE="$SNAP_BEFORE" SNAP_AFTER="$SNAP_AFTER" SNAP_MISMATCH="$SNAP_MISMATCH" \
+  SNAP_THREAD="$THREAD" SNAP_OTHER="$OTHER_THREAD" "$NODE_BIN" --input-type=module <<'NODE'
+import fs from "node:fs";
+const thread = process.env.SNAP_THREAD;
+const other = process.env.SNAP_OTHER;
+function snapshot(targetThreadId, targetRowId, otherHash, uppercaseHashIds = false) {
+  const threadKey = uppercaseHashIds ? thread.toUpperCase() : thread;
+  const otherKey = uppercaseHashIds ? other.toUpperCase() : other;
+  return {
+    targetThreadId,
+    config: { sha256: "a", keys: {}, stableDuringRead: true },
+    db: {
+      stableDuringRead: true,
+      marker: null,
+      threads: {
+        target: { exists: true, id: targetRowId },
+        threadRowHashById: { [threadKey]: "target", [otherKey]: otherHash },
+      },
+    },
+  };
+}
+fs.writeFileSync(process.env.SNAP_BEFORE, JSON.stringify(snapshot(thread.toUpperCase(), thread.toUpperCase(), "before", true)));
+fs.writeFileSync(process.env.SNAP_AFTER, JSON.stringify(snapshot(thread, thread, "after")));
+fs.writeFileSync(process.env.SNAP_MISMATCH, JSON.stringify(snapshot(other, other, "before")));
+NODE
+COMPARE_OUT="$("$NODE_BIN" "$SNAPSHOT" --compare "$SNAP_BEFORE" "$SNAP_AFTER" \
+  --allow-thread-change "${OTHER_THREAD^^}" 2>/dev/null)"; COMPARE_RC=$?
+if [[ $COMPARE_RC -eq 0 ]] && printf '%s' "$COMPARE_OUT" | "$NODE_BIN" -e '
+const fs = require("node:fs");
+const value = JSON.parse(fs.readFileSync(0, "utf8"));
+process.exit(value.ok === true && value.db?.targetIdentityBound === true &&
+  value.allowThreadChangeIds?.[0] === process.argv[1] &&
+  value.db?.allowedNonTargetChangedIds?.[0] === process.argv[1] ? 0 : 1);
+' "$OTHER_THREAD" >/dev/null 2>&1; then
+  ok "snapshot compare accepts mixed-case same identity and canonicalizes its change allowlist"
+else
+  no "snapshot compare same-identity canonicalization failed (rc=$COMPARE_RC)"
+fi
+MISMATCH_OUT="$("$NODE_BIN" "$SNAPSHOT" --compare "$SNAP_BEFORE" "$SNAP_MISMATCH" 2>/dev/null)"; MISMATCH_RC=$?
+if [[ $MISMATCH_RC -ne 0 ]] && printf '%s' "$MISMATCH_OUT" | "$NODE_BIN" -e '
+const fs = require("node:fs");
+const value = JSON.parse(fs.readFileSync(0, "utf8"));
+process.exit(value.ok === false && value.db?.targetIdentityBound === false ? 0 : 1);
+' >/dev/null 2>&1; then
+  ok "snapshot compare rejects different before/after target identities"
+else
+  no "snapshot compare did not fail closed on target mismatch (rc=$MISMATCH_RC)"
+fi
 
 echo "== 3. a user message after the last terminal remains potentially active =="
 CASE="$TMP/new-user"; mkdir -p "$CASE/sessions"
@@ -318,6 +523,42 @@ make_db "$CASE/state.sqlite" "$ALIAS"
 run_inspect "$CASE/state.sqlite" "$CASE/sessions"
 assert_case physical-alias "long-path/symlink aliases collapse to one physical candidate"
 
+echo "== 6a. root-only discovery sees a symlink to a distinct physical rollout =="
+CASE="$TMP/root-symlink-distinct"; mkdir -p "$CASE/sessions/a" "$CASE/sessions/b" "$CASE/sources"
+write_user_complete "$CASE/sessions/a/rollout-regular-$THREAD.jsonl"
+write_user_complete "$CASE/sources/distinct.jsonl"
+SYMLINK_RC=0
+"$NODE_BIN" "$ROOT_SYMLINK_BUILDER" \
+  "$CASE/sources/distinct.jsonl" \
+  "$CASE/sessions/b/rollout-symlink-$THREAD.jsonl" || SYMLINK_RC=$?
+if [[ $SYMLINK_RC -eq 0 ]]; then
+  make_db "$CASE/state.sqlite"
+  run_inspect "$CASE/state.sqlite" "$CASE/sessions"
+  assert_case root-symlink-distinct "root scan keeps a distinct symlink target ambiguous"
+elif [[ $SYMLINK_RC -eq 77 ]]; then
+  echo "  NOTE: file symlinks unavailable; skipping distinct root-symlink regression"
+else
+  no "distinct root-symlink fixture failed (rc=$SYMLINK_RC)"
+fi
+
+echo "== 6b. root-only discovery deduplicates a symlink to the same physical rollout =="
+CASE="$TMP/root-symlink-alias"; mkdir -p "$CASE/sessions/a" "$CASE/sessions/b"
+TARGET="$CASE/sessions/a/rollout-regular-$THREAD.jsonl"
+write_user_complete "$TARGET"
+SYMLINK_RC=0
+"$NODE_BIN" "$ROOT_SYMLINK_BUILDER" \
+  "$TARGET" \
+  "$CASE/sessions/b/rollout-symlink-$THREAD.jsonl" || SYMLINK_RC=$?
+if [[ $SYMLINK_RC -eq 0 ]]; then
+  make_db "$CASE/state.sqlite"
+  run_inspect "$CASE/state.sqlite" "$CASE/sessions"
+  assert_case root-symlink-alias "root scan deduplicates a same-target symlink with aliasCount 2"
+elif [[ $SYMLINK_RC -eq 77 ]]; then
+  echo "  NOTE: file symlinks unavailable; skipping same-target root-symlink regression"
+else
+  no "same-target root-symlink fixture failed (rc=$SYMLINK_RC)"
+fi
+
 echo "== 7. one discovered candidate remains readable =="
 CASE="$TMP/single"; mkdir -p "$CASE/sessions"
 write_user_complete "$CASE/sessions/rollout-single-$THREAD.jsonl"
@@ -328,7 +569,10 @@ assert_case single-candidate "single sessions-root candidate remains primary"
 echo "== 8. DB authority does not silently fall back after a parse error =="
 CASE="$TMP/malformed-db"; mkdir -p "$CASE/sessions/a" "$CASE/sessions/b"
 DB_ROLLOUT="$CASE/sessions/a/rollout-db-bad-$THREAD.jsonl"
-printf '%s\n' '{malformed' > "$DB_ROLLOUT"
+cat > "$DB_ROLLOUT" <<EOF
+{"type":"session_meta","payload":{"id":"$THREAD"}}
+{malformed
+EOF
 write_user_complete "$CASE/sessions/b/rollout-other-$THREAD.jsonl"
 make_db "$CASE/state.sqlite" "$DB_ROLLOUT"
 run_inspect "$CASE/state.sqlite" "$CASE/sessions"
@@ -398,6 +642,17 @@ write_closed_same_turn(){   # start(A) -> user(A) -> agent(A) -> task_complete(A
   printf '%s\n' "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"turn-a\",\"last_agent_message\":\"done\"}}" >> "$1"
 }
 
+write_paginated_closed(){  # $1=path  $2=session_id (optional)
+  local file_path="$1" session_id="${2:-$THREAD}"
+  cat > "$file_path" <<EOF
+{"type":"session_meta","payload":{"id":"$THREAD","session_id":"$session_id","history_mode":"paginated","history_base":{"thread_id":"$HISTORY_BASE"}}}
+{"type":"event_msg","payload":{"type":"task_started","thread_id":"$THREAD","turn_id":"turn-a"}}
+{"type":"event_msg","payload":{"type":"user_message","thread_id":"$THREAD","turn_id":"turn-a","message":"do the task"}}
+{"type":"event_msg","payload":{"type":"agent_message","thread_id":"$THREAD","turn_id":"turn-a","message":"done","phase":"final_answer"}}
+{"type":"event_msg","payload":{"type":"task_complete","thread_id":"$THREAD","turn_id":"turn-a","last_agent_message":"done"}}
+EOF
+}
+
 write_mismatched_terminal(){  # start(A) -> user(A) -> agent(A) -> task_complete(B)
   write_open_no_terminal "$1"
   printf '%s\n' "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"turn-b\",\"last_agent_message\":\"done\"}}" >> "$1"
@@ -440,6 +695,113 @@ write_drifted_closed(){  # start(A) -> IN-WINDOW unknown-pair drift -> user(A) -
 {"type":"event_msg","payload":{"type":"agent_message","message":"done body","phase":"final_answer"}}
 {"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-a","last_agent_message":"done body"}}
 EOF
+}
+
+write_wrong_thread_wrapper(){
+  cat > "$1" <<EOF
+{"type":"session_meta","payload":{"id":"$THREAD"}}
+{"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-a"}}
+{"type":"event_msg","payload":{"type":"item_completed","turn_id":"turn-a","thread_id":"22222222-2222-4222-8222-222222222222","item":{"type":"AgentMessage","id":"item-a","phase":"final_answer","content":[{"type":"output_text","text":"wrong owner body"}]}}}
+{"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-a","last_agent_message":"wrong owner body"}}
+EOF
+}
+
+write_rebound_owner(){
+  cat > "$1" <<EOF
+{"type":"session_meta","payload":{"id":"$THREAD"}}
+{"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-a"}}
+{"type":"session_meta","payload":{"id":"22222222-2222-4222-8222-222222222222"}}
+{"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-a","last_agent_message":"done"}}
+EOF
+}
+
+write_lineaged_owner(){
+  cat > "$1" <<EOF
+{"ordinal":0,"type":"session_meta","payload":{"id":"$THREAD","parent_thread_id":"22222222-2222-4222-8222-222222222222","forked_from_id":"22222222-2222-4222-8222-222222222222","subagent_history_start_ordinal":6}}
+{"ordinal":1,"type":"session_meta","payload":{"id":"22222222-2222-4222-8222-222222222222","forked_from_id":"33333333-3333-4333-8333-333333333333"}}
+{"ordinal":2,"type":"event_msg","payload":{"type":"task_started","turn_id":"ancestor-turn"}}
+{"ordinal":3,"type":"event_msg","payload":{"type":"user_message","turn_id":"ancestor-turn","message":"inherited task"}}
+{"ordinal":4,"type":"event_msg","payload":{"type":"agent_message","turn_id":"ancestor-turn","message":"inherited body","phase":"final_answer"}}
+{"ordinal":5,"type":"event_msg","payload":{"type":"task_complete","turn_id":"ancestor-turn","last_agent_message":"inherited body"}}
+{"ordinal":6,"type":"event_msg","payload":{"type":"thread_settings_applied"}}
+{"ordinal":7,"type":"event_msg","payload":{"type":"task_started","thread_id":"$THREAD","turn_id":"turn-a"}}
+{"ordinal":8,"type":"event_msg","payload":{"type":"user_message","thread_id":"$THREAD","turn_id":"turn-a","message":"sanitized task"}}
+{"ordinal":9,"type":"event_msg","payload":{"type":"agent_message","thread_id":"$THREAD","turn_id":"turn-a","message":"done","phase":"final_answer"}}
+{"ordinal":10,"type":"event_msg","payload":{"type":"task_complete","thread_id":"$THREAD","turn_id":"turn-a","last_agent_message":"done"}}
+EOF
+}
+
+write_lineaged_owner_without_boundary(){
+  cat > "$1" <<EOF
+{"ordinal":0,"type":"session_meta","payload":{"id":"$THREAD","forked_from_id":"22222222-2222-4222-8222-222222222222"}}
+{"ordinal":1,"type":"event_msg","payload":{"type":"task_started","thread_id":"$THREAD","turn_id":"turn-a"}}
+{"ordinal":2,"type":"event_msg","payload":{"type":"user_message","thread_id":"$THREAD","turn_id":"turn-a","message":"sanitized task"}}
+{"ordinal":3,"type":"event_msg","payload":{"type":"agent_message","thread_id":"$THREAD","turn_id":"turn-a","message":"done","phase":"final_answer"}}
+{"ordinal":4,"type":"event_msg","payload":{"type":"task_complete","thread_id":"$THREAD","turn_id":"turn-a","last_agent_message":"done"}}
+EOF
+}
+
+write_lineaged_owner_boundary_only(){
+  cat > "$1" <<EOF
+{"ordinal":0,"type":"session_meta","payload":{"id":"$THREAD","parent_thread_id":"22222222-2222-4222-8222-222222222222","forked_from_id":"22222222-2222-4222-8222-222222222222","subagent_history_start_ordinal":6}}
+{"ordinal":1,"type":"session_meta","payload":{"id":"22222222-2222-4222-8222-222222222222","forked_from_id":"33333333-3333-4333-8333-333333333333"}}
+{"ordinal":2,"type":"event_msg","payload":{"type":"task_started","turn_id":"ancestor-turn"}}
+{"ordinal":3,"type":"event_msg","payload":{"type":"user_message","turn_id":"ancestor-turn","message":"inherited task"}}
+{"ordinal":4,"type":"event_msg","payload":{"type":"agent_message","turn_id":"ancestor-turn","message":"inherited body","phase":"final_answer"}}
+{"ordinal":5,"type":"event_msg","payload":{"type":"task_complete","turn_id":"ancestor-turn","last_agent_message":"inherited body"}}
+{"ordinal":6,"type":"event_msg","payload":{"type":"thread_settings_applied"}}
+EOF
+}
+
+write_rebound_owner_before_turn(){
+  cat > "$1" <<EOF
+{"type":"session_meta","payload":{"id":"$THREAD"}}
+{"type":"session_meta","payload":{"id":"22222222-2222-4222-8222-222222222222"}}
+{"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-later"}}
+{"type":"event_msg","payload":{"type":"user_message","turn_id":"turn-later","message":"sanitized task"}}
+{"type":"event_msg","payload":{"type":"agent_message","message":"done","phase":"final_answer"}}
+{"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-later","last_agent_message":"done"}}
+EOF
+}
+
+write_invalid_owner_before_turn(){
+  cat > "$1" <<EOF
+{"type":"session_meta","payload":{"id":"$THREAD"}}
+{"type":"session_meta","payload":{"id":"not-a-uuid"}}
+{"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-later"}}
+{"type":"event_msg","payload":{"type":"user_message","turn_id":"turn-later","message":"sanitized task"}}
+{"type":"event_msg","payload":{"type":"agent_message","message":"done","phase":"final_answer"}}
+{"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-later","last_agent_message":"done"}}
+EOF
+}
+
+write_ownerless_closed(){
+  cat > "$1" <<EOF
+{"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-a"}}
+{"type":"event_msg","payload":{"type":"user_message","turn_id":"turn-a","message":"sanitized task"}}
+{"type":"event_msg","payload":{"type":"agent_message","message":"done","phase":"final_answer"}}
+{"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-a","last_agent_message":"done"}}
+EOF
+}
+
+write_wrong_thread_direct(){
+  cat > "$1" <<EOF
+{"type":"session_meta","payload":{"id":"$THREAD"}}
+{"type":"event_msg","payload":{"type":"task_started","thread_id":"22222222-2222-4222-8222-222222222222","turn_id":"turn-a"}}
+{"type":"event_msg","payload":{"type":"user_message","thread_id":"22222222-2222-4222-8222-222222222222","turn_id":"turn-a","message":"sanitized task"}}
+{"type":"event_msg","payload":{"type":"agent_message","thread_id":"22222222-2222-4222-8222-222222222222","message":"done","phase":"final_answer"}}
+{"type":"event_msg","payload":{"type":"task_complete","thread_id":"22222222-2222-4222-8222-222222222222","turn_id":"turn-a","last_agent_message":"done"}}
+EOF
+}
+
+write_malformed_thread_direct_after_terminal(){
+  write_closed_same_turn "$1"
+  printf '%s\n' '{"type":"event_msg","payload":{"type":"token_count","thread_id":"","info":{"total":1}}}' >> "$1"
+}
+
+write_malformed_thread_nested_after_terminal(){
+  write_closed_same_turn "$1"
+  printf '%s\n' "{\"type\":\"event_msg\",\"payload\":{\"type\":\"item_completed\",\"turn_id\":\"turn-a\",\"thread_id\":\"$THREAD\",\"item\":{\"id\":\"bad-owner\",\"type\":\"Reasoning\",\"thread_id\":0}}}" >> "$1"
 }
 
 echo "== 11. A4 turnActivity: start->user->agent (no terminal) is open =="
@@ -514,6 +876,279 @@ wp_field(){  # $1=js predicate over parsed dry-run object `v`
   printf '%s' "$WPOUT" | "$NODE_BIN" -e "const v=JSON.parse(require('node:fs').readFileSync(0,'utf8'));process.exit(($1)?0:1);" >/dev/null 2>&1
 }
 
+# Exercise the write-proof live branch without a pipe: the real harness and rollout reader are
+# copied beside four process-boundary stubs. The client stub preserves the maintained response
+# envelope and, for resolvable shapes, appends a same-thread/same-turn completion to the rollout.
+WP_TURN="00000000-0000-4000-8000-000000000000"
+WP_OTHER_TURN="22222222-2222-4222-8222-222222222222"
+
+wp_live_setup(){  # $1=case dir  $2=rollout variant (optional)
+  local case_dir="$1" variant="${2:-valid}" scripts="$1/scripts" home="$1/home"
+  mkdir -p "$scripts" "$home/.codex/sessions"
+  case "$variant" in
+    valid)
+      WP_LIVE_ROLLOUT="$home/.codex/sessions/rollout-wp-live-${THREAD}_${PAGE}.jsonl"
+      write_paginated_closed "$WP_LIVE_ROLLOUT"
+      ;;
+    wrong-root)
+      WP_LIVE_ROLLOUT="$home/.codex/sessions/rollout-wp-live-${OTHER_THREAD}_${PAGE}.jsonl"
+      write_paginated_closed "$WP_LIVE_ROLLOUT"
+      ;;
+    bad-page)
+      WP_LIVE_ROLLOUT="$home/.codex/sessions/rollout-wp-live-${THREAD}_not-a-page.jsonl"
+      write_paginated_closed "$WP_LIVE_ROLLOUT"
+      ;;
+    bad-metadata)
+      WP_LIVE_ROLLOUT="$home/.codex/sessions/rollout-wp-live-${THREAD}_${PAGE}.jsonl"
+      write_paginated_closed "$WP_LIVE_ROLLOUT" "$OTHER_THREAD"
+      ;;
+    *)
+      echo "unknown write-proof rollout variant: $variant" >&2
+      return 1
+      ;;
+  esac
+  WP_LIVE_SEND_COUNT="$case_dir/send-count.txt"
+  WP_LIVE_SNAPSHOT_COUNT="$case_dir/snapshot-count.txt"
+  WP_LIVE_STDERR="$case_dir/write-proof.stderr"
+  cp "$WRITE_PROOF" "$scripts/codex_ipc_write_proof.mjs"
+  cp "$(dirname "$WRITE_PROOF")/codex_ipc_rollout_reader.mjs" \
+    "$scripts/codex_ipc_rollout_reader.mjs"
+
+  cat > "$scripts/codex_ipc_session_inspect.mjs" <<'EOF'
+const threadId = process.env.WP_THREAD;
+const rolloutPath = process.env.WP_ROLLOUT;
+const mode = process.env.WP_RESPONSE_MODE;
+const structuredNegative = mode === "structured-negative-inspection";
+const dbTrusted = mode !== "untrusted-inspection" && !structuredNegative;
+console.log(JSON.stringify({
+  ok: !structuredNegative,
+  dbThread: {
+    exists: dbTrusted,
+    readOnlyOpenOk: dbTrusted,
+    thread: structuredNegative
+      ? { exists: false }
+      : { exists: true, id: threadId, archived: 0, rolloutPath },
+  },
+  rollout: { primary: { path: rolloutPath, lineCount: 5 } },
+  activitySignals: {
+    turnActivity: structuredNegative ? "ambiguous" : "closed",
+    maybeMidTurn: false,
+  },
+}));
+if (structuredNegative) process.exitCode = 1;
+EOF
+
+  cat > "$scripts/codex_ipc_revalidate.mjs" <<'EOF'
+console.log(JSON.stringify({
+  ok: true,
+  revalidationLevel: "initialize-only",
+  summary: { failed: [], skipped: [] },
+}));
+EOF
+
+  cat > "$scripts/codex_ipc_snapshot.mjs" <<'EOF'
+import fs from "node:fs";
+const countPath = process.env.WP_SNAPSHOT_COUNT;
+const count = (fs.existsSync(countPath) ? Number(fs.readFileSync(countPath, "utf8")) : 0) + 1;
+fs.writeFileSync(countPath, String(count));
+const mode = process.env.WP_RESPONSE_MODE;
+const rolloutPath = process.env.WP_ROLLOUT;
+if (mode === "rollout-growth-before-send" && count === 1) {
+  fs.appendFileSync(rolloutPath, `${JSON.stringify({ type: "world_state", payload: {} })}\n`);
+}
+if (mode === "rollout-same-size-before-send" && count === 1) {
+  const original = fs.readFileSync(rolloutPath, "utf8");
+  const replacement = original.replaceAll(process.env.WP_THREAD, process.env.WP_OTHER_TURN);
+  if (Buffer.byteLength(replacement) !== Buffer.byteLength(original)) {
+    throw new Error("same-size test fixture changed byte length");
+  }
+  fs.writeFileSync(rolloutPath, replacement);
+}
+if (mode === "after-snapshot-error" && count > 1) {
+  console.error("offline stub: post-send snapshot failed");
+  process.exit(1);
+}
+const threadId = process.env.WP_THREAD;
+const otherTurnId = process.env.WP_OTHER_TURN;
+console.log(JSON.stringify({
+  ok: true,
+  generatedAt: "2026-08-30T00:00:00.000Z",
+  targetThreadId:
+    mode === "after-target-id-mismatch" && count > 1 ? otherTurnId : threadId,
+  config: {
+    exists: true,
+    sha256: "a".repeat(64),
+    keys: {},
+    stableDuringRead: mode !== "unstable-before" || count > 1,
+  },
+  db: {
+    exists: true,
+    readOnlyOpenOk: true,
+    sha256: "b".repeat(64),
+    stableDuringRead: true,
+    quickCheck: "ok",
+    threads: {
+      target: {
+        exists: true,
+        id: threadId,
+        archived:
+          (mode === "archived-before" && count === 1) ||
+          (mode === "after-archived" && count > 1)
+            ? 1
+            : 0,
+        rolloutPath:
+          mode === "missing-path-before" && count === 1
+            ? null
+            : mode === "after-rollover" && count > 1
+              ? `${rolloutPath}.next`
+              : rolloutPath,
+      },
+      threadRowHashById: {
+        [threadId]: count === 1 ? "before" : "after",
+        ...(mode === "uppercase-allowlist"
+          ? { [otherTurnId]: count === 1 ? "other-before" : "other-after" }
+          : {}),
+      },
+    },
+    marker: { dbBinaryCount: 0, textSha256: "c".repeat(64) },
+  },
+}));
+EOF
+
+  cat > "$scripts/codex_ipc_client.mjs" <<'EOF'
+import fs from "node:fs";
+const countPath = process.env.WP_SEND_COUNT;
+const count = (fs.existsSync(countPath) ? Number(fs.readFileSync(countPath, "utf8")) : 0) + 1;
+fs.writeFileSync(countPath, String(count));
+const mode = process.env.WP_RESPONSE_MODE;
+const threadId = process.env.WP_THREAD;
+const turnId = process.env.WP_TURN;
+const otherTurnId = process.env.WP_OTHER_TURN;
+const marker = process.env.WP_MARKER;
+const rolloutPath = process.env.WP_ROLLOUT;
+let result;
+if ([
+  "nested",
+  "duplicate-follower",
+  "extra-target-follower",
+  "after-snapshot-error",
+  "after-archived",
+  "after-rollover",
+  "after-target-id-mismatch",
+  "uppercase-allowlist",
+  "uppercase-test-authorization",
+  "wrong-top-level-target",
+  "error-response-result",
+].includes(mode)) {
+  result = { result: { turn: { id: turnId } } };
+}
+else if (mode === "one-level") result = { turn: { id: turnId } };
+else if (mode === "turn-id") result = { turnId };
+else if (mode === "duplicate") {
+  result = { result: { turn: { id: turnId.toUpperCase() } }, turn: { id: turnId } };
+} else if (mode === "conflict") {
+  result = { result: { turn: { id: turnId } }, turn: { id: otherTurnId } };
+} else if (mode === "invalid-carrier") {
+  result = { result: { turn: { id: turnId } }, turnId: "not-a-uuid" };
+} else result = {};
+
+if ([
+  "nested",
+  "one-level",
+  "turn-id",
+  "duplicate",
+  "after-snapshot-error",
+  "after-archived",
+  "after-rollover",
+  "after-target-id-mismatch",
+  "uppercase-allowlist",
+  "uppercase-test-authorization",
+  "wrong-top-level-target",
+  "error-response-result",
+].includes(mode)) {
+  const finalBody = `${marker} ACK`;
+  const records = [
+    { type: "event_msg", payload: { type: "task_started", thread_id: threadId, turn_id: turnId } },
+    { type: "event_msg", payload: { type: "user_message", thread_id: threadId, turn_id: turnId, message: `CONTROLLED IPC WRITE PROOF ${marker}` } },
+    { type: "event_msg", payload: { type: "agent_message", thread_id: threadId, turn_id: turnId, phase: "final_answer", message: finalBody } },
+    { type: "event_msg", payload: { type: "task_complete", thread_id: threadId, turn_id: turnId, last_agent_message: finalBody } },
+  ];
+  fs.appendFileSync(rolloutPath, records.map((item) => JSON.stringify(item)).join("\n") + "\n");
+}
+
+if (mode === "transport-unknown") {
+  console.error("offline stub: follower response transport failed after invocation");
+  process.exit(1);
+}
+
+const clientOk = mode !== "nonzero-structured";
+const sentRequests = [
+  { name: "initialize", bytes: 1, json: { method: "initialize" } },
+  { name: "thread-follower-start-turn", bytes: 1, json: { method: "thread-follower-start-turn", params: { conversationId: threadId } } },
+];
+if (mode === "duplicate-follower") {
+  sentRequests.push({
+    name: "thread-follower-start-turn",
+    bytes: 1,
+    json: { method: "thread-follower-start-turn", params: { conversationId: threadId } },
+  });
+}
+if (mode === "extra-target-follower") {
+  sentRequests.push({
+    name: "thread-follower-start-turn",
+    bytes: 1,
+    json: { method: "thread-follower-start-turn", params: { conversationId: process.env.WP_OTHER_TURN } },
+  });
+}
+
+console.log(JSON.stringify({
+  ok: clientOk,
+  pipePath: "offline-stub",
+  targetThreadId: mode === "wrong-top-level-target" ? otherTurnId : threadId,
+  sentRequests,
+  initialize: { resultType: "success", result: { clientId: "stub-client" } },
+  response: {
+    resultType: mode === "error-response-result" ? "error" : clientOk ? "success" : "error",
+    handledByClientId: "stub-client",
+    result,
+  },
+}));
+if (!clientOk) process.exitCode = 1;
+EOF
+}
+
+wp_live_run(){  # $1=case dir  $2=response mode  $3=rollout variant (optional)
+  local case_dir="$1" mode="$2" variant="${3:-valid}" home="$1/home" marker="CODEX_IPC_TEST_${2}_MARKER"
+  local authorized_thread=""
+  local -a authorization_args=(--allow-any-thread)
+  local -a extra_args=()
+  if [[ "$mode" == "uppercase-test-authorization" ]]; then
+    authorized_thread="${THREAD^^}"
+    authorization_args=()
+  fi
+  if [[ "$mode" == "uppercase-allowlist" ]]; then
+    extra_args=(--allow-thread-change "${OTHER_THREAD^^}")
+  fi
+  wp_live_setup "$case_dir" "$variant"
+  WPOUT="$(
+    WP_THREAD="$THREAD" WP_TURN="$WP_TURN" WP_OTHER_TURN="$WP_OTHER_TURN" \
+    WP_MARKER="$marker" WP_ROLLOUT="$WP_LIVE_ROLLOUT" \
+    WP_SEND_COUNT="$WP_LIVE_SEND_COUNT" WP_SNAPSHOT_COUNT="$WP_LIVE_SNAPSHOT_COUNT" \
+    WP_RESPONSE_MODE="$mode" CODEX_IPC_AUTHORIZED_TEST_THREAD="$authorized_thread" \
+    USERPROFILE="$home" HOME="$home" \
+      "$NODE_BIN" "$case_dir/scripts/codex_ipc_write_proof.mjs" \
+        --thread "$THREAD" --marker "$marker" \
+        --task "CONTROLLED IPC WRITE PROOF $marker" \
+        --send --ack-live-write "${authorization_args[@]}" "${extra_args[@]}" \
+        --timeout-ms 100 --poll-ms 100 --poll-attempts 5 2>"$WP_LIVE_STDERR"
+  )"
+  WPRC=$?
+}
+
+wp_sent_once(){ [[ "$(cat "$WP_LIVE_SEND_COUNT" 2>/dev/null)" == "1" ]]; }
+wp_sent_zero(){ [[ ! -e "$WP_LIVE_SEND_COUNT" ]] || [[ "$(cat "$WP_LIVE_SEND_COUNT" 2>/dev/null)" == "0" ]]; }
+wp_live_debug(){ printf '%s\n' "$WPOUT" | sed -n '1,80p'; }
+
 if [[ -n "$WRITE_PROOF" ]]; then
   echo "== 18. A4 write-proof dry-run: an open turn is rejected without --allow-mid-turn =="
   wp_home_setup "$TMP/wp-open" write_open_no_terminal
@@ -537,6 +1172,246 @@ if [[ -n "$WRITE_PROOF" ]]; then
   wp_dryrun "$TMP/wp-closed"
   wp_field 'v.ok===true && v.targetInspection.turnActivity==="closed"' \
     && ok "a closed turn is send-ready" || no "closed turn not send-ready (rc=$WPRC)"
+
+  WPOUT="$(USERPROFILE="$TMP/wp-closed" HOME="$TMP/wp-closed" "$NODE_BIN" "$WRITE_PROOF" \
+    --thread "${THREAD^^}" 2>/dev/null)"; WPRC=$?
+  if [[ $WPRC -eq 0 ]] && wp_field 'v.ok===true && v.threadId==="11111111-1111-4111-8111-111111111111"'; then
+    ok "write-proof canonicalizes uppercase target UUID before every pre-send authority check"
+  else
+    no "write-proof uppercase target lost canonical authority (rc=$WPRC)"
+  fi
+
+  echo "== 21a. write-proof rejects an inspector result without trusted DB authority before send =="
+  wp_live_run "$TMP/wp-live-untrusted-inspection" untrusted-inspection
+  if [[ $WPRC -ne 0 ]] \
+    && wp_sent_zero \
+    && wp_field 'v.ok===false && v.failures.some(f=>f.includes("state DB authority"))'; then
+    ok "untrusted inspector DB metadata fails closed with zero send attempts"
+  else
+    no "untrusted inspector DB metadata reached or obscured the send boundary (rc=$WPRC)"
+    wp_live_debug
+  fi
+
+  echo "== 21a2. write-proof consumes the inspector's structured negative exit contract =="
+  wp_live_run "$TMP/wp-live-structured-negative" structured-negative-inspection
+  if [[ $WPRC -ne 0 ]] \
+    && wp_sent_zero \
+    && [[ ! -s "$WP_LIVE_STDERR" ]] \
+    && wp_field 'v.ok===false && !("send" in v) && v.failures.includes("inspector result was not ok") && v.failures.some(f=>f.includes("state DB authority")) && v.failures.some(f=>f.includes("not found"))'; then
+    ok "valid inspector ok:false plus exit 1 remains a structured pre-send failure without a stack"
+  else
+    no "structured inspector negative escaped the write-proof contract (rc=$WPRC, sends=$(cat "$WP_LIVE_SEND_COUNT" 2>/dev/null))"
+    wp_live_debug
+    sed -n '1,40p' "$WP_LIVE_STDERR" 2>/dev/null || true
+  fi
+
+  echo "== 21a3. write-proof canonicalizes an uppercase non-target-change allowlist =="
+  wp_live_run "$TMP/wp-live-uppercase-allowlist" uppercase-allowlist
+  if [[ $WPRC -eq 0 ]] \
+    && wp_sent_once \
+    && wp_field 'v.ok===true && v.compare.db.allowedNonTargetChangedIds.length===1 && v.compare.db.allowedNonTargetChangedIds[0]==="22222222-2222-4222-8222-222222222222" && v.compare.db.unexpectedNonTargetChangedIds.length===0'; then
+    ok "uppercase --allow-thread-change authorizes only its canonical thread identity"
+  else
+    no "uppercase write-proof allowlist lost canonical identity (rc=$WPRC, sends=$(cat "$WP_LIVE_SEND_COUNT" 2>/dev/null))"
+    wp_live_debug
+  fi
+
+  echo "== 21a4. write-proof canonicalizes the configured test-thread authorization =="
+  wp_live_run "$TMP/wp-live-uppercase-test-auth" uppercase-test-authorization
+  if [[ $WPRC -eq 0 ]] \
+    && wp_sent_once \
+    && wp_field 'v.ok===true && v.threadId==="11111111-1111-4111-8111-111111111111" && v.send.occurrence==="confirmed"'; then
+    ok "uppercase CODEX_IPC_AUTHORIZED_TEST_THREAD authorizes its canonical target without --allow-any-thread"
+  else
+    no "uppercase configured test-thread authorization was not canonicalized (rc=$WPRC, sends=$(cat "$WP_LIVE_SEND_COUNT" 2>/dev/null))"
+    wp_live_debug
+  fi
+
+  echo "== 21a5. write-proof rejects a successful shell whose top-level target is inconsistent =="
+  wp_live_run "$TMP/wp-live-wrong-top-level-target" wrong-top-level-target
+  if [[ $WPRC -ne 0 ]] \
+    && wp_sent_once \
+    && wp_field 'v.ok===false && v.send.ok===false && v.send.occurrence==="confirmed" && v.send.responseType==="success" && v.send.followerRequestCount===1 && v.send.matchingFollowerRequestCount===1 && v.send.error.includes("targetThreadId") && v.send.turnIdResolution.status==="resolved" && v.send.verificationStatus==="sent-but-unverified" && v.send.retrySafe===false && v.rolloutProbe.attempts===0'; then
+    ok "a mismatched top-level target preserves the send but blocks polling and certification"
+  else
+    no "a mismatched top-level target was certified or lost send evidence (rc=$WPRC, sends=$(cat "$WP_LIVE_SEND_COUNT" 2>/dev/null))"
+    wp_live_debug
+  fi
+
+  echo "== 21a6. write-proof rejects top-level ok when the response resultType is error =="
+  wp_live_run "$TMP/wp-live-error-response-result" error-response-result
+  if [[ $WPRC -ne 0 ]] \
+    && wp_sent_once \
+    && wp_field 'v.ok===false && v.send.ok===false && v.send.occurrence==="confirmed" && v.send.responseType==="error" && v.send.error.includes("resultType") && v.send.turnIdResolution.status==="resolved" && v.send.verificationStatus==="sent-but-unverified" && v.send.retrySafe===false && v.rolloutProbe.attempts===0'; then
+    ok "an error response with a plausible turn carrier preserves the send but cannot trigger polling"
+  else
+    no "an error response was certified or lost send evidence (rc=$WPRC, sends=$(cat "$WP_LIVE_SEND_COUNT" 2>/dev/null))"
+    wp_live_debug
+  fi
+
+  echo "== 21b. write-proof live branch: maintained nested response binds the strict poll =="
+  wp_live_run "$TMP/wp-live-nested" nested
+  if [[ $WPRC -eq 0 ]] \
+    && wp_sent_once \
+    && wp_field 'v.ok===true && v.before.targetThread.rolloutPath.endsWith("_00000000-0000-4000-8000-00000000c0de.jsonl") && v.send.turnId==="00000000-0000-4000-8000-000000000000" && v.send.turnIdResolution.status==="resolved" && v.send.verificationStatus==="turn-bound" && v.rolloutProbe.ok===true && v.rolloutProbe.lastObservation.expectedTurnId===v.send.turnId && v.rolloutProbe.lastObservation.proofTurnId===v.send.turnId'; then
+    ok "paginated DB path plus nested result.result.turn.id drive one strict same-turn proof"
+  else
+    no "nested send response was not strictly turn-bound (rc=$WPRC, sends=$(cat "$WP_LIVE_SEND_COUNT" 2>/dev/null))"
+    wp_live_debug
+  fi
+
+  for shape in one-level turn-id duplicate; do
+    echo "== 21c. write-proof live branch: $shape compatibility remains turn-bound =="
+    wp_live_run "$TMP/wp-live-$shape" "$shape"
+    if [[ $WPRC -eq 0 ]] \
+      && wp_sent_once \
+      && wp_field 'v.ok===true && v.send.turnId==="00000000-0000-4000-8000-000000000000" && v.rolloutProbe.ok===true && v.rolloutProbe.lastObservation.proofTurnId===v.send.turnId'; then
+      ok "$shape response compatibility still drives the strict poll"
+    else
+      no "$shape response compatibility failed (rc=$WPRC, sends=$(cat "$WP_LIVE_SEND_COUNT" 2>/dev/null))"
+      wp_live_debug
+    fi
+  done
+
+  echo "== 21d. write-proof live branch: missing turn id is sent-but-unverified after one send =="
+  wp_live_run "$TMP/wp-live-missing" missing
+  if [[ $WPRC -ne 0 ]] \
+    && wp_sent_once \
+    && wp_field 'v.ok===false && v.send.ok===true && v.send.turnId===null && v.send.turnIdResolution.status==="missing" && v.send.turnIdResolution.candidateCount===0 && v.send.verificationStatus==="sent-but-unverified" && v.rolloutProbe.attempts===0 && v.rolloutProbe.diagnostics.some(d=>d.includes("sent-but-unverified"))'; then
+    ok "missing response turn id fails closed while explicitly preserving send occurrence"
+  else
+    no "missing turn id did not fail as sent-but-unverified (rc=$WPRC, sends=$(cat "$WP_LIVE_SEND_COUNT" 2>/dev/null))"
+    wp_live_debug
+  fi
+
+  echo "== 21e. write-proof live branch: conflicting turn ids are sent-but-unverified after one send =="
+  wp_live_run "$TMP/wp-live-conflict" conflict
+  if [[ $WPRC -ne 0 ]] \
+    && wp_sent_once \
+    && wp_field 'v.ok===false && v.send.ok===true && v.send.turnId===null && v.send.turnIdResolution.status==="conflict" && v.send.turnIdResolution.candidateCount===2 && v.send.verificationStatus==="sent-but-unverified" && v.rolloutProbe.attempts===0 && v.rolloutProbe.diagnostics.some(d=>d.includes("sent-but-unverified"))'; then
+    ok "conflicting valid response turn ids fail closed without hiding the send"
+  else
+    no "conflicting turn ids did not fail as sent-but-unverified (rc=$WPRC, sends=$(cat "$WP_LIVE_SEND_COUNT" 2>/dev/null))"
+    wp_live_debug
+  fi
+
+  echo "== 21e2. write-proof rejects a valid turn id paired with a malformed recognized carrier =="
+  wp_live_run "$TMP/wp-live-invalid-carrier" invalid-carrier
+  if [[ $WPRC -ne 0 ]] \
+    && wp_sent_once \
+    && wp_field 'v.ok===false && v.send.ok===true && v.send.turnId===null && v.send.turnIdResolution.status==="invalid" && v.send.turnIdResolution.candidateCount===1 && v.send.turnIdResolution.invalidCandidateCount===1 && v.send.verificationStatus==="sent-but-unverified" && v.rolloutProbe.attempts===0'; then
+    ok "malformed recognized turn-id carrier blocks polling and preserves the one-send outcome"
+  else
+    no "mixed valid/malformed turn-id carriers did not fail closed (rc=$WPRC, sends=$(cat "$WP_LIVE_SEND_COUNT" 2>/dev/null))"
+    wp_live_debug
+  fi
+
+  echo "== 21f. write-proof preserves a confirmed send when the client exits nonzero =="
+  wp_live_run "$TMP/wp-live-nonzero" nonzero-structured
+  if [[ $WPRC -ne 0 ]] \
+    && wp_sent_once \
+    && wp_field 'v.ok===false && v.send.ok===false && v.send.occurrence==="confirmed" && v.send.commandStatus===1 && v.send.verificationStatus==="sent-but-unverified" && v.rolloutProbe.attempts===0 && v.rolloutProbe.diagnostics.some(d=>d.includes("sent-but-unverified")) && v.warnings.some(w=>w.includes("cannot be safely retried"))'; then
+    ok "nonzero structured client result retains confirmed-send evidence and blocks polling/retry"
+  else
+    no "nonzero structured client result hid or misclassified send occurrence (rc=$WPRC, sends=$(cat "$WP_LIVE_SEND_COUNT" 2>/dev/null))"
+    wp_live_debug
+  fi
+
+  echo "== 21g. write-proof exposes an unknown send outcome when the client emits no JSON =="
+  wp_live_run "$TMP/wp-live-unknown" transport-unknown
+  if [[ $WPRC -ne 0 ]] \
+    && wp_sent_once \
+    && wp_field 'v.ok===false && v.send.ok===false && v.send.occurrence==="unknown" && v.send.commandStatus===1 && v.send.verificationStatus==="send-outcome-unknown" && v.rolloutProbe.attempts===0 && v.rolloutProbe.diagnostics.some(d=>d.includes("send-outcome-unknown")) && v.warnings.some(w=>w.includes("cannot be safely retried"))'; then
+    ok "unparseable client failure remains explicit as send-outcome-unknown with zero polling"
+  else
+    no "unparseable client failure did not preserve uncertainty (rc=$WPRC, sends=$(cat "$WP_LIVE_SEND_COUNT" 2>/dev/null))"
+    wp_live_debug
+  fi
+
+  for cardinality_mode in duplicate-follower extra-target-follower; do
+    echo "== 21h. write-proof rejects $cardinality_mode evidence after one client invocation =="
+    wp_live_run "$TMP/wp-live-$cardinality_mode" "$cardinality_mode"
+    if [[ $WPRC -ne 0 ]] \
+      && wp_sent_once \
+      && wp_field 'v.ok===false && v.send.ok===false && v.send.occurrence==="confirmed" && v.send.followerRequestCount===2 && v.send.verificationStatus==="sent-but-unverified" && v.send.retrySafe===false && v.rolloutProbe.attempts===0 && v.warnings.some(w=>w.includes("cannot be safely retried"))'; then
+      ok "$cardinality_mode cannot certify an exact-one target send"
+    else
+      no "$cardinality_mode was not rejected conservatively (rc=$WPRC, sends=$(cat "$WP_LIVE_SEND_COUNT" 2>/dev/null))"
+      wp_live_debug
+    fi
+  done
+
+  for fresh_mode in archived-before unstable-before missing-path-before; do
+    echo "== 21i. write-proof fresh target gate: $fresh_mode sends zero times =="
+    wp_live_run "$TMP/wp-live-$fresh_mode" "$fresh_mode"
+    if [[ $WPRC -ne 0 ]] \
+      && wp_sent_zero \
+      && wp_field 'v.ok===false && !("send" in v) && v.preSendState.ok===false && v.failures.some(f=>f.includes("fresh pre-send snapshot"))'; then
+      ok "$fresh_mode fails at the latest trustworthy pre-send state"
+    else
+      no "$fresh_mode did not stop before send (rc=$WPRC, sends=$(cat "$WP_LIVE_SEND_COUNT" 2>/dev/null))"
+      wp_live_debug
+    fi
+  done
+
+  echo "== 21j. write-proof preserves send occurrence when the after snapshot throws =="
+  wp_live_run "$TMP/wp-live-after-snapshot-error" after-snapshot-error
+  if [[ $WPRC -ne 0 ]] \
+    && wp_sent_once \
+    && wp_field 'v.ok===false && v.send.occurrence==="confirmed" && v.send.verificationStatus==="sent-but-unverified" && v.send.retrySafe===false && v.rolloutProbe.ok===true && v.after===null && v.compare.ok===false && v.postSendFailures.some(f=>f.stage==="after-snapshot") && v.warnings.some(w=>w.includes("cannot be safely retried"))'; then
+    ok "post-send snapshot failure remains structured and explicitly non-retryable"
+  else
+    no "post-send snapshot failure escaped structured evidence (rc=$WPRC, sends=$(cat "$WP_LIVE_SEND_COUNT" 2>/dev/null))"
+    wp_live_debug
+  fi
+
+  for after_state in after-archived after-rollover after-target-id-mismatch; do
+    echo "== 21k. write-proof refuses $after_state as completed isolation proof =="
+    wp_live_run "$TMP/wp-live-$after_state" "$after_state"
+    if [[ $WPRC -ne 0 ]] \
+      && wp_sent_once \
+      && wp_field 'v.ok===false && v.send.occurrence==="confirmed" && v.send.verificationStatus==="sent-but-unverified" && v.send.retrySafe===false && v.rolloutProbe.ok===true && v.after!==null && v.compare.ok===false && v.postSendFailures.length===0 && v.warnings.some(w=>w.includes("cannot be safely retried"))'; then
+      ok "$after_state cannot be mistaken for a stable proof"
+    else
+      no "$after_state was not rejected by the isolation compare (rc=$WPRC, sends=$(cat "$WP_LIVE_SEND_COUNT" 2>/dev/null))"
+      wp_live_debug
+    fi
+  done
+
+  echo "== 21l. write-proof final pre-send check rejects rollout growth with zero sends =="
+  wp_live_run "$TMP/wp-live-rollout-growth" rollout-growth-before-send
+  if [[ $WPRC -ne 0 ]] \
+    && wp_sent_zero \
+    && wp_field 'v.ok===false && !("send" in v) && v.finalRolloutCheck.unchanged===false && v.failures.some(f=>f.includes("rollout baseline changed"))'; then
+    ok "rollout growth during the fresh snapshot is detected before the client"
+  else
+    no "rollout growth crossed the final pre-send gate (rc=$WPRC, sends=$(cat "$WP_LIVE_SEND_COUNT" 2>/dev/null))"
+    wp_live_debug
+  fi
+
+  echo "== 21l2. write-proof final pre-send check rejects same-size prefix rewrites with zero sends =="
+  wp_live_run "$TMP/wp-live-rollout-same-size" rollout-same-size-before-send
+  if [[ $WPRC -ne 0 ]] \
+    && wp_sent_zero \
+    && wp_field 'v.ok===false && !("send" in v) && v.authorizationStage==="baseline-revalidation" && v.finalRolloutCheck.unchanged===false && v.failures.some(f=>f.includes("fully revalidated"))'; then
+    ok "same-size rollout rewrite is detected by full prefix revalidation before the client"
+  else
+    no "same-size rollout rewrite crossed the final pre-send gate (rc=$WPRC, sends=$(cat "$WP_LIVE_SEND_COUNT" 2>/dev/null))"
+    wp_live_debug
+  fi
+
+  for invalid_rollout in wrong-root bad-page bad-metadata; do
+    echo "== 21m. write-proof pre-send: $invalid_rollout paginated authority sends zero times =="
+    wp_live_run "$TMP/wp-live-$invalid_rollout" nested "$invalid_rollout"
+    if [[ $WPRC -ne 0 ]] \
+      && wp_sent_zero \
+      && wp_field 'v.ok===false && !("send" in v) && v.rolloutBinding.status==="unavailable" && v.rolloutBinding.reason==="identity-mismatch" && v.failures.some(f=>f.includes("before send"))'; then
+      ok "$invalid_rollout paginated authority fails before the injected client"
+    else
+      no "$invalid_rollout paginated authority did not stop before send (rc=$WPRC, sends=$(cat "$WP_LIVE_SEND_COUNT" 2>/dev/null))"
+      wp_live_debug
+    fi
+  done
 else
   echo "  NOTE: codex_ipc_write_proof.mjs not found; skipping write-proof gate checks"
 fi
@@ -557,6 +1432,207 @@ if [[ -n "$WRITE_PROOF" ]]; then
     || no "drift-poisoned completed turn was accepted (rc=$WPRC)"
 fi
 
+echo "== 23b. wrapper thread identity must match the pinned rollout owner =="
+CASE="$TMP/ta-wrapper-owner"; mkdir -p "$CASE/sessions"
+write_wrong_thread_wrapper "$CASE/sessions/rollout-wrapper-owner-$THREAD.jsonl"
+run_turn_activity_case "$CASE/sessions/rollout-wrapper-owner-$THREAD.jsonl"
+assert_turn_activity ambiguous "wrong-thread completed wrapper fails closed in the pre-send inspector"
+
+echo "== 23c. repeated session metadata cannot rebind an open turn =="
+CASE="$TMP/ta-owner-rebound"; mkdir -p "$CASE/sessions"
+write_rebound_owner "$CASE/sessions/rollout-owner-rebound-$THREAD.jsonl"
+run_turn_activity_case "$CASE/sessions/rollout-owner-rebound-$THREAD.jsonl"
+assert_turn_activity ambiguous "conflicting in-turn session metadata fails closed in the pre-send inspector"
+
+echo "== 23c2. provenance-linked ancestor metadata is inert and cannot rebind the owner =="
+CASE="$TMP/ta-owner-lineage"; mkdir -p "$CASE/sessions"
+write_lineaged_owner "$CASE/sessions/rollout-owner-lineage-$THREAD.jsonl"
+run_turn_activity_case "$CASE/sessions/rollout-owner-lineage-$THREAD.jsonl"
+assert_turn_activity closed "linked inherited session metadata preserves current-owner activity"
+
+echo "== 23c3. a fork without a producer history boundary cannot authorize child activity =="
+CASE="$TMP/ta-owner-lineage-missing"; mkdir -p "$CASE/sessions"
+write_lineaged_owner_without_boundary "$CASE/sessions/rollout-owner-lineage-missing-$THREAD.jsonl"
+run_turn_activity_case "$CASE/sessions/rollout-owner-lineage-missing-$THREAD.jsonl"
+assert_turn_activity ambiguous "boundary-less fork history fails closed instead of guessing ownership"
+
+echo "== 23c4. copied fork tail cannot project ancestor activity or replace child metadata =="
+CASE="$TMP/ta-owner-lineage-boundary"; mkdir -p "$CASE/sessions"
+write_lineaged_owner_boundary_only "$CASE/sessions/rollout-owner-lineage-boundary-$THREAD.jsonl"
+run_turn_activity_case "$CASE/sessions/rollout-owner-lineage-boundary-$THREAD.jsonl"
+if [[ $RC -eq 0 ]] && printf '%s' "$OUT" | "$NODE_BIN" -e '
+  const v=JSON.parse(require("node:fs").readFileSync(0,"utf8"));
+  const s=v.activitySignals;
+  const expectNull=[
+    "lastTaskCompleteLine", "lastTurnAbortedLine", "lastTerminalLine",
+    "lastTerminalType", "lastUserMessageLine", "lastAgentMessageLine",
+  ];
+  for (const key of expectNull) {
+    if (s[key] !== null) throw new Error(`${key}=${s[key]} inherited from copied history`);
+  }
+  if (s.newestRolloutLine !== 7 || s.newestRolloutType !== "thread_settings_applied") {
+    throw new Error(`newest admitted item=${s.newestRolloutLine}/${s.newestRolloutType}`);
+  }
+  if (s.terminalState !== "none") throw new Error(`terminalState=${s.terminalState}`);
+  if (s.hasTaskCompleteInTail || s.hasTurnAbortedInTail || s.hasTerminalInTail || s.maybeMidTurn) {
+    throw new Error("copied history leaked into boolean activity projections");
+  }
+  if (s.turnActivity !== "ambiguous") throw new Error(`turnActivity=${s.turnActivity}`);
+  if (v.rollout.primary.sessionMeta?.line !== 1) {
+    throw new Error(`sessionMeta line=${v.rollout.primary.sessionMeta?.line}; child root metadata was replaced`);
+  }
+  if (!v.rollout.primary.recentItems.some((item) => item.line === 6 && item.payloadType === "task_complete")) {
+    throw new Error("fixture no longer proves display-tail separation from admitted projections");
+  }
+' >/dev/null 2>&1; then
+  ok "copied ancestor tail remains display-only while every activity projection and owner metadata stay child-local"
+else
+  no "copied ancestor tail leaked into activity projections or replaced child metadata (rc=$RC)"
+fi
+SUMMARY_OUT="$("$NODE_BIN" "$INSPECT" \
+  --db "$CASE/state.sqlite" \
+  --sessions-root "$CASE/sessions" \
+  --thread "$THREAD" \
+  --tail-events 20 \
+  --summary 2>/dev/null)"
+SUMMARY_RC=$?
+if [[ $SUMMARY_RC -eq 0 ]] && printf '%s' "$SUMMARY_OUT" | "$NODE_BIN" -e '
+  const v=JSON.parse(require("node:fs").readFileSync(0,"utf8"));
+  const s=v.activitySignals;
+  if (s.lastTaskCompleteLine !== null || s.terminalState !== "none") {
+    throw new Error("summary inherited ancestor completion");
+  }
+  if (s.lastUserMessageLine !== null || s.lastAgentMessageLine !== null || s.maybeMidTurn) {
+    throw new Error("summary inherited ancestor activity");
+  }
+  if (s.turnActivity !== "ambiguous") throw new Error(`turnActivity=${s.turnActivity}`);
+' >/dev/null 2>&1; then
+  ok "the bounded --summary projection also excludes every copied ancestor activity signal"
+else
+  no "the bounded --summary projection retained copied ancestor activity (rc=$SUMMARY_RC)"
+fi
+
+echo "== 23d. a pre-turn owner conflict poisons later completed activity =="
+CASE="$TMP/ta-owner-global"; mkdir -p "$CASE/sessions"
+write_rebound_owner_before_turn "$CASE/sessions/rollout-owner-global-$THREAD.jsonl"
+run_turn_activity_case "$CASE/sessions/rollout-owner-global-$THREAD.jsonl"
+assert_turn_activity ambiguous "file-global owner conflict fails closed before a later turn"
+
+echo "== 23e. invalid session metadata poisons later completed activity =="
+CASE="$TMP/ta-owner-invalid"; mkdir -p "$CASE/sessions"
+write_invalid_owner_before_turn "$CASE/sessions/rollout-owner-invalid-$THREAD.jsonl"
+run_turn_activity_case "$CASE/sessions/rollout-owner-invalid-$THREAD.jsonl"
+assert_turn_activity ambiguous "invalid file-global owner metadata fails closed before a later turn"
+
+echo "== 23f. missing session ownership cannot certify completed activity =="
+CASE="$TMP/ta-owner-missing"; mkdir -p "$CASE/sessions"
+write_ownerless_closed "$CASE/sessions/rollout-owner-missing-$THREAD.jsonl"
+run_turn_activity_case "$CASE/sessions/rollout-owner-missing-$THREAD.jsonl"
+assert_turn_activity ambiguous "missing file-global owner metadata fails closed"
+
+echo "== 23g. direct event thread identity must match the inspected target =="
+CASE="$TMP/ta-direct-owner"; mkdir -p "$CASE/sessions"
+write_wrong_thread_direct "$CASE/sessions/rollout-direct-owner-$THREAD.jsonl"
+run_turn_activity_case "$CASE/sessions/rollout-direct-owner-$THREAD.jsonl"
+assert_turn_activity ambiguous "wrong-thread direct records fail closed in the pre-send inspector"
+
+echo "== 23h. malformed direct thread identity after a terminal is file-global =="
+CASE="$TMP/ta-direct-owner-invalid"; mkdir -p "$CASE/sessions"
+write_malformed_thread_direct_after_terminal "$CASE/sessions/rollout-direct-owner-invalid-$THREAD.jsonl"
+run_turn_activity_case "$CASE/sessions/rollout-direct-owner-invalid-$THREAD.jsonl"
+assert_turn_activity ambiguous "malformed post-terminal direct thread identity fails closed"
+
+echo "== 23i. malformed nested thread identity after a terminal is file-global =="
+CASE="$TMP/ta-nested-owner-invalid"; mkdir -p "$CASE/sessions"
+write_malformed_thread_nested_after_terminal "$CASE/sessions/rollout-nested-owner-invalid-$THREAD.jsonl"
+run_turn_activity_case "$CASE/sessions/rollout-nested-owner-invalid-$THREAD.jsonl"
+assert_turn_activity ambiguous "malformed post-terminal nested thread identity fails closed"
+
+echo "== 23j. DB-authoritative exact-suffix rollout requires session_meta as its first record =="
+CASE="$TMP/db-first-record"; mkdir -p "$CASE/sessions/a" "$CASE/sessions/b"
+DB_ROLLOUT="$CASE/sessions/a/rollout-db-first-record-$THREAD.jsonl"
+cat > "$DB_ROLLOUT" <<EOF
+{"type":"event_msg","payload":{"type":"token_count","info":{"total":1}}}
+{"type":"session_meta","payload":{"id":"$THREAD"}}
+{"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-a"}}
+{"type":"event_msg","payload":{"type":"user_message","turn_id":"turn-a","message":"sanitized task"}}
+{"type":"event_msg","payload":{"type":"agent_message","message":"done","phase":"final_answer"}}
+{"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-a","last_agent_message":"done"}}
+EOF
+write_closed_same_turn "$CASE/sessions/b/rollout-valid-$THREAD.jsonl"
+make_db "$CASE/state.sqlite" "$DB_ROLLOUT"
+run_inspect "$CASE/state.sqlite" "$CASE/sessions"
+assert_case invalid-db-identity "later matching metadata cannot rescue a DB rollout with a non-session_meta first record"
+
+echo "== 23k. sessions-root matching rejects UUID-containing filename decoys =="
+CASE="$TMP/suffix-decoy"; mkdir -p "$CASE/sessions"
+write_closed_same_turn "$CASE/sessions/rollout-$THREAD-decoy.jsonl"
+make_db "$CASE/state.sqlite"
+run_inspect "$CASE/state.sqlite" "$CASE/sessions"
+assert_case suffix-decoy "a target-named filename outside the certified grammar keeps root discovery unresolved"
+
+echo "== 23l. a DB rollout path with the wrong filename is rejected without fallback =="
+CASE="$TMP/db-wrong-filename"; mkdir -p "$CASE/sessions/a" "$CASE/sessions/b"
+DB_ROLLOUT="$CASE/sessions/a/arbitrary-db-path.jsonl"
+write_closed_same_turn "$DB_ROLLOUT"
+write_closed_same_turn "$CASE/sessions/b/rollout-valid-$THREAD.jsonl"
+make_db "$CASE/state.sqlite" "$DB_ROLLOUT"
+run_inspect "$CASE/state.sqlite" "$CASE/sessions"
+assert_case invalid-db-identity "matching first metadata cannot authorize an arbitrary DB rollout filename or fallback"
+
+echo "== 23m. a nonempty DB rollout_path naming a directory is unavailable without fallback =="
+CASE="$TMP/db-directory"; mkdir -p "$CASE/sessions" "$CASE/db-rollout-dir"
+write_closed_same_turn "$CASE/sessions/rollout-valid-$THREAD.jsonl"
+make_db "$CASE/state.sqlite" "$CASE/db-rollout-dir"
+run_inspect "$CASE/state.sqlite" "$CASE/sessions"
+assert_case unusable-db-authority "an existing directory in DB rollout_path blocks sessions-root fallback"
+
+echo "== 23n. a nonempty missing DB rollout_path is unavailable without fallback =="
+CASE="$TMP/db-missing"; mkdir -p "$CASE/sessions"
+write_closed_same_turn "$CASE/sessions/rollout-valid-$THREAD.jsonl"
+make_db "$CASE/state.sqlite" "$CASE/missing/rollout-missing-$THREAD.jsonl"
+run_inspect "$CASE/state.sqlite" "$CASE/sessions"
+assert_case unusable-db-authority "a missing DB rollout_path blocks sessions-root fallback"
+
+echo "== 23o. a valid DB-designated paginated rollout remains owner-bound and readable =="
+CASE="$TMP/db-paginated"; mkdir -p "$CASE/sessions"
+DB_ROLLOUT="$CASE/sessions/rollout-db-page-${THREAD}_${PAGE}.jsonl"
+write_paginated_closed "$DB_ROLLOUT"
+make_db "$CASE/state.sqlite" "$DB_ROLLOUT"
+run_inspect "$CASE/state.sqlite" "$CASE/sessions"
+assert_case paginated-db-authority "DB-designated root_page rollout is selected and reports closed activity"
+
+echo "== 23p. sessions-root discovery recognizes one valid paginated rollout =="
+CASE="$TMP/discovered-paginated"; mkdir -p "$CASE/sessions"
+write_paginated_closed "$CASE/sessions/rollout-page-${THREAD}_${PAGE}.jsonl"
+make_db "$CASE/state.sqlite"
+run_inspect "$CASE/state.sqlite" "$CASE/sessions"
+assert_case single-candidate "one discovered root_page rollout is selected and parsed"
+
+echo "== 23q. multiple discovered paginated pages remain ambiguous =="
+CASE="$TMP/ambiguous-paginated"; mkdir -p "$CASE/sessions/a" "$CASE/sessions/b"
+write_paginated_closed "$CASE/sessions/a/rollout-a-${THREAD}_${PAGE}.jsonl"
+write_paginated_closed "$CASE/sessions/b/rollout-b-${THREAD}_${HISTORY_BASE}.jsonl"
+make_db "$CASE/state.sqlite"
+run_inspect "$CASE/state.sqlite" "$CASE/sessions"
+assert_case ambiguous-candidates "multiple physical root_page rollouts fail closed without mtime selection"
+
+echo "== 23r. a valid root candidate plus an identity-invalid sibling remains unresolved =="
+CASE="$TMP/unresolved-candidate-set"; mkdir -p "$CASE/sessions/a" "$CASE/sessions/b"
+write_closed_same_turn "$CASE/sessions/a/rollout-old-${THREAD}.jsonl"
+write_paginated_closed "$CASE/sessions/b/rollout-new-${THREAD}_${PAGE}.jsonl" "$OTHER_THREAD"
+make_db "$CASE/state.sqlite"
+run_inspect "$CASE/state.sqlite" "$CASE/sessions"
+assert_case unresolved-candidate-set "root discovery cannot certify an older valid rollout while a target-named sibling is identity-invalid"
+
+echo "== 23s. a trailing UUID cannot hide target-named filename schema drift =="
+CASE="$TMP/unresolved-trailing-uuid"; mkdir -p "$CASE/sessions/a" "$CASE/sessions/b"
+write_closed_same_turn "$CASE/sessions/a/rollout-old-${THREAD}.jsonl"
+write_closed_same_turn "$CASE/sessions/b/rollout-new-${THREAD}-v2-${OTHER_THREAD}.jsonl"
+make_db "$CASE/state.sqlite"
+run_inspect "$CASE/state.sqlite" "$CASE/sessions"
+assert_case unresolved-candidate-set "inspector root discovery cannot silently reinterpret target-named drift as another legacy root"
+
 # ============================================================================================
 # O3: the `--summary` preflight projection (AC1-AC7).
 #
@@ -571,10 +1647,9 @@ fi
 REPO_ROOT="$(cd "$TDIR/.." && pwd)"
 
 # The commit immediately BEFORE --summary landed. AC1 diffs the SHIPPED DEFAULT output against
-# this ref's inspector, byte for byte. That comparison is load-bearing, not ceremonial:
-# handoff_to_codex.sh greps the literal pretty-printed `"ok": false` / `"ok": true` /
-# `"archived": 1` out of a `--tail-events 1` inspector run, and any whitespace or field drift in
-# the default emit turns the unowned-thread auto-load into a fail-closed refusal.
+# this ref's inspector byte for byte as an explicit compatibility guard for downstream consumers
+# and stored fixtures. The maintained handoff wrapper now parses structural JSON and is not
+# coupled to pretty-print whitespace, so this guard must not be read as a transport prerequisite.
 PRE_O3_REF="6cd565331d96f3f769e07d4b821f9435d48ab8ab"
 
 # A DB builder carrying the inspector's FULL column list, so the AC4 ratio is measured against a
@@ -633,7 +1708,7 @@ make_db_full(){
 write_o3_stream(){  # write_o3_stream <path> <n-progress-items>
   local file_path="$1" n="${2:-30}" i len
   {
-    printf '%s\n' "{\"type\":\"session_meta\",\"payload\":{\"type\":\"session_meta\",\"id\":\"$THREAD\",\"cwd\":\"C:/dev/some-project\",\"instructions\":\"$(printf 'a%.0s' $(seq 1 400))\"}}"
+    printf '%s\n' "{\"type\":\"session_meta\",\"payload\":{\"id\":\"$THREAD\",\"cwd\":\"C:/dev/some-project\",\"instructions\":\"$(printf 'a%.0s' $(seq 1 400))\"}}"
     printf '%s\n' "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"turn-a\"}}"
     printf '%s\n' "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"turn_id\":\"turn-a\",\"message\":\"$(printf 'u%.0s' $(seq 1 300))\"}}"
     for ((i=0; i<n; i++)); do
@@ -656,7 +1731,7 @@ write_o3_stream(){  # write_o3_stream <path> <n-progress-items>
 # call site (handoff_to_codex.sh's unowned-thread guard).
 write_o3_out_of_tail(){
   cat > "$1" <<EOF
-{"type":"session_meta","payload":{"type":"session_meta","id":"$THREAD"}}
+{"type":"session_meta","payload":{"id":"$THREAD"}}
 {"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-a"}}
 {"type":"event_msg","payload":{"type":"user_message","turn_id":"turn-a","message":"do the task"}}
 {"type":"event_msg","payload":{"type":"agent_message","phase":"final_answer","message":"here is the answer"}}
@@ -684,7 +1759,10 @@ for i in $(seq -w 1 12); do
   write_o3_stream "$O3/ambig12/sessions/d$i/rollout-c$i-$THREAD.jsonl" 4
 done
 make_db_full "$O3/ambig12/state.sqlite"
-printf '%s\n' '{malformed' > "$O3/malformed/sessions/a/rollout-bad-$THREAD.jsonl"
+cat > "$O3/malformed/sessions/a/rollout-bad-$THREAD.jsonl" <<EOF
+{"type":"session_meta","payload":{"id":"$THREAD"}}
+{malformed
+EOF
 write_user_complete "$O3/malformed/sessions/b/rollout-other-$THREAD.jsonl"
 make_db_full "$O3/malformed/state.sqlite" "$O3/malformed/sessions/a/rollout-bad-$THREAD.jsonl"
 
@@ -703,7 +1781,10 @@ if git -C "$REPO_ROOT" cat-file -e "${PRE_O3_REF}:skills/ipc/scripts/codex_ipc_s
 fi
 if [[ -n "$PRE_O3" ]]; then
   AC1_DIFFS=0; AC1_PAIRS=0
-  for fixture in basic outoftail ambig12 malformed; do
+  # The malformed fixture is intentionally outside this historical byte-identity comparison:
+  # the current owner-integrity repair corrects parsedOk from true to false when a valid first
+  # session_meta is followed by malformed JSON. AC5 below proves that corrected projection.
+  for fixture in basic outoftail ambig12; do
     for window in 1 5 20; do
       run_o3 "$TMP/ac1-old" "$PRE_O3" "$O3/$fixture/state.sqlite" "$O3/$fixture/sessions" --tail-events "$window"
       run_o3 "$TMP/ac1-new" "$INSPECT"  "$O3/$fixture/state.sqlite" "$O3/$fixture/sessions" --tail-events "$window"

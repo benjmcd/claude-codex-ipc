@@ -43,6 +43,31 @@ it writes, locks, and creates nothing (not even the transport root). Flags:
 closed (exit 1, never a false "0 replies"). Per-entry (session/thread/dispatch) attribution is what
 keeps this a view rather than a re-commingling of channels.
 
+### Completion, freshness, and supersession
+
+The rollout correlator exposes orthogonal evidence rather than one overloaded success flag:
+
+- historical lifecycle completion proves that an exact dispatch occurrence completed;
+- `latestOccurrence` describes the newest exact dispatch-marker occurrence; and
+- global `freshness` requires that newest occurrence to be certifiably complete with no later
+  malformed or unknown-schema record making the post-boundary suffix opaque.
+
+Within the bound turn, final bodies are deduplicated by exact text. Multiple distinct explicit
+`final_answer` bodies certify only when a nonempty `task_complete.last_agent_message` exactly
+matches one body; missing, empty, or nonmatching terminal evidence remains unavailable.
+
+Historical completion is monotone evidence for that occurrence. A readable primary reply therefore
+remains selected for viewing when later schema makes freshness opaque, but it may be stale and the
+waiter returns `unavailable`. Two distinct exact marker occurrences reuse one dispatch ID; the one
+reply path cannot identify its writer, so the waiter remains `unavailable` even if one or both
+occurrences completed. The viewer may still show a primary reply, but it marks supersession
+`unavailable`, emits a stale-body caution, and never supplies a rollout-fallback body or a
+positive/negative supersession conclusion for the reused ID. Same-item mirror records collapsed to
+one logical occurrence are not reuse. Absent reuse, rollout fallback and a negative claim that
+`REPLY-SUPERSEDED` was not seen require settled freshness, so neither can borrow an older completed
+occurrence. An exact positive `REPLY-SUPERSEDED` completion remains positive only when later
+uncertainty is not another exact occurrence; that uncertainty is disclosed separately.
+
 ## Delivery routes
 
 ### File-drop (default, stable)
@@ -100,8 +125,10 @@ a failed verification is reported as a WARNING rather than staying silent). If C
 foreground app and the target thread is unowned, the default policy defers rather than changing
 the visible Codex view — foreground recovery then requires explicit switch authorization (below)
 or a future proven restore path. The file-drop **envelope** is preserved in every outcome; the
-**pickup line** is printed only when the failure is proven pre-send. After an ambiguous
-post-attempt result (`confirmation=unknown`) pickup is suppressed and resending is forbidden.
+**pickup line** is printed only when structured evidence proves no follower was admitted.
+`confirmation=not-attempted` names that state, although an exact `no-client-found` router request
+may have occurred. After an ambiguous post-attempt result (`confirmation=unknown`) pickup is
+suppressed and resending is forbidden.
 
 #### Foreground policy (`--foreground-policy`, EXPERIMENTAL)
 
@@ -131,8 +158,94 @@ On an accepted send, `confirmation` carries one bounded rollout-observation toke
 admission only, never completion or reply-file success), `rollout-pending` (an authoritative
 candidate was readable/parseable but no pickup was observed within the bounded budget), or
 `rollout-unavailable` (observation could not determine a result). Observation failures never
-reclassify an accepted send and never trigger an automatic resend; re-inspect the thread tail
-when delivery certainty matters.
+reclassify an accepted send and never trigger an automatic resend. A thread-tail inspection can
+inform diagnosis, but a negative bounded/recent-tail result cannot prove non-admission or
+authorize a resend.
+
+Auto-load authority is structural. The wrapper accepts `no-client-found` only from a parsed failed
+client response for the exact target with exactly one matching follower request; nested or
+incidental text is ignored. It then requires the inspector to prove a successful read-only DB open
+and one exact active row for that target before navigation. A matching rollout alone, a
+missing/archived row, or malformed/ambiguous inspector output fails closed without firing a deep
+link. Initial renderer-owned success and post-autoload retry success both require parsed `ok: true`,
+the exact `targetThreadId`, `response.resultType: "success"`, and exactly one follower occurrence
+whose `name`, `method`, and `conversationId` all match. Client exit 0 with missing or conflicting
+structure is post-attempt ambiguous: it is not classified as delivered and is never automatically
+retried. Inspection is necessary before considering a manual retry, but negative
+bounded/recent-tail evidence cannot prove non-admission. Retry requires either an exact
+full-history outcome proving non-admission or an explicit owner decision acknowledging the
+unresolved duplicate-send risk. The inspector recheck is
+defense in depth on the authoritative unowned branch only; the renderer-owned fast path relies on
+the mandatory separate agent preflight and does not repeat that inspection before its initial
+attempt. The preflight-to-send state-change window remains disclosed. Exact target binding prevents
+heuristic retargeting, and ambiguous outcomes are never retried automatically.
+
+Rollout readers share one fail-closed owner and lineage contract. The first physical JSONL record
+must be a `session_meta` whose `payload.id` matches the requested thread; it pins the file-global
+owner. Later `session_meta` records are lineage only: their `payload.id` must already be the owner
+or have been predeclared through `forked_from_id` on an admitted metadata record; they may extend
+that lineage through their own `forked_from_id`, but never rebind the owner. Any recognized
+record-level `thread_id` carrier must resolve to one valid UUID matching the pinned owner.
+Forked rollouts additionally require a valid `forked_from_id`, a safe-integer
+`subagent_history_start_ordinal >= 1`, contiguous top-level ordinals beginning at zero, and
+`event_msg/thread_settings_applied` at that boundary. Earlier records are parsed and hashed but
+never observed, correlated, or projected as child activity. Missing, malformed, gapped, reordered,
+or unreached boundaries fail closed; UUID timestamps are never provenance authority.
+The inspector's `recentItems` is the raw physical display tail and may therefore include copied
+ancestor records; it is not child-activity evidence. Use the owner- and history-scoped
+`activitySignals` projection for that determination.
+Certifying locator-to-reader handoffs bind both that expected owner and the physical file identity. A
+certifying cursor must be reader-issued at complete EOF (`offset === size`, with no partial tail)
+and carry canonical path/file identity, first-record and trailing-content anchors, plus a SHA-256
+digest of the entire consumed prefix. Resumed reads revalidate every binding, so replacement,
+truncation, an older in-place identity rewrite, or growth across the read cannot certify.
+Locator basenames are strict: legacy `...-<rootUuid>.jsonl` and paginated
+`...-<rootUuid>_<pageUuid>.jsonl` are the only admitted forms. A paginated first
+`session_meta` must also bind `session_id` to the root, declare `history_mode: paginated`, and carry
+a valid `history_base.thread_id`. The state DB's explicit rollout path is authoritative. Root-only
+discovery may recognize both forms, but multiple distinct valid physical pages are ambiguous and
+are never resolved by mtime. A poll remains on its selected page; cross-page N-to-N+1 rollover is
+not yet certified or supported. Even with one valid file, root-only discovery returns
+`candidate-set-unresolved` when its scan also finds a recognized exact-target candidate that fails
+validation, any `rollout-*` basename containing the target UUID that is not understood as a
+candidate for that root (including when a trailing second UUID makes the legacy parser attribute
+the name to another root), or an unreadable subtree. A recognized paginated basename is exempt when
+only its page ID equals the target and its root is another session. Other unresolved diagnostics
+are never suppressed to select the valid file. The standalone observer, waiter, and harvester also
+do not follow a target-thread ID to a differently owned physical rollout:
+without a trusted alias authority that remap is `unavailable`, not inferred. This limits rollout
+observation/fallback only; file-primary replies and the preserved file-drop envelope remain usable.
+They accept `--rollout-path` but do not derive it from the DB; pass the exact
+designated path when known, or accept that root-only discovery can be ambiguous.
+After a complete certifying cursor exists, polling callers may skip an intermediate full read only
+when a metadata check finds the same canonical path, physical identity, and size. Such a no-growth
+observation cannot certify pickup, completion, a reply, or proof success. Any growth/change and the
+final attempt or budget edge that begins before the deadline runs the unchanged full reader, so replacement and same-size tampering
+still fail closed when certification is required.
+The read deadline covers prefix hashing, final anchor revalidation, and path rebinding checks; expiry returns
+no certifying cursor or trusted partial projection. A distinct later user event within the dispatch
+turn invalidates marker ownership. Only repeated normalized user records with the
+same non-empty item identity are collapsed; equal text or a direct/wrapped representation alone is
+not proof of one delivery.
+
+The controlled write-proof adds one final pre-send boundary after its fresh state snapshot: it
+fully revalidates the baseline cursor and requires unchanged canonical/physical identity, complete
+EOF, offset/size, and whole-prefix SHA-256. Growth, replacement, or a same-size historical rewrite
+therefore stops before the client is invoked. After the one send attempt, a certifiable client
+result requires a successful client process, top-level `ok: true`, the exact canonical top-level
+`targetThreadId`, `response.resultType: "success"`, and exactly one follower occurrence whose
+`name`, `method`, and `conversationId` match the target. The matching follower proves send
+occurrence only; it does not prove router acceptance or task completion. If occurrence is confirmed
+but any certification field fails, the harness preserves it, performs zero rollout polls, and
+reports non-retryable `sent-but-unverified`; unparseable output leaves occurrence unknown as
+`send-outcome-unknown`. Only a certified result with one unconflicted response turn ID may start
+polling; missing or conflicting turn IDs likewise yield zero polls and `sent-but-unverified`.
+End-to-end success additionally requires the rollout proof to bind that turn and show the agent
+marker followed by completion, plus structured config/DB isolation proof. Null, malformed,
+contradictory, or bare-`ok` post-send proofs cannot certify. Inspection is necessary before
+considering a retry, but negative bounded/recent-tail evidence cannot prove non-admission. Retry
+requires either an exact full-history outcome proving non-admission or an explicit owner decision
+acknowledging the unresolved duplicate-send risk.
 
 Autoload helper exit codes: `0` deep-link permitted/completed (or dry-run equivalent), `1` link
 fired but focus restore unverified, `2` foreground-Codex (or unidentifiable foreground) deferral,

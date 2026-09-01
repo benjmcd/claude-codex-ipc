@@ -5,13 +5,13 @@
 # - Real-client dry-run emits initialize then thread-follower-start-turn with the exact
 #   observable request keys, method names, version, target, text input, and UUID ids.
 # - Dry-run byte totals equal UTF-8 JSON bytes plus the four-byte frame overhead.
+# - The real client's pure live-response projection preserves the follower request on a
+#   non-success router response without opening a pipe.
 # - Wrapper process-result classification covers acceptance, no-client-found, and
 #   malformed/unknown failures using stubbed client, observer, and inspector processes.
 #
 # EXCLUDED:
 # - Raw four-byte frame header contents/endianness (dry-run exposes only total bytes).
-# - The client's live response-body resultType/clientId classifier (not injectable via
-#   dry-run without modifying the read-only client).
 # - Named-pipe I/O, live owner state, GUI delivery/focus, rollout mutation, reply-file
 #   completion, sandbox behavior, and any end-to-end Desktop claim.
 
@@ -144,6 +144,63 @@ assert_dry initialize "initialize request shape is exact"
 assert_dry follower "thread-follower-start-turn request shape is exact"
 assert_dry framing "observable frame totals include exactly four overhead bytes"
 
+CANONICAL_CASE_THREAD="00000000-0000-4000-8000-00000000c0de"
+UPPER_THREAD="${CANONICAL_CASE_THREAD^^}"
+UPPER_OUT="$("$NODE_BIN" "$CLIENT" --thread "$UPPER_THREAD" --task "$TASK_TEXT" --client-type "$CLIENT_TYPE" 2>/dev/null)"
+if printf '%s' "$UPPER_OUT" | "$NODE_BIN" "$ASSERT_JSON" follower "$CANONICAL_CASE_THREAD" "$TASK_TEXT" "$CLIENT_TYPE" >/dev/null 2>&1; then
+  ok "case-insensitive UUID input is emitted as one canonical lowercase target"
+else
+  no "uppercase UUID input was not canonicalized before request construction"
+fi
+
+AUTHORIZED_OUT="$(CODEX_IPC_AUTHORIZED_TEST_THREAD="$UPPER_THREAD" \
+  "$NODE_BIN" "$CLIENT" --thread "$CANONICAL_CASE_THREAD" --task "$TASK_TEXT" 2>/dev/null)"
+if printf '%s' "$AUTHORIZED_OUT" | "$NODE_BIN" -e '
+const fs = require("node:fs");
+const value = JSON.parse(fs.readFileSync(0, "utf8"));
+process.exit(value.dryRun === true && value.authorizedTestThreadId === process.argv[1] &&
+  value.targetThreadId === process.argv[1] && value.liveWriteWouldBeAllowedWithSend === true ? 0 : 1);
+' "$CANONICAL_CASE_THREAD" >/dev/null 2>&1; then
+  ok "uppercase authorized-test UUID is canonicalized to the same dry-run target identity"
+else
+  no "uppercase authorized-test UUID did not preserve thread-scoped authorization equivalence"
+fi
+
+if CLIENT="$CLIENT" THREAD="$THREAD" "$NODE_BIN" --input-type=module <<'NODE'
+import assert from "node:assert/strict";
+import { pathToFileURL } from "node:url";
+const { projectLiveResponse } = await import(pathToFileURL(process.env.CLIENT));
+const threadId = process.env.THREAD;
+const initializeRequest = { type: "request", method: "initialize", requestId: "init" };
+const initialize = { resultType: "success", result: { clientId: "offline-client" } };
+const followerRequest = {
+  type: "request",
+  method: "thread-follower-start-turn",
+  requestId: "follow",
+  params: { conversationId: threadId },
+};
+const response = { resultType: "error", error: "offline rejection" };
+const result = projectLiveResponse(
+  { pipePath: "offline", threadId },
+  initializeRequest,
+  initialize,
+  followerRequest,
+  response,
+);
+assert.equal(result.ok, false);
+assert.equal(result.targetThreadId, threadId);
+assert.equal(result.sentRequests.length, 2);
+assert.equal(result.sentRequests[1].name, "thread-follower-start-turn");
+assert.equal(result.sentRequests[1].json.method, "thread-follower-start-turn");
+assert.equal(result.sentRequests[1].json.params.conversationId, threadId);
+assert.equal(result.response, response);
+NODE
+then
+  ok "real-client non-success projection retains exact follower-send occurrence"
+else
+  no "real-client non-success projection lost follower-send occurrence"
+fi
+
 STUB_BIN="$TMP/bin"
 mkdir -p "$STUB_BIN"
 TOOL_LOG="$TMP/tool.log"
@@ -153,9 +210,26 @@ cat > "$NODE_STUB" <<'EOF'
 name="${1##*/}"
 case "$name" in
   codex_ipc_client.mjs)
+    target=""
+    previous=""
+    for argument in "$@"; do
+      if [[ "$previous" == "--thread" ]]; then target="$argument"; break; fi
+      previous="$argument"
+    done
     case "${ROUTER_CASE:-}" in
-      acceptance) printf '%s\n' '{"ok":true,"resultType":"success"}'; exit 0 ;;
-      no-client) printf '%s\n' '{"ok":false,"error":"no-client-found"}'; exit 1 ;;
+      acceptance|acceptance-uppercase)
+        printf '{"ok":true,"targetThreadId":"%s","sentRequests":[{"name":"thread-follower-start-turn","json":{"method":"thread-follower-start-turn","params":{"conversationId":"%s"}}}],"response":{"resultType":"success"}}\n' "$target" "$target"
+        exit 0
+        ;;
+      malformed-success) printf '%s\n' '{"ok":true,"resultType":"success"}'; exit 0 ;;
+      no-client|no-client-orphan|no-client-archived|no-client-invalid-archive|no-client-db-unavailable|no-client-warning)
+        printf '{"ok":false,"targetThreadId":"%s","sentRequests":[{"name":"thread-follower-start-turn","json":{"method":"thread-follower-start-turn","params":{"conversationId":"%s"}}}],"response":{"resultType":"error","error":"no-client-found"}}\n' "$target" "$target"
+        exit 1
+        ;;
+      nested-poison)
+        printf '{"ok":false,"targetThreadId":"%s","sentRequests":[{"json":{"method":"thread-follower-start-turn","params":{"conversationId":"%s"}}},{"json":{"method":"other","error":"no-client-found"}}],"response":{"resultType":"error","error":"router-contract-changed","nested":{"error":"no-client-found"}}}\n' "$target" "$target"
+        exit 1
+        ;;
       unknown) printf '%s\n' '{"ok":false,"error":"router-contract-changed"}'; exit 1 ;;
       malformed) printf '%s\n' '{malformed'; exit 1 ;;
       *) printf '%s\n' '{"ok":false,"error":"missing-router-case"}'; exit 1 ;;
@@ -166,7 +240,37 @@ case "$name" in
     exit 0
     ;;
   codex_ipc_session_inspect.mjs)
-    printf '%s\n' '{"ok": false, "dbThread":{"thread":{"exists":false}}}'
+    target=""
+    previous=""
+    for argument in "$@"; do
+      if [[ "$previous" == "--thread" ]]; then target="$argument"; break; fi
+      previous="$argument"
+    done
+    case "${ROUTER_CASE:-}" in
+      no-client)
+        printf '%s\n' '{"ok":false,"dbThread":{"exists":true,"readOnlyOpenOk":true,"thread":{"exists":false}}}'
+        exit 1
+        ;;
+      no-client-orphan)
+        printf '%s\n' '{"ok":false,"dbThread":{"exists":true,"readOnlyOpenOk":true,"thread":{"exists":false}},"rollout":{"primary":{"parsedOk":true}}}'
+        exit 1
+        ;;
+      no-client-archived)
+        printf '{"ok":true,"dbThread":{"exists":true,"readOnlyOpenOk":true,"thread":{"exists":true,"id":"%s","archived":1}}}\n' "$target"
+        ;;
+      no-client-invalid-archive)
+        printf '{"ok":true,"dbThread":{"exists":true,"readOnlyOpenOk":true,"thread":{"exists":true,"id":"%s","archived":null}}}\n' "$target"
+        ;;
+      no-client-db-unavailable)
+        printf '%s\n' '{"ok":true,"dbThread":{"exists":false,"readOnlyOpenOk":false,"thread":{"exists":false}},"rollout":{"primary":{"parsedOk":true}}}'
+        ;;
+      no-client-warning)
+        printf '%s\n' 'ExperimentalWarning: synthetic node:sqlite warning' >&2
+        printf '%s\n' '{"ok":false,"dbThread":{"exists":true,"readOnlyOpenOk":true,"thread":{"exists":false}}}'
+        exit 1
+        ;;
+      *) printf '%s\n' '{"ok":false,"dbThread":{"thread":{"exists":false}}}' ;;
+    esac
     exit 0
     ;;
   *) exec "$REAL_NODE" "$@" ;;
@@ -186,7 +290,7 @@ chmod +x "$NODE_STUB" "$STUB_BIN/powershell.exe" "$STUB_BIN/codex"
 
 run_wrapper_case(){
   # $5 (optional): text that MUST NOT appear in the wrapper's combined output.
-  local scenario="$1" expected_rc="$2" expected_result="$3" label="$4" forbidden="${5:-}"
+  local scenario="$1" expected_rc="$2" expected_result="$3" label="$4" forbidden="${5:-}" target="${6:-$THREAD}"
   local case_root="$TMP/$scenario" output rc
   mkdir -p "$case_root/ipc" "$case_root/home"
   output="$(env \
@@ -198,7 +302,7 @@ run_wrapper_case(){
     CLAUDE_SESSION_ID="33333333-3333-4333-8333-333333333333" \
     CODEX_IPC_ROOT="$case_root/ipc" \
     CODEX_IPC_RETENTION_DAYS=0 \
-    bash "$WRAPPER" --ipc "$THREAD" "$TASK_TEXT" 2>&1)"
+    bash "$WRAPPER" --ipc "$target" "$TASK_TEXT" 2>&1)"
   rc=$?
   if [[ $rc -eq $expected_rc ]] && printf '%s\n' "$output" | grep -Fqx "$expected_result"; then
     if [[ -n "$forbidden" ]] && printf '%s\n' "$output" | grep -Fq "$forbidden"; then
@@ -217,9 +321,32 @@ echo "== 2. wrapper process-result classification =="
 run_wrapper_case acceptance 0 \
   "RESULT: gui-delivered -- reason=renderer-owned -- confirmation=rollout-hit" \
   "successful client process is classified as renderer-owned acceptance"
+run_wrapper_case acceptance-uppercase 0 \
+  "RESULT: gui-delivered -- reason=renderer-owned -- confirmation=rollout-hit" \
+  "wrapper accepts uppercase UUID spelling and canonicalizes it before transport" \
+  "$UPPER_THREAD" "$UPPER_THREAD"
+run_wrapper_case malformed-success 1 \
+  "RESULT: failed-closed -- reason=router-pipe-failure -- confirmation=unknown" \
+  "exit-zero client output without exact follower proof is not called delivered" \
+  "FALLBACK -- file-drop is ready"
 run_wrapper_case no-client 1 \
   "RESULT: failed-closed -- reason=target-not-found -- confirmation=not-attempted" \
   "no-client-found reaches guarded ownership handling"
+run_wrapper_case no-client-orphan 1 \
+  "RESULT: failed-closed -- reason=target-not-found -- confirmation=not-attempted" \
+  "orphan rollout evidence cannot substitute for a DB target row"
+run_wrapper_case no-client-archived 1 \
+  "RESULT: failed-closed -- reason=target-archived -- confirmation=not-attempted" \
+  "exact archived DB state blocks autoload"
+run_wrapper_case no-client-invalid-archive 1 \
+  "RESULT: failed-closed -- reason=target-inspection-ambiguous -- confirmation=not-attempted" \
+  "noncanonical archive state fails closed as ambiguous"
+run_wrapper_case no-client-db-unavailable 1 \
+  "RESULT: failed-closed -- reason=target-inspection-ambiguous -- confirmation=not-attempted" \
+  "DB read failure cannot be misreported as authoritative target absence"
+run_wrapper_case no-client-warning 1 \
+  "RESULT: failed-closed -- reason=target-not-found -- confirmation=not-attempted" \
+  "inspector stderr warnings cannot corrupt valid structural stdout"
 # router-pipe-failure is POST-ATTEMPT: the client writes the follower frame before it
 # awaits the response, so a timeout, closed pipe or protocol drift can each leave the
 # task already admitted. The wrapper cannot distinguish "failed before the write" from
@@ -228,6 +355,10 @@ run_wrapper_case no-client 1 \
 run_wrapper_case unknown 1 \
   "RESULT: failed-closed -- reason=router-pipe-failure -- confirmation=unknown" \
   "unknown client failure is not misclassified as no-client-found" \
+  "FALLBACK -- file-drop is ready"
+run_wrapper_case nested-poison 1 \
+  "RESULT: failed-closed -- reason=router-pipe-failure -- confirmation=unknown" \
+  "nested no-client text cannot authorize autoload or retry" \
   "FALLBACK -- file-drop is ready"
 run_wrapper_case malformed 1 \
   "RESULT: failed-closed -- reason=router-pipe-failure -- confirmation=unknown" \

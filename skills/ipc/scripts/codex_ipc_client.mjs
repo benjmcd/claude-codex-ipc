@@ -6,6 +6,8 @@
 
 import net from "node:net";
 import { randomUUID } from "node:crypto";
+import path from "node:path";
+import { pathToFileURL } from "node:url";
 
 const DEFAULT_PIPE = "\\\\.\\pipe\\codex-ipc";
 const DEFAULT_TIMEOUT_MS = 6000;
@@ -15,8 +17,11 @@ const FOLLOWER_START_TURN_VERSION = 1;
 // Optional operator-designated test thread. When set (a UUID of a thread the operator
 // owns), --send may target it without --allow-any-thread. No default is shipped:
 // there is deliberately no built-in authorized thread id.
-const AUTHORIZED_TEST_THREAD_ID = process.env.CODEX_IPC_AUTHORIZED_TEST_THREAD || null;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const AUTHORIZED_TEST_THREAD_VALUE = process.env.CODEX_IPC_AUTHORIZED_TEST_THREAD || "";
+const AUTHORIZED_TEST_THREAD_ID = UUID_RE.test(AUTHORIZED_TEST_THREAD_VALUE)
+  ? AUTHORIZED_TEST_THREAD_VALUE.toLowerCase()
+  : null;
 
 function usage() {
   return `Usage:
@@ -145,6 +150,7 @@ async function normalizeOptions(opts) {
   if (!opts.threadId || !UUID_RE.test(opts.threadId)) {
     throw new Error("--thread must be an explicit UUID conversation/thread id");
   }
+  opts.threadId = opts.threadId.toLowerCase();
 
   if (opts.task && opts.taskFile) {
     throw new Error("Use either --task or --task-file, not both");
@@ -350,6 +356,36 @@ function dryRunResponse(opts, initializeRequest, followerRequest) {
   };
 }
 
+// Pure projection kept separate from named-pipe I/O so non-success responses retain the exact
+// follower request occurrence and can be verified hermetically without opening a live pipe.
+export function projectLiveResponse(
+  opts,
+  initializeRequest,
+  initResponse,
+  followerRequest,
+  followerResponse,
+) {
+  return {
+    ok: followerResponse.resultType === "success",
+    pipePath: opts.pipePath,
+    targetThreadId: opts.threadId,
+    sentRequests: [
+      {
+        name: "initialize",
+        bytes: encodeFrame(initializeRequest).length,
+        json: initializeRequest,
+      },
+      {
+        name: FOLLOWER_START_TURN_METHOD,
+        bytes: encodeFrame(followerRequest).length,
+        json: followerRequest,
+      },
+    ],
+    initialize: initResponse,
+    response: followerResponse,
+  };
+}
+
 async function sendLive(opts, initializeRequest) {
   const socket = await connectRouter(opts.pipePath, opts.timeoutMs);
   try {
@@ -360,25 +396,13 @@ async function sendLive(opts, initializeRequest) {
 
     const followerRequest = buildFollowerStartTurnRequest(opts, initResponse.result.clientId);
     const followerResponse = await sendAndWait(socket, followerRequest, opts.timeoutMs);
-    return {
-      ok: followerResponse.resultType === "success",
-      pipePath: opts.pipePath,
-      targetThreadId: opts.threadId,
-      sentRequests: [
-        {
-          name: "initialize",
-          bytes: encodeFrame(initializeRequest).length,
-          json: initializeRequest,
-        },
-        {
-          name: FOLLOWER_START_TURN_METHOD,
-          bytes: encodeFrame(followerRequest).length,
-          json: followerRequest,
-        },
-      ],
-      initialize: initResponse,
-      response: followerResponse,
-    };
+    return projectLiveResponse(
+      opts,
+      initializeRequest,
+      initResponse,
+      followerRequest,
+      followerResponse,
+    );
   } finally {
     socket.destroy();
   }
@@ -415,4 +439,6 @@ async function main() {
   }
 }
 
-await main();
+if (process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url) {
+  await main();
+}

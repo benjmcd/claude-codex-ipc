@@ -106,6 +106,27 @@ function main() {
   ];
   const hasWaiterContract = (relPath) => waiterContractSentences.every((sentence) => contains(relPath, sentence));
   const handoffText = readText("scripts/handoff_to_codex.sh");
+  const inspectedTargetClassifier =
+    handoffText.match(
+      /(?:^|\n)[ \t]*classify_inspected_target\(\)[ \t]*\{([\s\S]*?)(?=\n[ \t]*observe_rollout\(\)[ \t]*\{)/,
+    )?.[1] || "";
+  const authoritativeSuccessClassifier =
+    handoffText.match(
+      /(?:^|\n)[ \t]*authoritative_success\(\)[ \t]*\{([\s\S]*?)(?=\n[ \t]*authoritative_no_client\(\)[ \t]*\{)/,
+    )?.[1] || "";
+  const initialLiveSendPath =
+    handoffText.match(
+      /echo "Injecting pickup line into live Desktop thread \$\{IPC_CID\} via IPC router\.\.\."([\s\S]*?)(?=\n[ \t]*if ! authoritative_no_client; then)/,
+    )?.[1] || "";
+  const postAutoloadRetryPath =
+    handoffText.match(
+      /while \(\( SECONDS < DEADLINE \)\); do([\s\S]*?)(?=\n[ \t]*# Every iteration ended)/,
+    )?.[1] || "";
+  const writeProofText = readText("scripts/codex_ipc_write_proof.mjs");
+  const writeProofSendMarkerTask =
+    writeProofText.match(
+      /(?:^|\n)[ \t]*(?:export[ \t]+)?(?:async[ \t]+)?function[ \t]+sendMarkerTask[ \t]*\([^)]*\)[ \t]*\{([\s\S]*?)(?=\n[ \t]*(?:export[ \t]+)?(?:async[ \t]+)?function[ \t]+[A-Za-z_$][\w$]*[ \t]*\()/,
+    )?.[1] || "";
   // Anchor on the ACTUAL transport-root assignment, not the earlier doc-comment mention
   // of CODEX_IPC_ROOT=<dir>. The removed-mode errors must fire before this line runs.
   const transportInit = handoffText.search(/^IPC_ROOT="\$\{CODEX_IPC_ROOT/m);
@@ -322,10 +343,23 @@ function main() {
     ]),
     check("REQ-015", "Deep-linking requires positive target-inspection proof; ambiguity fails closed.", [
       {
-        label: "wrapper requires positive ok:true and refuses ambiguous inspector output",
+        label: "wrapper classifier requires exact active DB proof and refuses ambiguous inspector output",
         file: "scripts/handoff_to_codex.sh",
         ok:
-          contains("scripts/handoff_to_codex.sh", '"ok": true') &&
+          inspectedTargetClassifier.length > 0 &&
+          [
+            /value\?\.ok\s*!==\s*true/,
+            /db\?\.exists\s*===\s*true/,
+            /db\?\.readOnlyOpenOk\s*===\s*true/,
+            /dbTrusted\s*&&\s*thread\?\.exists\s*===\s*false/,
+            /thread\?\.exists\s*!==\s*true/,
+            /typeof\s+thread\.id\s*!==\s*"string"/,
+            /thread\.id\.toLowerCase\(\)\s*!==\s*target/,
+            /thread\.archived\s*===\s*1/,
+            /thread\.archived\s*!==\s*0/,
+            /process\.stdout\.write\("active"\)/,
+          ].every((anchor) => anchor.test(inspectedTargetClassifier)) &&
+          contains("scripts/handoff_to_codex.sh", "INSPECT_CLASS=$(classify_inspected_target)") &&
           contains("scripts/handoff_to_codex.sh", "reason=target-inspection-ambiguous"),
       },
       {
@@ -337,6 +371,33 @@ function main() {
       },
     ]),
     check("REQ-016", "Results are parser-compatible: top-level category plus machine reason/confirmation tokens.", [
+      {
+        label: "successful sends require exact parsed target and one structurally valid follower request",
+        file: "scripts/handoff_to_codex.sh",
+        ok:
+          authoritativeSuccessClassifier.length > 0 &&
+          [
+            /const\s+target\s*=\s*String\(process\.argv\[1\]\s*\|\|\s*""\)\.toLowerCase\(\)/,
+            /value\?\.ok\s*===\s*true/,
+            /String\(value\?\.targetThreadId\s*\|\|\s*""\)\.toLowerCase\(\)\s*===\s*target/,
+            /value\?\.response\?\.resultType\s*===\s*"success"/,
+            /Array\.isArray\(value\?\.sentRequests\)/,
+            /item\?\.name\s*===\s*"thread-follower-start-turn"/,
+            /item\?\.json\?\.method\s*===\s*"thread-follower-start-turn"/,
+            /followers\.length\s*===\s*1/,
+            /follower\?\.name\s*===\s*"thread-follower-start-turn"/,
+            /follower\?\.json\?\.method\s*===\s*"thread-follower-start-turn"/,
+            /typeof\s+follower\?\.json\?\.params\?\.conversationId\s*===\s*"string"/,
+            /follower\.json\.params\.conversationId\.toLowerCase\(\)\s*===\s*target/,
+          ].every((anchor) => anchor.test(authoritativeSuccessClassifier)),
+      },
+      {
+        label: "initial send and post-autoload retry both require authoritative success",
+        file: "scripts/handoff_to_codex.sh",
+        ok:
+          (initialLiveSendPath.match(/if\s+!\s+authoritative_success;\s+then/g) || []).length === 1 &&
+          (postAutoloadRetryPath.match(/if\s+!\s+authoritative_success;\s+then/g) || []).length === 1,
+      },
       {
         label: "both accepted-send branches observe once and emit the resulting confirmation token",
         file: "scripts/handoff_to_codex.sh",
@@ -414,20 +475,79 @@ function main() {
           contains("scripts/codex_ipc_write_proof.mjs", "--send requires --ack-live-write"),
       },
       {
-        label: "write proof harness inspects, revalidates, snapshots, polls, and compares",
+        label: "write proof certifies exact client-result parity before reporting send success",
         file: "scripts/codex_ipc_write_proof.mjs",
         ok:
-          contains("scripts/codex_ipc_write_proof.mjs", "inspectTarget") &&
-          contains("scripts/codex_ipc_write_proof.mjs", "revalidateRuntime") &&
-          contains("scripts/codex_ipc_write_proof.mjs", "compareSnapshots") &&
-          contains("scripts/codex_ipc_write_proof.mjs", "pollRolloutForMarker"),
+          writeProofSendMarkerTask.length > 0 &&
+          [
+            /commandReportedSuccess\s*=\s*command\.ok\s*&&\s*parsed\?\.ok\s*===\s*true/,
+            /targetThreadBound\s*=\s*parsed\?\.targetThreadId\s*===\s*opts\.threadId/,
+            /responseReportedSuccess\s*=\s*parsed\?\.response\?\.resultType\s*===\s*"success"/,
+            /clientReportedSuccess\s*=\s*commandReportedSuccess\s*&&\s*targetThreadBound\s*&&\s*responseReportedSuccess/,
+            /exactOneTargetSend\s*=\s*followerRequests\.length\s*===\s*1\s*&&\s*matchingFollowerRequests\.length\s*===\s*1/,
+            /clientResultCertified\s*=\s*clientReportedSuccess\s*&&\s*exactOneTargetSend/,
+            /ok:\s*clientResultCertified/,
+          ].every((anchor) => anchor.test(writeProofSendMarkerTask)),
+      },
+      {
+        label: "write proof exposes one baseline authorization boundary and returned-turn verification surfaces",
+        file: "scripts/codex_ipc_write_proof.mjs",
+        ok:
+          contains(
+            "scripts/codex_ipc_write_proof.mjs",
+            /export\s+function\s+authorizeBaselineAndSend\s*\(/,
+          ) &&
+          contains(
+            "scripts/codex_ipc_write_proof.mjs",
+            /authorizeBaselineAndSend\s*\(\s*opts\s*,\s*rolloutBaselineActivity\s*,\s*before\s*\)/,
+          ) &&
+          contains("scripts/codex_ipc_write_proof.mjs", /validatePreSendSnapshot\s*\(\s*opts\s*,\s*before\s*\)/) &&
+          contains("scripts/codex_ipc_write_proof.mjs", /collectPostSendEvidence\s*\(\s*opts\s*,/) &&
+          contains("scripts/codex_ipc_write_proof.mjs", /resolveSendTurnId\s*\(\s*normalizedSend\s*\)/) &&
+          contains("scripts/codex_ipc_write_proof.mjs", /expectedTurnId\s*:\s*sendTurnId/) &&
+          contains("scripts/codex_ipc_write_proof.mjs", /expectedThreadId\s*:\s*opts\.threadId/) &&
+          contains("scripts/codex_ipc_write_proof.mjs", "sent-but-unverified") &&
+          contains("scripts/codex_ipc_write_proof.mjs", "retrySafe: false"),
+      },
+      {
+        label: "rollout owner integrity is file-global, record-bound, lineage-aware, and survives cursor and locator handoffs",
+        file: "scripts/codex_ipc_rollout_reader.mjs",
+        ok:
+          contains("scripts/codex_ipc_rollout_reader.mjs", "rollout-owner-invalid") &&
+          contains("scripts/codex_ipc_rollout_reader.mjs", "rollout-owner-mismatch") &&
+          contains("scripts/codex_ipc_rollout_reader.mjs", "rollout-thread-id-invalid") &&
+          contains("scripts/codex_ipc_rollout_reader.mjs", "rollout-thread-id-mismatch") &&
+          contains("scripts/codex_ipc_rollout_reader.mjs", "const ownerLineage = advanceRolloutOwnerLineage(value, {") &&
+          contains("scripts/codex_ipc_rollout_reader.mjs", "const forkedFromId = normalizedUuid(value?.payload?.forked_from_id);") &&
+          contains("scripts/codex_ipc_rollout_reader.mjs", "const recordOwner = recordThreadIdentity(value);") &&
+          contains("scripts/codex_ipc_rollout_reader.mjs", "firstRecordAnchorSha256") &&
+          contains("scripts/codex_ipc_rollout_reader.mjs", "first-record-changed") &&
+          contains("scripts/codex_ipc_rollout_reader.mjs", "prefixEndOffset: finalConsumedPrefixAnchor.endOffset") &&
+          contains("scripts/codex_ipc_rollout_reader.mjs", "diagnostic(\"consumed-prefix-changed\"") &&
+          contains("scripts/codex_ipc_rollout_reader.mjs", "function assertDeadlineOpen(deadlineReached) {") &&
+          contains("scripts/codex_ipc_rollout_reader.mjs", "finalDeadlineExceeded") &&
+          contains("scripts/codex_ipc_rollout_reader.mjs", "if (deadlineExpired) pollDiagnostics.push(\"deadline-exceeded\");") &&
+          contains("scripts/codex_ipc_rollout_reader.mjs", "previous.canonicalPath !== identity.canonicalPath") &&
+          contains("scripts/codex_ipc_rollout_reader.mjs", "function sameLogicalUserDelivery(left, right) {") &&
+          contains("scripts/codex_ipc_rollout_reader.mjs", "return sharedItemId;") &&
+          contains("scripts/codex_ipc_rollout_reader.mjs", "const inertResponseItem = envelopeType === \"response_item\" && payloadType === \"compaction\";") &&
+          contains("scripts/codex_ipc_wait.mjs", "rolloutThreadId: options.threadId") &&
+          contains("scripts/codex_ipc_rollout_observe.mjs", "rolloutThreadId: options.threadId") &&
+          contains("scripts/codex_ipc_reply_harvest.mjs", "rolloutThreadId: threadId") &&
+          contains("scripts/codex_ipc_session_inspect.mjs", "ownerIntegrityDiagnostics") &&
+          contains("SKILL.md", "A distinct later `user_message` in that turn also invalidates the dispatch binding") &&
+          contains("SKILL.md", "same non-empty item identity") &&
+          contains("SKILL.md", "The read deadline covers prefix hashing") &&
+          contains("references/architecture.md", "digest of the entire consumed prefix") &&
+          contains("references/architecture.md", "same non-empty item identity") &&
+          contains("references/architecture.md", "The read deadline covers prefix hashing"),
       },
       {
         label: "post-update revalidation includes the proof harness in its required-file checks",
         file: "scripts/codex_ipc_revalidate.mjs",
         ok: contains("scripts/codex_ipc_revalidate.mjs", "scripts/codex_ipc_write_proof.mjs"),
       },
-    ], "Live write re-proof still starts a real turn and must remain explicit/operator-approved."),
+    ], "Static checks lock stable harness surfaces only. Hermetic rollout-reader and session-inspector suites behaviorally prove that incomplete, open, and ambiguous baselines invoke zero sends and that one closed certified baseline invokes exactly one stub send. Live write re-proof still starts a real turn and must remain explicit/operator-approved."),
     check("REQ-018", "Producer denied-reply protocol: one attempt, no retry, full result in the final agent message.", [
       {
         label: "handoff scaffold instructs one attempt, no retry, and the full result in the final message",

@@ -6,6 +6,8 @@ import { pathToFileURL } from "node:url";
 import {
   createDispatchCorrelator,
   DEFAULT_MAX_RECORD_BYTES,
+  inspectRolloutNoGrowth,
+  isCompleteReaderCursor,
   locateRollout,
   readRolloutFile,
 } from "./codex_ipc_rollout_reader.mjs";
@@ -46,7 +48,23 @@ function defaultSleep(ms) {
 function dispatchLifecycle(records, parserDiagnostics, dispatchId) {
   const correlator = createDispatchCorrelator(dispatchId);
   for (const record of records) correlator.push(record);
-  return correlator.finish({ ok: true, diagnostics: parserDiagnostics }).lifecycle;
+  const correlated = correlator.finish({ ok: true, diagnostics: parserDiagnostics });
+  const duplicateCount = correlated.duplicateCount || 0;
+  const diagnostics = [...(correlated.lifecycle?.diagnostics || [])];
+  if (duplicateCount > 1) {
+    diagnostics.push({
+      code: "dispatch-id-reused",
+      duplicateCount,
+      message: "distinct dispatch occurrences share one reply-file identity",
+    });
+  }
+  return {
+    ...correlated.lifecycle,
+    diagnostics,
+    duplicateCount,
+    latestOccurrence: correlated.latestOccurrence || null,
+    freshness: correlated.freshness || null,
+  };
 }
 
 function replyPathResolution(options) {
@@ -191,6 +209,23 @@ function inspectReply(filePath) {
   }
 }
 
+function appendFreshnessDiagnostics(diagnostics, lifecycle) {
+  if (lifecycle.latestOccurrence?.settled === false) {
+    diagnostics.push({
+      code: "dispatch-mixed-state",
+      latestStatus: lifecycle.latestOccurrence.status || "unavailable",
+      latestTurnId: lifecycle.latestOccurrence.turnId || null,
+    });
+  }
+  diagnostics.push({
+    code: "dispatch-freshness-unsettled",
+    status: lifecycle.freshness?.status || "unavailable",
+    reason: lifecycle.freshness?.reason || "unavailable",
+    boundaryLine: lifecycle.freshness?.boundaryLine ?? null,
+  });
+  diagnostics.push(...(lifecycle.freshness?.diagnostics || []));
+}
+
 function resolveCompletion(lifecycle, options) {
   if (lifecycle.status === "unavailable") {
     return { token: "unavailable", diagnostics: lifecycle.diagnostics };
@@ -202,6 +237,16 @@ function resolveCompletion(lifecycle, options) {
     ? inspectReply(resolution.path)
     : { valid: false, present: (resolution.paths || []).length > 0, diagnostics: [] };
   diagnostics.push(...reply.diagnostics);
+
+  if (lifecycle.duplicateCount > 1) {
+    if (reply.present) {
+      diagnostics.push({
+        code: "reply-unverified",
+        message: "reply exists but its dispatch id identifies multiple distinct occurrences",
+      });
+    }
+    return { token: "unavailable", diagnostics };
+  }
 
   if (lifecycle.status === "aborted") {
     if (reply.present) {
@@ -226,7 +271,25 @@ function resolveCompletion(lifecycle, options) {
     return { token: "unavailable", diagnostics };
   }
   if (reply.valid) {
-    // Reply file is primary. A readable regular file (including a zero-byte one) certifies done.
+    // Reply-file selection cannot override a newer noncomplete exact occurrence or an opaque
+    // post-occurrence schema tail. Preserve the historical reply as evidence, but keep the
+    // machine token non-success while current-occurrence completion is unresolved.
+    const latestStatus = lifecycle.latestOccurrence?.status || null;
+    const status =
+      latestStatus && latestStatus !== "complete"
+        ? (WAIT_TOKENS.includes(latestStatus) ? latestStatus : "unavailable")
+        : lifecycle.freshness?.reason === "post-occurrence-schema-unknown"
+          ? "unavailable"
+          : null;
+    if (status) {
+      appendFreshnessDiagnostics(diagnostics, lifecycle);
+      diagnostics.push({
+        code: "reply-unverified",
+        message: "reply exists but the latest exact dispatch occurrence is unsettled",
+      });
+      return { token: status, diagnostics };
+    }
+    // In a settled lifecycle, a readable regular file (including a zero-byte one) is primary.
     return { token: "done", replySource: "reply-file", diagnostics };
   }
   // A present-but-invalid reply (symlink, non-regular, unreadable, changed) never falls through to
@@ -238,6 +301,11 @@ function resolveCompletion(lifecycle, options) {
   // the rollout store; flagless v0.1.6 stays file-primary. Absent/empty/mismatched body stays
   // reply-missing. The recovered body is NEVER emitted.
   if (options.acceptRolloutFallback && lifecycle.certifiable) {
+    if (lifecycle.freshness?.settled === false) {
+      const status = lifecycle.freshness.status === "pending" ? "pending" : "unavailable";
+      appendFreshnessDiagnostics(diagnostics, lifecycle);
+      return { token: status, diagnostics };
+    }
     return { token: "done", replySource: "rollout-fallback", diagnostics };
   }
   return { token: "reply-missing", diagnostics };
@@ -246,6 +314,8 @@ function resolveCompletion(lifecycle, options) {
 export async function waitForCompletion(options, injected = {}) {
   const now = injected.now || Date.now;
   const sleep = injected.sleep || defaultSleep;
+  const readRollout = injected.readRolloutFile || readRolloutFile;
+  const inspectNoGrowth = injected.inspectRolloutNoGrowth || inspectRolloutNoGrowth;
   const budgetMs = Number.isSafeInteger(options.budgetMs) && options.budgetMs >= 0
     ? options.budgetMs
     : DEFAULT_WAIT_BUDGET_MS;
@@ -258,15 +328,18 @@ export async function waitForCompletion(options, injected = {}) {
   const records = [];
   const diagnostics = [];
   let candidatePath = null;
+  let candidateIdentityKey = null;
   let cursor = null;
   let readableCandidate = false;
   let lastLocation = null;
   // A read that only ran out of budget is not an authority failure: the candidate exists and is
   // parseable, we simply did not finish observing it. That is `pending`, never `unavailable`.
   let deadlineOnlyReadFailure = false;
+  let readerAtCompleteEof = false;
 
   for (let iteration = 0; iteration < maxIterations; iteration += 1) {
-    if (iteration > 0 && now() - startedAt >= budgetMs) break;
+    const iterationStartedAt = iteration === 0 ? startedAt : now();
+    if (iteration > 0 && iterationStartedAt - startedAt >= budgetMs) break;
     if (!candidatePath) {
       lastLocation = locateRollout({
         threadId: options.threadId,
@@ -279,43 +352,70 @@ export async function waitForCompletion(options, injected = {}) {
       if (lastLocation.status === "ambiguous") {
         return { token: "unavailable", diagnostics };
       }
-      if (lastLocation.status === "found") candidatePath = lastLocation.path;
+      if (lastLocation.status === "found") {
+        candidatePath = lastLocation.path;
+        candidateIdentityKey = lastLocation.candidates?.[0]?.identityKey || null;
+      }
     }
 
     if (candidatePath) {
-      const parsed = readRolloutFile(candidatePath, {
-        ...(cursor ? { cursor } : {}),
-        maxRecordBytes: options.maxRecordBytes ?? DEFAULT_MAX_RECORD_BYTES,
-        deadlineAt,
-        now,
-      });
-      records.push(...(parsed.records || []));
-      diagnostics.push(...(parsed.diagnostics || []));
-      if (!parsed.ok) {
-        if (parsed.reason !== "deadline-exceeded") {
-          return { token: "unavailable", diagnostics };
+      const forceCertifyingRead =
+        !cursor ||
+        budgetMs === 0 ||
+        iteration + 1 >= maxIterations ||
+        iterationStartedAt + intervalMs >= deadlineAt;
+      const unchangedWithoutCertification =
+        cursor &&
+        !forceCertifyingRead &&
+        inspectNoGrowth(candidatePath, cursor).unchanged;
+      if (!unchangedWithoutCertification) {
+        const parsed = readRollout(candidatePath, {
+          ...(cursor ? { cursor } : {}),
+          rolloutThreadId: options.threadId,
+          ...(candidateIdentityKey ? { expectedIdentityKey: candidateIdentityKey } : {}),
+          maxRecordBytes: options.maxRecordBytes ?? DEFAULT_MAX_RECORD_BYTES,
+          deadlineAt,
+          now,
+        });
+        diagnostics.push(...(parsed.diagnostics || []));
+        if (!parsed.ok) {
+          readerAtCompleteEof = false;
+          if (parsed.reason !== "deadline-exceeded") {
+            return { token: "unavailable", diagnostics };
+          }
+          deadlineOnlyReadFailure = true;
+          break;
+        } else {
+          records.push(...(parsed.records || []));
+          readableCandidate = true;
+          cursor = parsed.cursor;
+          readerAtCompleteEof = isCompleteReaderCursor(parsed.cursor);
+          if (!readerAtCompleteEof) {
+            diagnostics.push({ code: "rollout-read-not-at-eof" });
+          }
         }
-        deadlineOnlyReadFailure = true;
-      } else {
-        readableCandidate = true;
-        cursor = parsed.cursor;
-      }
 
-      const lifecycle = dispatchLifecycle(records, diagnostics, options.dispatchId);
-      const resolved = resolveCompletion(lifecycle, options);
-      if (lifecycle.status !== "pending" || resolved.token === "unavailable") {
-        return {
-          token: resolved.token,
-          diagnostics: [...diagnostics, ...resolved.diagnostics],
-          replySource: resolved.replySource,
-        };
+        if (readerAtCompleteEof) {
+          const lifecycle = dispatchLifecycle(records, diagnostics, options.dispatchId);
+          const resolved = resolveCompletion(lifecycle, options);
+          if (resolved.token !== "pending") {
+            return {
+              token: resolved.token,
+              diagnostics: [...diagnostics, ...resolved.diagnostics],
+              replySource: resolved.replySource,
+            };
+          }
+        }
       }
-      if (!parsed.ok) break;
     }
 
     if (budgetMs === 0) break;
     const elapsed = now() - startedAt;
     if (elapsed >= budgetMs || iteration + 1 >= maxIterations) break;
+    // A sleep opens a new observation interval. Do not combine the prior EOF-certified
+    // lifecycle with a reply file that appears while sleeping if the clock overshoots the
+    // next forced read; only a later full rollout read may restore certification.
+    readerAtCompleteEof = false;
     await sleep(Math.min(intervalMs, Math.max(1, budgetMs - elapsed)));
   }
 
@@ -324,6 +424,9 @@ export async function waitForCompletion(options, injected = {}) {
   }
   if (!readableCandidate && !deadlineOnlyReadFailure) {
     return { token: "unavailable", diagnostics };
+  }
+  if (!readerAtCompleteEof) {
+    return { token: "pending", diagnostics };
   }
   const lifecycle = dispatchLifecycle(records, diagnostics, options.dispatchId);
   const resolved = resolveCompletion(lifecycle, options);

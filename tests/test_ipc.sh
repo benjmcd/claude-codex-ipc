@@ -22,13 +22,23 @@ BIN="$TMP/bin"; mkdir -p "$BIN"
 REPO="$TMP/repo"; mkdir -p "$REPO"; ( cd "$REPO" && git init -q && git config user.email t@t && git config user.name t )
 NOREPO="$TMP/norepo"; mkdir -p "$NOREPO"
 UUID="00000000-0000-4000-8000-000000000000"
+REAL_NODE="$(command -v node)"
 
 # --- stubs on PATH (node records argv; codex/powershell are no-ops) ---
 cat > "$BIN/node" <<EOF
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "$TMP/nodeargs.log"
-echo '{"ok":true}'
-exit 0
+if [[ "\${1##*/}" == "codex_ipc_client.mjs" ]]; then
+  target=""
+  previous=""
+  for argument in "\$@"; do
+    if [[ "\$previous" == "--thread" ]]; then target="\$argument"; break; fi
+    previous="\$argument"
+  done
+  printf '{"ok":true,"targetThreadId":"%s","sentRequests":[{"name":"thread-follower-start-turn","json":{"method":"thread-follower-start-turn","params":{"conversationId":"%s"}}}],"response":{"resultType":"success"}}\n' "\$target" "\$target"
+  exit 0
+fi
+exec "$REAL_NODE" "\$@"
 EOF
 cat > "$BIN/codex" <<EOF
 #!/usr/bin/env bash
@@ -260,28 +270,44 @@ printf '%s' "$OUTQ" | grep -q 'read "' && ok "pickup line double-quotes the path
 # ============================================================================
 FGDIR="$TMP/fg"; BIN2="$TMP/bin2"; mkdir -p "$FGDIR" "$BIN2"
 UUIDF="33333333-3333-4333-8333-333333333333"
+REAL_NODE="$(command -v node)"
 
 cat > "$BIN2/node" <<EOF
 #!/usr/bin/env bash
 FG="$FGDIR"
+no_client(){
+  echo '{"ok":false,"targetThreadId":"$UUIDF","sentRequests":[{"name":"thread-follower-start-turn","json":{"method":"thread-follower-start-turn","params":{"conversationId":"$UUIDF"}}}],"response":{"resultType":"error","error":"no-client-found"}}'
+}
+client_success(){
+  echo '{"ok":true,"targetThreadId":"$UUIDF","sentRequests":[{"name":"thread-follower-start-turn","json":{"method":"thread-follower-start-turn","params":{"conversationId":"$UUIDF"}}}],"response":{"resultType":"success"}}'
+}
 case "\$*" in
   *codex_ipc_client.mjs*)
     printf '%s\n' "\$*" >> "\$FG/nodeargs.log"
     n=\$(cat "\$FG/send_count" 2>/dev/null || echo 0); n=\$((n+1)); echo "\$n" > "\$FG/send_count"
     mode=\$(cat "\$FG/client_mode" 2>/dev/null || echo always-ok)
     case "\$mode" in
-      always-ok) echo '{"ok": true}'; exit 0;;
-      always-fail) echo '{ "error": "no-client-found" }'; exit 1;;
+      always-ok) client_success; exit 0;;
+      always-fail) no_client; exit 1;;
+      malformed-success) echo '{"ok":true}'; exit 0;;
+      warning-success) echo 'synthetic client warning' >&2; client_success; exit 0;;
+      warning-no-client) echo 'synthetic client warning' >&2; no_client; exit 1;;
+      warning-malformed) echo 'synthetic client warning' >&2; echo '{malformed'; exit 1;;
+      warning-empty) echo 'synthetic client warning' >&2; exit 1;;
       fail-then-ok)
-        if [[ "\$n" -le 1 ]]; then echo '{ "error": "no-client-found" }'; exit 1
-        else echo '{"ok": true}'; exit 0; fi;;
+        if [[ "\$n" -le 1 ]]; then no_client; exit 1
+        else client_success; exit 0; fi;;
+      fail-then-malformed-success)
+        if [[ "\$n" -le 1 ]]; then no_client; exit 1
+        else echo '{"ok":true}'; exit 0; fi;;
     esac;;
   *codex_ipc_session_inspect.mjs*)
     mode=\$(cat "\$FG/inspect_mode" 2>/dev/null || echo ok)
     case "\$mode" in
-      ok)        printf '{\n  "ok": true,\n  "thread": { "archived": 0 }\n}\n'; exit 0;;
-      okarchived) printf '{\n  "ok": true,\n  "thread": { "archived": 1 }\n}\n'; exit 1;;
-      notfound)  printf '{\n  "ok": false\n}\n'; exit 1;;
+      ok)         echo '{"ok":true,"dbThread":{"exists":true,"readOnlyOpenOk":true,"thread":{"exists":true,"id":"$UUIDF","archived":0}}}'; exit 0;;
+      okarchived) echo '{"ok":true,"dbThread":{"exists":true,"readOnlyOpenOk":true,"thread":{"exists":true,"id":"$UUIDF","archived":1}}}'; exit 0;;
+      notfound)   echo '{"ok":false,"dbThread":{"exists":true,"readOnlyOpenOk":true,"thread":{"exists":false,"id":null,"archived":null}}}'; exit 1;;
+      positive-exit2) echo '{"ok":true,"dbThread":{"exists":true,"readOnlyOpenOk":true,"thread":{"exists":true,"id":"$UUIDF","archived":0}}}'; exit 2;;
       malformed) echo '{{{ not json'; exit 0;;
       empty)     exit 0;;
       stderr)    echo "boom: inspector crashed" >&2; exit 1;;
@@ -298,7 +324,7 @@ case "\$*" in
       timeout)    echo "observer timed out" >&2; exit 124;;
       spawn-fail) echo "observer could not start" >&2; exit 127;;
     esac;;
-  *) echo '{"ok": true}'; exit 0;;
+  *) exec "$REAL_NODE" "\$@";;
 esac
 EOF
 cat > "$BIN2/powershell.exe" <<EOF
@@ -378,6 +404,53 @@ fgrun --ipc "$UUIDF" "t18 unknown status"
 [[ "$(cat "$FGDIR/send_count")" == "1" ]] && ok "no live retry after unknown status" || no "retried despite unknown status ($(cat "$FGDIR/send_count") sends)"
 assert_tax "t18"
 
+echo "== 18b. exit-zero client output needs exact structural success proof =="
+fgreset malformed-success ok 0
+fgrun --ipc "$UUIDF" "t18b malformed success"
+[[ $RC -ne 0 ]] \
+  && printf '%s' "$OUT" | grep -q "RESULT: failed-closed -- reason=router-pipe-failure -- confirmation=unknown" \
+  && ! printf '%s' "$OUT" | grep -q "RESULT: gui-delivered" \
+  && printf '%s' "$OUT" | grep -q "Do NOT resend or reuse this dispatch id" \
+  && ! printf '%s' "$OUT" | grep -q -- "--tail-events 5" \
+  && ! printf '%s' "$OUT" | grep -q "dispatch it only after" \
+  && [[ ! -f "$FGDIR/pslog" && ! -f "$FGDIR/observe_args.log" ]] \
+  && ok "malformed exit-zero success is post-attempt ambiguous, never delivered or retried" \
+  || no "malformed exit-zero success escaped structural validation (rc=$RC)"
+assert_tax "t18b"
+
+echo "== 18c. incidental client stderr cannot corrupt structural stdout authority =="
+fgreset warning-success ok 0 rollout-hit
+fgrun --ipc "$UUIDF" "t18c warning success"
+[[ $RC -eq 0 ]] \
+  && printf '%s' "$OUT" | grep -q "synthetic client warning" \
+  && printf '%s' "$OUT" | grep -q "RESULT: gui-delivered -- reason=renderer-owned -- confirmation=rollout-hit" \
+  && ok "stderr warning plus exact success stdout still delivers" \
+  || no "stderr warning corrupted exact success authority (rc=$RC)"
+assert_tax "t18c-success"
+
+fgreset warning-no-client ok 2 rollout-hit
+fgrun --ipc "$UUIDF" "t18c warning no client"
+[[ $RC -ne 0 ]] \
+  && printf '%s' "$OUT" | grep -q "synthetic client warning" \
+  && printf '%s' "$OUT" | grep -q "RESULT: gui-unowned -- reason=codex-foreground-deferred -- confirmation=not-attempted" \
+  && [[ -f "$FGDIR/pslog" && "$(cat "$FGDIR/send_count")" == "1" && ! -f "$FGDIR/observe_args.log" ]] \
+  && ok "stderr warning plus exact no-client stdout reaches guarded inspector/autoload" \
+  || no "stderr warning blocked guarded no-client handling (rc=$RC)"
+assert_tax "t18c-no-client"
+
+for warning_mode in warning-malformed warning-empty; do
+  fgreset "$warning_mode" ok 0 rollout-hit
+  fgrun --ipc "$UUIDF" "t18c $warning_mode"
+  [[ $RC -ne 0 ]] \
+    && printf '%s' "$OUT" | grep -q "synthetic client warning" \
+    && printf '%s' "$OUT" | grep -q "RESULT: failed-closed -- reason=router-pipe-failure -- confirmation=unknown" \
+    && [[ "$(cat "$FGDIR/send_count")" == "1" && ! -f "$FGDIR/pslog" && ! -f "$FGDIR/observe_args.log" ]] \
+    && ! printf '%s' "$OUT" | grep -q "FALLBACK -- file-drop is ready" \
+    && ok "$warning_mode remains ambiguous without retry or pickup fallback" \
+    || no "$warning_mode escaped ambiguity handling (rc=$RC)"
+  assert_tax "t18c-$warning_mode"
+done
+
 echo "== 19. invalid policy value: envelope written, fails closed before live IPC =="
 fgreset always-ok ok 0
 fgrun --ipc "$UUIDF" --foreground-policy bogus -- "t19 invalid policy"
@@ -387,8 +460,8 @@ tf19=""; while IFS= read -r f; do grep -qx "t19 invalid policy" "$f" && { tf19="
 [[ -n "$tf19" ]] && ok "envelope written before policy failure" || no "envelope missing on policy failure"
 assert_tax "t19"
 
-echo "== 20. inspection ambiguity: five refusals, all before autoload =="
-for m in notfound:target-not-found okarchived:target-archived malformed:target-inspection-ambiguous empty:target-inspection-ambiguous stderr:target-inspection-ambiguous; do
+echo "== 20. inspection ambiguity: six refusals, all before autoload =="
+for m in notfound:target-not-found okarchived:target-archived positive-exit2:target-inspection-ambiguous malformed:target-inspection-ambiguous empty:target-inspection-ambiguous stderr:target-inspection-ambiguous; do
     imode="${m%%:*}"; want="${m##*:}"
     fgreset always-fail "$imode" 0
     fgrun --ipc "$UUIDF" "t20 $imode"
@@ -409,6 +482,18 @@ fgreset fail-then-ok ok 0
 fgrun --ipc "$UUIDF" "t22 autoload delivery"
 [[ $RC -eq 0 ]] && printf '%s' "$OUT" | grep -q "RESULT: gui-delivered -- reason=auto-loaded -- confirmation=rollout-hit" && ok "auto-loaded delivery observed" || no "auto-loaded delivery (rc=$RC)"
 assert_tax "t22"
+
+echo "== 22b. malformed exit-zero success after autoload is retry-ambiguous =="
+fgreset fail-then-malformed-success ok 0 rollout-hit
+fgrun --ipc "$UUIDF" "t22b malformed retry success"
+[[ $RC -ne 0 ]] \
+  && printf '%s' "$OUT" | grep -q "RESULT: failed-closed -- reason=retry-ambiguous-outcome -- confirmation=unknown" \
+  && [[ "$(cat "$FGDIR/send_count")" == "2" && -f "$FGDIR/pslog" && ! -f "$FGDIR/observe_args.log" ]] \
+  && ! printf '%s' "$OUT" | grep -q "FALLBACK -- file-drop is ready" \
+  && ! printf '%s' "$OUT" | grep -Eq '^read ".*\.task\.md" and proceed$' \
+  && ok "post-autoload malformed success stops after two sends with no observer or pickup fallback" \
+  || no "post-autoload malformed success escaped retry ambiguity handling (rc=$RC)"
+assert_tax "t22b"
 
 echo "== 23. '--' delimiter: dash-leading task accepted; trailing junk rejected =="
 fgreset always-ok ok 0
@@ -440,6 +525,10 @@ for token in rollout-hit rollout-pending rollout-unavailable; do
     [[ "$(cat "$FGDIR/observe_count" 2>/dev/null || echo 0)" == "1" ]] \
         && grep -q -- "--thread $UUIDF --dispatch " "$FGDIR/observe_args.log" 2>/dev/null \
         && ok "$token observes once with thread + dispatch" || no "$token observer contract"
+    printf '%s' "$OUT" | grep -q "Rollout confirmation reflects bounded pickup observation only" \
+        && printf '%s' "$OUT" | grep -q "completion or reply-file success" \
+        && ok "$token disclaims completion on renderer-owned delivery" \
+        || no "$token renderer-owned completion disclaimer"
     assert_tax "t25-$token"
 done
 

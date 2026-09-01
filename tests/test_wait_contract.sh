@@ -232,16 +232,16 @@ process.stdout.write(crypto.createHash("sha256").update(rows.join("\n")).digest(
 EOF
 }
 
-echo "== 0. turn-id-primary correlation outranks the fallback's ambiguity rule =="
-# A later user message inside the SAME turn_id'd turn (the operator typing while the lane works)
-# is not ambiguity: turn_id already delimits the turn. Observed live 2026-07-10.
+echo "== 0. a turn id cannot hide a distinct later task-changing user message =="
+# A turn id delimits lifecycle, but a distinct later user event can change which task the final
+# body answers. Named-dispatch certification therefore fails closed.
 CASE="$TMP/intervening-user"; mkdir -p "$CASE"
 write_prefix "$CASE/rollout-$THREAD.jsonl"
 printf '%s\n' "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"turn_id\":\"$OWN_TURN\",\"message\":\"operator note typed mid-turn\"}}" >>"$CASE/rollout-$THREAD.jsonl"
 printf '%s\n' "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"$OWN_TURN\",\"last_agent_message\":\"complete\"}}" >>"$CASE/rollout-$THREAD.jsonl"
 make_reply "$CASE/reply.md"
 run_case "$CASE" --rollout-path "$CASE/rollout-$THREAD.jsonl" --reply-path "$CASE/reply.md"
-assert_token done "a mid-turn operator message does not defeat turn-id correlation"
+assert_token unavailable "a distinct mid-turn operator message invalidates named-dispatch certification"
 
 echo "== 1. six determination tokens and own-turn semantics =="
 CASE="$TMP/done"; mkdir -p "$CASE"; write_done "$CASE/rollout-$THREAD.jsonl"; make_reply "$CASE/reply.md"
@@ -476,6 +476,31 @@ write_done_body(){
   printf '%s\n' "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"$OWN_TURN\",\"last_agent_message\":\"recovered body\"}}" >>"$1"
 }
 
+write_terminal_selected_body(){
+  write_prefix "$1"
+  printf '%s\n' "{\"type\":\"event_msg\",\"payload\":{\"type\":\"agent_message\",\"message\":\"SAFE\",\"phase\":\"final_answer\"}}" >>"$1"
+  printf '%s\n' "{\"type\":\"event_msg\",\"payload\":{\"type\":\"agent_message\",\"message\":\"OTHER\",\"phase\":\"final_answer\"}}" >>"$1"
+  printf '%s\n' "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"$OWN_TURN\",\"last_agent_message\":\"SAFE\"}}" >>"$1"
+}
+
+write_conflicting_body(){
+  write_prefix "$1"
+  printf '%s\n' "{\"type\":\"event_msg\",\"payload\":{\"type\":\"agent_message\",\"message\":\"SAFE\",\"phase\":\"final_answer\"}}" >>"$1"
+  printf '%s\n' "{\"type\":\"event_msg\",\"payload\":{\"type\":\"agent_message\",\"message\":\"OTHER\",\"phase\":\"final_answer\"}}" >>"$1"
+  printf '%s\n' "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"$OWN_TURN\",\"last_agent_message\":\"NEITHER\"}}" >>"$1"
+}
+
+append_opaque_tail(){
+  printf '%s\n' '{"type":"event_msg","payload":{"type":"future_lifecycle_event"}}' >>"$1"
+}
+
+append_exact_unsettled_duplicate(){
+  cat >>"$1" <<EOF
+{"type":"event_msg","payload":{"type":"task_started","turn_id":"$LATER_TURN"}}
+{"type":"event_msg","payload":{"type":"user_message","turn_id":"$LATER_TURN","message":"read /fixture/$DISPATCH.task.md and proceed"}}
+EOF
+}
+
 CASE="$TMP/fallback-flagless"; mkdir -p "$CASE"; write_done_body "$CASE/rollout-$THREAD.jsonl"
 run_case "$CASE" --rollout-path "$CASE/rollout-$THREAD.jsonl" --reply-path "$CASE/absent.reply.md"
 assert_token reply-missing "flagless: a verified rollout body does not certify a genuinely-absent reply"
@@ -492,6 +517,63 @@ if ! grep -q "recovered body" "$OUT_FILE" "$ERR_FILE"; then
   ok "the recovered body is never emitted on stdout or stderr"
 else
   no "the recovered body leaked into output"; dump_output
+fi
+
+CASE="$TMP/fallback-primary-opaque"; mkdir -p "$CASE"; write_done_body "$CASE/rollout-$THREAD.jsonl"
+append_opaque_tail "$CASE/rollout-$THREAD.jsonl"
+make_reply "$CASE/reply.md"
+run_case "$CASE" --rollout-path "$CASE/rollout-$THREAD.jsonl" --reply-path "$CASE/reply.md"
+assert_token unavailable "an opaque post-boundary tail keeps a historical primary unverified"
+if grep -Fq '"code":"dispatch-freshness-unsettled"' "$ERR_FILE" \
+  && grep -Fq '"code":"reply-unverified"' "$ERR_FILE"; then
+  ok "an opaque tail keeps the historical primary visible but machine-unverified"
+else
+  no "opaque-tail primary diagnostics were incomplete"; dump_output
+fi
+
+CASE="$TMP/fallback-opaque"; mkdir -p "$CASE"; write_done_body "$CASE/rollout-$THREAD.jsonl"
+append_opaque_tail "$CASE/rollout-$THREAD.jsonl"
+run_case "$CASE" --rollout-path "$CASE/rollout-$THREAD.jsonl" --reply-path "$CASE/absent.reply.md" \
+  --accept-rollout-fallback
+assert_token unavailable "an opaque post-boundary tail blocks rollout-only completion"
+if grep -Fq '"code":"dispatch-freshness-unsettled"' "$ERR_FILE" \
+  && ! grep -Fq '"code":"reply-source","source":"rollout-fallback"' "$ERR_FILE"; then
+  ok "opaque-tail fallback failure is diagnosed without granting fallback authority"
+else
+  no "opaque-tail fallback diagnostics or authority were wrong"; dump_output
+fi
+
+CASE="$TMP/fallback-exact-unsettled"; mkdir -p "$CASE"; write_done_body "$CASE/rollout-$THREAD.jsonl"
+append_exact_unsettled_duplicate "$CASE/rollout-$THREAD.jsonl"
+run_case "$CASE" --rollout-path "$CASE/rollout-$THREAD.jsonl" --reply-path "$CASE/absent.reply.md" \
+  --accept-rollout-fallback
+assert_token unavailable "a reused dispatch id blocks older rollout-only completion"
+if grep -Fq '"code":"dispatch-id-reused"' "$ERR_FILE" \
+  && ! grep -Fq '"code":"reply-source","source":"rollout-fallback"' "$ERR_FILE"; then
+  ok "dispatch-id reuse remains untrusted and carries no fallback authority"
+else
+  no "dispatch-id reuse diagnostics or authority were wrong"; dump_output
+fi
+
+CASE="$TMP/fallback-terminal-selected"; mkdir -p "$CASE"; write_terminal_selected_body "$CASE/rollout-$THREAD.jsonl"
+run_case "$CASE" --rollout-path "$CASE/rollout-$THREAD.jsonl" --reply-path "$CASE/absent.reply.md" \
+  --accept-rollout-fallback
+assert_token done "one exact terminal copy selects a rollout fallback from distinct final bodies"
+if grep -Fxq 'WAIT_DIAGNOSTIC {"code":"reply-source","source":"rollout-fallback"}' "$ERR_FILE" \
+  && ! grep -q 'SAFE\|OTHER' "$OUT_FILE" "$ERR_FILE"; then
+  ok "terminal-selected fallback reports rollout authority without emitting its body"
+else
+  no "terminal-selected rollout fallback authority was wrong"; dump_output
+fi
+
+CASE="$TMP/fallback-conflict"; mkdir -p "$CASE"; write_conflicting_body "$CASE/rollout-$THREAD.jsonl"
+run_case "$CASE" --rollout-path "$CASE/rollout-$THREAD.jsonl" --reply-path "$CASE/absent.reply.md" \
+  --accept-rollout-fallback
+assert_token unavailable "distinct final bodies without an exact terminal match cannot certify fallback"
+if ! grep -q 'reply-source.*rollout-fallback\|SAFE\|OTHER' "$OUT_FILE" "$ERR_FILE"; then
+  ok "conflicting rollout bodies emit neither fallback authority nor body text"
+else
+  no "conflicting rollout body or authority leaked"; dump_output
 fi
 
 CASE="$TMP/fallback-zerobyte"; mkdir -p "$CASE"; write_done_body "$CASE/rollout-$THREAD.jsonl"

@@ -4,6 +4,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import {
   createDispatchCorrelator,
+  isCompleteReaderCursor,
   locateRollout,
   readRolloutFile,
 } from "./codex_ipc_rollout_reader.mjs";
@@ -65,24 +66,139 @@ function hasSupersessionMarker(text) {
   return withoutCr.replace(/^[ \t]+|[ \t]+$/gu, "") === "REPLY-SUPERSEDED";
 }
 
-function rolloutSupersedesReply(options) {
+function supersessionAssessment(status, diagnostics = [], caution = false) {
+  const uncertaintyCode =
+    status === "pending" || status === "unavailable"
+      ? `reply-supersession-${status}`
+      : null;
+  const annotatedDiagnostics = uncertaintyCode && !diagnostics.some(
+    (item) => item.code === uncertaintyCode,
+  )
+    ? [...diagnostics, { code: uncertaintyCode }]
+    : diagnostics;
+  return {
+    status,
+    replySuperseded: status === "confirmed",
+    caution,
+    diagnostics: annotatedDiagnostics,
+  };
+}
+
+function mixedOccurrenceDiagnostic(latestOccurrence) {
+  return {
+    code: "dispatch-mixed-state",
+    latestStatus: latestOccurrence?.status || "unavailable",
+    latestTurnId: latestOccurrence?.turnId || null,
+  };
+}
+
+function freshnessDiagnostic(freshness) {
+  return {
+    code: "dispatch-freshness-unsettled",
+    status: freshness?.status || "unavailable",
+    reason: freshness?.reason || "unavailable",
+    boundaryLine: freshness?.boundaryLine ?? null,
+  };
+}
+
+function dispatchReuseDiagnostic(correlated) {
+  return {
+    code: "dispatch-id-reused",
+    duplicateCount: correlated?.duplicateCount || 0,
+    message: "distinct dispatch occurrences share one reply-file identity",
+  };
+}
+
+function assessRolloutSupersession(options) {
   const threadId = String(options?.threadId || "").toLowerCase();
-  if (!UUID_RE.test(threadId)) return false;
+  if (!UUID_RE.test(threadId)) {
+    return supersessionAssessment("unavailable", [
+      { code: "rollout-authority-unavailable", threadId },
+    ], true);
+  }
   const located = locateRollout({
     threadId,
     rolloutPath: options?.rolloutPath,
     sessionsRoot: options?.sessionsRoot,
   });
-  if (located.status !== "found") return false;
+  if (located.status !== "found") {
+    const benignNoCandidate =
+      located.status === "unavailable" &&
+      located.reason === "no-candidate" &&
+      (located.diagnostics || []).every(
+        (item) => item.code === "sessions-root-missing",
+      );
+    return supersessionAssessment(
+      "unavailable",
+      located.diagnostics || [],
+      Boolean(options?.rolloutPath) || located.status === "ambiguous" || !benignNoCandidate,
+    );
+  }
   const correlator = createDispatchCorrelator(String(options?.dispatchId || ""));
   const parsed = readRolloutFile(located.path, {
+    rolloutThreadId: threadId,
+    expectedIdentityKey: located.candidates?.[0]?.identityKey,
     maxRecordBytes: options?.maxRecordBytes,
     retainRecords: false,
     onRecord: correlator.push,
   });
-  if (!parsed.ok) return false;
+  const readDiagnostics = [...(located.diagnostics || []), ...(parsed.diagnostics || [])];
+  if (!parsed.ok) {
+    return supersessionAssessment("unavailable", readDiagnostics, true);
+  }
+  if (!isCompleteReaderCursor(parsed.cursor)) {
+    return supersessionAssessment("pending", [
+      ...readDiagnostics,
+      { code: "rollout-read-not-at-eof" },
+    ], true);
+  }
   const correlated = correlator.finish(parsed);
-  return correlated.status === "complete" && hasSupersessionMarker(correlated.text);
+  const diagnostics = [...readDiagnostics, ...(correlated.diagnostics || [])];
+  if ((correlated.duplicateCount || 0) > 1) {
+    return supersessionAssessment(
+      "unavailable",
+      [...diagnostics, dispatchReuseDiagnostic(correlated)],
+      true,
+    );
+  }
+  const certifiableCompletion =
+    correlated.status === "complete" &&
+    correlated.lifecycle?.status === "complete" &&
+    correlated.lifecycle.certifiable === true;
+  if (certifiableCompletion && hasSupersessionMarker(correlated.text)) {
+    const freshnessUnknown = correlated.freshness?.settled === false;
+    const freshnessDiagnostics = freshnessUnknown
+      ? [
+          ...(correlated.latestOccurrence?.settled === false
+            ? [mixedOccurrenceDiagnostic(correlated.latestOccurrence)]
+            : []),
+          freshnessDiagnostic(correlated.freshness),
+        ]
+      : [];
+    return supersessionAssessment(
+      "confirmed",
+      [...diagnostics, ...freshnessDiagnostics],
+      freshnessUnknown,
+    );
+  }
+  if (certifiableCompletion && correlated.freshness?.settled === false) {
+    const status = correlated.freshness.status === "pending" ? "pending" : "unavailable";
+    const uncertainty = correlated.latestOccurrence?.settled === false
+      ? mixedOccurrenceDiagnostic(correlated.latestOccurrence)
+      : { code: "reply-supersession-schema-unknown" };
+    return supersessionAssessment(
+      status,
+      [...diagnostics, uncertainty, freshnessDiagnostic(correlated.freshness)],
+      true,
+    );
+  }
+  if (certifiableCompletion) {
+    return supersessionAssessment("not-seen", diagnostics);
+  }
+  if (correlated.reason === "pending" || correlated.lifecycle?.status === "pending") {
+    return supersessionAssessment("pending", diagnostics, true);
+  }
+  return supersessionAssessment("unavailable", diagnostics, true);
 }
 
 export function harvestDispatch(options) {
@@ -93,7 +209,14 @@ export function harvestDispatch(options) {
 
   const primary = primaryReply(options?.replyPath, maxBytes);
   if (primary) {
-    return { ...primary, replySuperseded: rolloutSupersedesReply(options) };
+    const supersession = assessRolloutSupersession(options);
+    return {
+      ...primary,
+      replySuperseded: supersession.replySuperseded,
+      replySupersessionStatus: supersession.status,
+      replySupersessionCaution: supersession.caution,
+      diagnostics: supersession.diagnostics,
+    };
   }
 
   const threadId = String(options?.threadId || "").toLowerCase();
@@ -114,6 +237,8 @@ export function harvestDispatch(options) {
 
   const correlator = createDispatchCorrelator(String(options?.dispatchId || ""));
   const parsed = readRolloutFile(located.path, {
+    rolloutThreadId: threadId,
+    expectedIdentityKey: located.candidates?.[0]?.identityKey,
     maxRecordBytes: options?.maxRecordBytes,
     retainRecords: false,
     onRecord: correlator.push,
@@ -121,10 +246,54 @@ export function harvestDispatch(options) {
   if (!parsed.ok) {
     return none("unparseable", [...located.diagnostics, ...parsed.diagnostics]);
   }
+  if (!isCompleteReaderCursor(parsed.cursor)) {
+    return none("pending", [
+      ...located.diagnostics,
+      ...parsed.diagnostics,
+      { code: "rollout-read-not-at-eof" },
+    ]);
+  }
   const correlated = correlator.finish(parsed);
-  if (correlated.status !== "complete") {
+  if ((correlated.duplicateCount || 0) > 1) {
     return {
-      ...none(correlated.reason, [
+      ...none("unavailable", [
+        ...located.diagnostics,
+        ...parsed.diagnostics,
+        ...(correlated.diagnostics || []),
+        dispatchReuseDiagnostic(correlated),
+      ]),
+      duplicateCount: correlated.duplicateCount,
+      boundaryMode: correlated.boundaryMode || null,
+    };
+  }
+  if (
+    correlated.status === "complete" &&
+    correlated.lifecycle?.status === "complete" &&
+    correlated.lifecycle.certifiable === true &&
+    correlated.freshness?.settled === false
+  ) {
+    const reason = correlated.freshness.status === "pending" ? "pending" : "unavailable";
+    const uncertainty = correlated.latestOccurrence?.settled === false
+      ? mixedOccurrenceDiagnostic(correlated.latestOccurrence)
+      : freshnessDiagnostic(correlated.freshness);
+    return {
+      ...none(reason, [
+        ...located.diagnostics,
+        ...parsed.diagnostics,
+        ...(correlated.diagnostics || []),
+        uncertainty,
+      ]),
+      duplicateCount: correlated.duplicateCount || 0,
+      boundaryMode: correlated.boundaryMode || null,
+    };
+  }
+  if (
+    correlated.status !== "complete" ||
+    correlated.lifecycle?.status !== "complete" ||
+    correlated.lifecycle.certifiable !== true
+  ) {
+    return {
+      ...none(correlated.reason || "unavailable", [
         ...located.diagnostics,
         ...parsed.diagnostics,
         ...(correlated.diagnostics || []),
@@ -227,6 +396,10 @@ function main(argv) {
   if (result.replySuperseded) {
     console.error(
       "REPLY_SUPERSEDED_WARNING\tprimary reply may be superseded; inspect the dispatch thread before relying on it.",
+    );
+  } else if (result.replySupersessionCaution) {
+    console.error(
+      `REPLY_SUPERSESSION_UNCERTAIN\t${result.replySupersessionStatus}\tselected primary may be stale; freshness and supersession could not be certified.`,
     );
   }
   emitDiagnostics(result.diagnostics);

@@ -76,7 +76,7 @@ case "${1:-}" in
             '' \
             'NOTES:' \
             '  Exactly one conversationId per --ipc send. The envelope is always written first;' \
-            '  the pickup line is printed only on a proven pre-send failure. After an ambiguous' \
+            '  the pickup line is printed only when non-admission is structurally proven. After an ambiguous' \
             '  post-attempt result (confirmation=unknown) pickup is suppressed — do not resend.' \
             '  Transport root: ${CODEX_IPC_ROOT:-~/.claude/ipc}. Envelopes are kept by default.' \
             '  --app/--open/--exec were removed in v0.1.8 (No Codex CLI).' \
@@ -188,7 +188,11 @@ atomic_write() {
     return 0
 }
 
-is_uuid() { [[ "${1:-}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; }
+is_uuid() {
+    local value="${1:-}"
+    value="${value,,}"
+    [[ "$value" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]
+}
 
 # Byte length of a string, independent of the caller's locale. `${#s}` counts CHARACTERS in
 # a multibyte locale, so every size decision below goes through here instead.
@@ -299,7 +303,7 @@ case "${1:-}" in
             echo "to use file-drop." >&2
             exit 1
         fi
-        IPC_CID="${1}"; shift
+        IPC_CID="${1,,}"; shift
         # Foreground-policy argument loop. Canonical grammar:
         #   --ipc <uuid> [--foreground-policy defer|switch|restore-if-known]
         #                [--ack-foreground-switch] [--] "<task>"
@@ -619,16 +623,16 @@ fi
 # while the operator is actively in the Codex app), then the send is retried.
 # Model/reasoning are renderer-controlled: this CANNOT change the thread's model
 # or reasoning effort, nor any other session's. Falls back to the file-drop pickup
-# line ONLY for failures classified before any send was attempted; after an ambiguous
+# line ONLY when the router contract proves that no follower was admitted; after an ambiguous
 # post-attempt result the envelope is preserved but pickup is suppressed (no resend).
 # Result taxonomy: gui-delivered | gui-unowned | failed-closed.
 if [[ "$MODE" == "ipc" ]]; then
     printf '%s\n' "$PAYLOAD" | atomic_write "$OUTBOUND_MSYS"
     echo "[ Handoff written to ${OUTBOUND} ]"
     SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-    # Safe fallback: ONLY for failures classified before any send was attempted
-    # (confirmation=not-attempted). Pasting the pickup line is safe because nothing
-    # can already be running.
+    # Safe fallback: ONLY when no follower admission was accepted
+    # (confirmation=not-attempted). An exact no-client response may still mean a router request
+    # occurred; the token describes non-admission, not absence of every wire attempt.
     fallback() {
         echo "" >&2
         echo "FALLBACK -- file-drop is ready. In your Codex session, paste:" >&2
@@ -638,20 +642,18 @@ if [[ "$MODE" == "ipc" ]]; then
     # writes the follower frame before awaiting the response, so a timeout, closed
     # pipe, or protocol drift can each leave the task already admitted and running.
     # Emitting the pickup line here is what turns one dispatch into two, so it is
-    # deliberately NOT printed. The envelope exists; a human must establish whether it
-    # already ran before doing anything with it.
+    # deliberately NOT printed. A negative recent-history check cannot prove non-admission,
+    # so the envelope is retained for forensic inspection only. Any equivalent replacement
+    # work requires an explicit operator decision while the original remains uncertain.
     fallback_ambiguous() {
         echo "" >&2
         echo "AMBIGUOUS -- a send was attempted and its outcome is UNKNOWN." >&2
         echo "The task may ALREADY be running in thread ${IPC_CID}." >&2
-        echo "Do NOT resend. Inspect the thread first:" >&2
-        # FULL inspector output is deliberate here, NOT --summary: the summary re-truncates each
-        # recent item to 120 chars, which on the default transport root cuts the injected pickup
-        # line inside the conversationId and drops the trailing dispatch id -- the only token that
-        # answers "was it THIS envelope?" -- and it also clamps the requested 5-event tail to 3.
-        echo "    node \"${SCRIPT_DIR}/codex_ipc_session_inspect.mjs\" --thread ${IPC_CID} --tail-events 5" >&2
-        echo "The envelope is preserved at ${OUTBOUND} -- dispatch it only after" >&2
-        echo "confirming the thread did not pick it up." >&2
+        echo "Do NOT resend or reuse this dispatch id." >&2
+        echo "A negative recent-history check cannot prove that the task was not admitted." >&2
+        echo "The envelope is preserved at ${OUTBOUND} for forensic inspection only." >&2
+        echo "Treat it as potentially admitted until exact full-history evidence establishes an outcome." >&2
+        echo "If uncertainty remains, require an explicit operator decision before issuing equivalent work." >&2
     }
     # Active policy and acknowledgement source are printed on EVERY --ipc send so a
     # standing approval can never act silently.
@@ -684,7 +686,102 @@ if [[ "$MODE" == "ipc" ]]; then
         IPC_OUTPUT=$(node "${SCRIPT_DIR}/codex_ipc_client.mjs" \
             --thread "${IPC_CID}" \
             --task "read \"${OUTBOUND}\" and proceed" \
-            --allow-any-thread --send --ack-live-write --timeout-ms 9000 2>&1)
+            --allow-any-thread --send --ack-live-write --timeout-ms 9000)
+    }
+    authoritative_success() {
+        printf '%s' "$IPC_OUTPUT" | node --input-type=module -e '
+import fs from "node:fs";
+let value;
+try {
+  value = JSON.parse(fs.readFileSync(0, "utf8"));
+} catch {
+  process.exit(1);
+}
+const target = String(process.argv[1] || "").toLowerCase();
+const followers = Array.isArray(value?.sentRequests)
+  ? value.sentRequests.filter(
+      (item) =>
+        item?.name === "thread-follower-start-turn" ||
+        item?.json?.method === "thread-follower-start-turn",
+    )
+  : [];
+const follower = followers[0];
+const exact =
+  value?.ok === true &&
+  String(value?.targetThreadId || "").toLowerCase() === target &&
+  value?.response?.resultType === "success" &&
+  followers.length === 1 &&
+  follower?.name === "thread-follower-start-turn" &&
+  follower?.json?.method === "thread-follower-start-turn" &&
+  typeof follower?.json?.params?.conversationId === "string" &&
+  follower.json.params.conversationId.toLowerCase() === target;
+process.exit(exact ? 0 : 1);
+' "$IPC_CID"
+    }
+    authoritative_no_client() {
+        printf '%s' "$IPC_OUTPUT" | node --input-type=module -e '
+import fs from "node:fs";
+let value;
+try {
+  value = JSON.parse(fs.readFileSync(0, "utf8"));
+} catch {
+  process.exit(1);
+}
+const target = String(process.argv[1] || "").toLowerCase();
+const followers = Array.isArray(value?.sentRequests)
+  ? value.sentRequests.filter(
+      (item) =>
+        item?.name === "thread-follower-start-turn" ||
+        item?.json?.method === "thread-follower-start-turn",
+    )
+  : [];
+const follower = followers[0];
+const followerTarget = follower?.json?.params?.conversationId;
+const exact =
+  value?.ok === false &&
+  String(value?.targetThreadId || "").toLowerCase() === target &&
+  value?.response?.resultType === "error" &&
+  value.response.error === "no-client-found" &&
+  followers.length === 1 &&
+  follower?.name === "thread-follower-start-turn" &&
+  follower?.json?.method === "thread-follower-start-turn" &&
+  typeof followerTarget === "string" &&
+  followerTarget.toLowerCase() === target;
+process.exit(exact ? 0 : 1);
+' "$IPC_CID"
+    }
+    classify_inspected_target() {
+        printf '%s' "$INSPECT_OUTPUT" | node --input-type=module -e '
+import fs from "node:fs";
+let value;
+try {
+  value = JSON.parse(fs.readFileSync(0, "utf8"));
+} catch {
+  process.stdout.write("ambiguous");
+  process.exit(0);
+}
+const target = String(process.argv[1] || "").toLowerCase();
+const db = value?.dbThread;
+const thread = value?.dbThread?.thread;
+const dbTrusted = db?.exists === true && db?.readOnlyOpenOk === true;
+if (dbTrusted && thread?.exists === false) {
+  process.stdout.write("missing");
+} else if (
+  value?.ok !== true ||
+  !dbTrusted ||
+  thread?.exists !== true ||
+  typeof thread.id !== "string" ||
+  thread.id.toLowerCase() !== target
+) {
+  process.stdout.write("ambiguous");
+} else if (thread.archived === 1) {
+  process.stdout.write("archived");
+} else if (thread.archived !== 0) {
+  process.stdout.write("ambiguous");
+} else {
+  process.stdout.write("active");
+}
+' "$IPC_CID"
     }
     observe_rollout() {
         local observation=""
@@ -712,16 +809,29 @@ if [[ "$MODE" == "ipc" ]]; then
         printf 'WAIT: node %q --thread %q --dispatch %q --reply-path %q --accept-rollout-fallback --budget-ms 1800000 --interval-ms 1000 --status-exit-codes\n' \
             "${SCRIPT_DIR}/codex_ipc_wait.mjs" "$IPC_CID" "$DISPATCH_ID" "$INBOUND"
     }
+    print_confirmation_disclaimer() {
+        echo "(Rollout confirmation reflects bounded pickup observation only; it does not confirm" >&2
+        echo " completion or reply-file success.)" >&2
+    }
     echo "Injecting pickup line into live Desktop thread ${IPC_CID} via IPC router..."
     if send_live; then
+        if ! authoritative_success; then
+            # Exit 0 without the exact one-target follower proof is still post-attempt
+            # ambiguity. Never call it delivered and never retry automatically.
+            echo "RESULT: failed-closed -- reason=router-pipe-failure -- confirmation=unknown" >&2
+            printf '%s\n' "$IPC_OUTPUT" | sed -n '1,20p' >&2
+            fallback_ambiguous
+            exit 1
+        fi
         CONFIRMATION=$(observe_rollout)
         echo "[ Delivered into live thread ${IPC_CID}. It should appear in your Codex Desktop GUI. ]"
         echo "Codex's reply will be written to ${INBOUND} (Claude Code reads it)."
+        print_confirmation_disclaimer
         print_wait_hint
         echo "RESULT: gui-delivered -- reason=renderer-owned -- confirmation=${CONFIRMATION}"
         exit 0
     fi
-    if ! printf '%s' "$IPC_OUTPUT" | grep -q '"error": *"no-client-found"'; then
+    if ! authoritative_no_client; then
         # Router/pipe-level failure (app closed, timeout, protocol drift). This is
         # POST-ATTEMPT: the follower frame is written before the response is awaited,
         # so the task may already be admitted. It is not an ownership condition, so
@@ -733,29 +843,45 @@ if [[ "$MODE" == "ipc" ]]; then
         exit 1
     fi
     # Guard the unowned path: never deep-link a target that does not exist or is archived.
-    # Positive proof is required: exactly `"ok": true` and not archived may proceed.
-    # Empty output, stderr-only output, malformed JSON, or schema drift (neither ok-marker
-    # present) is ambiguity, and ambiguity is not permission to navigate — fail closed.
-    INSPECT_OUTPUT=$(node "${SCRIPT_DIR}/codex_ipc_session_inspect.mjs" --thread "${IPC_CID}" --tail-events 1 2>&1) || true
-    if printf '%s' "$INSPECT_OUTPUT" | grep -q '"ok": false'; then
-        echo "RESULT: failed-closed -- reason=target-not-found -- confirmation=not-attempted" >&2
-        echo "(Target thread not found in local Codex state; refusing to auto-load.)" >&2
-        fallback
-        exit 1
-    elif printf '%s' "$INSPECT_OUTPUT" | grep -q '"ok": true'; then
-        if printf '%s' "$INSPECT_OUTPUT" | grep -q '"archived": 1'; then
+    # Positive proof requires an exact active DB row for this thread. A matching rollout alone is
+    # not target existence, and malformed/schema-drifted output is never permission to navigate.
+    # Parse stdout only. Node may emit a node:sqlite warning on stderr even when the inspector's
+    # JSON result is valid; merging streams would corrupt the structural authorization input.
+    # Preserve the process status as a second authority: only status 0 with an active/archived
+    # result or status 1 with the inspector's structured missing result is admissible.
+    INSPECT_STATUS=0
+    if INSPECT_OUTPUT=$(node "${SCRIPT_DIR}/codex_ipc_session_inspect.mjs" --thread "${IPC_CID}" --tail-events 1); then
+        INSPECT_STATUS=0
+    else
+        INSPECT_STATUS=$?
+    fi
+    INSPECT_CLASS=$(classify_inspected_target)
+    case "${INSPECT_STATUS}:${INSPECT_CLASS}" in
+        0:active|0:archived|1:missing) : ;;
+        *) INSPECT_CLASS=ambiguous ;;
+    esac
+    case "$INSPECT_CLASS" in
+        missing)
+            echo "RESULT: failed-closed -- reason=target-not-found -- confirmation=not-attempted" >&2
+            echo "(Target thread not found in local Codex state; refusing to auto-load.)" >&2
+            fallback
+            exit 1
+            ;;
+        archived)
             echo "RESULT: failed-closed -- reason=target-archived -- confirmation=not-attempted" >&2
             echo "(Target thread is archived; unarchive it in the app first.)" >&2
             fallback
             exit 1
-        fi
-    else
-        echo "RESULT: failed-closed -- reason=target-inspection-ambiguous -- confirmation=not-attempted" >&2
-        echo "(Inspector output was empty, malformed, or schema-drifted; refusing to auto-load.)" >&2
-        printf '%s\n' "$INSPECT_OUTPUT" | sed -n '1,10p' >&2
-        fallback
-        exit 1
-    fi
+            ;;
+        active) : ;;
+        *)
+            echo "RESULT: failed-closed -- reason=target-inspection-ambiguous -- confirmation=not-attempted" >&2
+            echo "(Inspector output did not prove one exact active DB thread; refusing to auto-load.)" >&2
+            printf '%s\n' "$INSPECT_OUTPUT" | sed -n '1,10p' >&2
+            fallback
+            exit 1
+            ;;
+    esac
     echo "Thread ${IPC_CID} is not loaded in Codex Desktop (no-client-found)."
     echo "Auto-loading via codex://threads/... (policy: ${FOREGROUND_POLICY})..."
     AUTOLOAD_PS1="${SCRIPT_DIR}/codex_ipc_autoload.ps1"
@@ -820,13 +946,18 @@ if [[ "$MODE" == "ipc" ]]; then
     while (( SECONDS < DEADLINE )); do
         sleep "$POLL_INTERVAL_S"
         if send_live; then
+            if ! authoritative_success; then
+                echo "RESULT: failed-closed -- reason=retry-ambiguous-outcome -- confirmation=unknown" >&2
+                printf '%s\n' "$IPC_OUTPUT" | sed -n '1,20p' >&2
+                fallback_ambiguous
+                exit 1
+            fi
             DELIVER_REASON="auto-loaded"
             [[ "$FOREGROUND_POLICY" == "switch" ]] && DELIVER_REASON="foreground-switched"
             CONFIRMATION=$(observe_rollout)
             echo "[ Delivered into live thread ${IPC_CID}. It should appear in your Codex Desktop GUI. ]"
             echo "Codex's reply will be written to ${INBOUND} (Claude Code reads it)."
-            echo "(Rollout confirmation reflects bounded pickup observation only; it does not confirm" >&2
-            echo " completion or reply-file success.)" >&2
+            print_confirmation_disclaimer
             print_wait_hint
             echo "RESULT: gui-delivered -- reason=${DELIVER_REASON} -- confirmation=${CONFIRMATION}"
             exit 0
@@ -835,7 +966,7 @@ if [[ "$MODE" == "ipc" ]]; then
         # failure (timeout, closed pipe, protocol drift) is post-attempt and may have
         # already admitted the task -- retrying it is the duplicate-execution defect
         # this release is named for. Terminate ambiguously instead of looping.
-        if ! printf '%s' "$IPC_OUTPUT" | grep -q '"error": *"no-client-found"'; then
+        if ! authoritative_no_client; then
             echo "RESULT: failed-closed -- reason=retry-ambiguous-outcome -- confirmation=unknown" >&2
             printf '%s\n' "$IPC_OUTPUT" | sed -n '1,20p' >&2
             fallback_ambiguous
@@ -850,4 +981,3 @@ if [[ "$MODE" == "ipc" ]]; then
     fallback
     exit 1
 fi
-

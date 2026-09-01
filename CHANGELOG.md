@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- IPC send and recovery paths now normalize UUID inputs, classify client and inspector results from
+  exact structured fields, and keep ambiguous post-attempt outcomes non-retryable. Negative bounded
+  inspection is diagnostic only: it cannot prove non-admission or authorize a resend.
+- Rollout-derived observation and completion now bind physical owner/path identity, fork scope,
+  consumed cursor bytes/state, semantic roles, dispatch marker, turn, terminal body, and schema
+  integrity. Duplicate dispatch IDs, stale or conflicting reply evidence, untrusted target-to-rollout
+  remaps, and unsupported pagination/alias ambiguity fail visibly instead of borrowing completion.
+  Multiple distinct final records certify only when one nonempty terminal body copy matches exactly
+  one final; missing or nonmatching terminal evidence remains unavailable.
+- These changes are covered by sanitized hermetic tests and offline gates only. No fresh live IPC
+  proof, installed-root propagation, release, or deployment is claimed.
 - Documentation and repository gates now enforce the UTF-8/LF text policy and documentation
   contracts. Intentional Unicode is retained. Primary dispatch behavior did not change, no fresh
   live proof was performed, and no release or installed propagation is implied.

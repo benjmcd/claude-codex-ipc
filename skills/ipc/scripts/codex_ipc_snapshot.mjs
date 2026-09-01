@@ -159,6 +159,7 @@ function parseArgs(argv) {
     for (const allowedThreadId of opts.allowThreadChangeIds) {
       validateUuid(allowedThreadId, "--allow-thread-change");
     }
+    opts.allowThreadChangeIds = opts.allowThreadChangeIds.map((value) => value.toLowerCase());
   }
 
   if (!opts.help && !opts.compare) {
@@ -169,6 +170,8 @@ function parseArgs(argv) {
     for (const otherThreadId of opts.otherThreadIds) {
       validateUuid(otherThreadId, "--other-thread");
     }
+    opts.threadId = opts.threadId.toLowerCase();
+    opts.otherThreadIds = opts.otherThreadIds.map((value) => value.toLowerCase());
   }
 
   return opts;
@@ -186,6 +189,10 @@ function validateUuid(value, flag) {
   if (!UUID_RE.test(value)) {
     throw new Error(`${flag} must be a UUID`);
   }
+}
+
+function canonicalUuid(value) {
+  return typeof value === "string" && UUID_RE.test(value) ? value.toLowerCase() : null;
 }
 
 async function snapshot(opts) {
@@ -348,7 +355,18 @@ function summarizeThread(row) {
 async function compareSnapshots(beforePath, afterPath, compareOpts) {
   const before = await readSnapshotJson(beforePath);
   const after = await readSnapshotJson(afterPath);
-  const targetThreadId = after.targetThreadId || before.targetThreadId;
+  const beforeTargetThreadId = canonicalUuid(before.targetThreadId);
+  const afterTargetThreadId = canonicalUuid(after.targetThreadId);
+  const beforeTargetRowId = canonicalUuid(before.db?.threads?.target?.id);
+  const afterTargetRowId = canonicalUuid(after.db?.threads?.target?.id);
+  const targetThreadId = afterTargetThreadId || beforeTargetThreadId;
+  const targetIdentityBound = Boolean(
+    beforeTargetThreadId &&
+    afterTargetThreadId &&
+    beforeTargetThreadId === afterTargetThreadId &&
+    beforeTargetRowId === beforeTargetThreadId &&
+    afterTargetRowId === afterTargetThreadId,
+  );
   const threadDiff = diffThreadHashes(
     before.db?.threads?.threadRowHashById || {},
     after.db?.threads?.threadRowHashById || {},
@@ -373,9 +391,11 @@ async function compareSnapshots(beforePath, afterPath, compareOpts) {
   const ok =
     configShaEqual &&
     configKeysEqual &&
+    targetIdentityBound &&
     targetExistsBefore &&
     targetExistsAfter &&
     hashMapsPresent &&
+    threadDiff.identitiesValid &&
     threadDiff.unexpectedNonTargetChangedIds.length === 0 &&
     threadDiff.removedIds.length === 0 &&
     threadDiff.addedIds.length === 0 &&
@@ -410,7 +430,15 @@ async function compareSnapshots(beforePath, afterPath, compareOpts) {
         after.db?.stableDuringRead === true,
       targetExistsBefore,
       targetExistsAfter,
+      targetIdentityBound,
+      beforeTargetThreadId,
+      afterTargetThreadId,
+      beforeTargetRowId,
+      afterTargetRowId,
       threadHashMapsPresent: Boolean(hashMapsPresent),
+      threadHashIdentitiesValid: threadDiff.identitiesValid,
+      invalidThreadHashIds: threadDiff.invalidIds,
+      collidingThreadHashIds: threadDiff.collisionIds,
       targetThreadChanged: threadDiff.targetChanged,
       allowedNonTargetChangedIds: threadDiff.allowedNonTargetChangedIds,
       unexpectedNonTargetChangedIds: threadDiff.unexpectedNonTargetChangedIds,
@@ -438,6 +466,10 @@ async function readSnapshotJson(snapshotPath) {
 }
 
 function diffThreadHashes(beforeHashes, afterHashes, targetThreadId, allowThreadChangeIds) {
+  const normalizedBefore = normalizeThreadHashMap(beforeHashes);
+  const normalizedAfter = normalizeThreadHashMap(afterHashes);
+  beforeHashes = normalizedBefore.hashes;
+  afterHashes = normalizedAfter.hashes;
   const allowedIds = new Set(allowThreadChangeIds);
   const beforeIds = new Set(Object.keys(beforeHashes));
   const afterIds = new Set(Object.keys(afterHashes));
@@ -447,6 +479,9 @@ function diffThreadHashes(beforeHashes, afterHashes, targetThreadId, allowThread
     .filter((id) => afterIds.has(id) && beforeHashes[id] !== afterHashes[id])
     .sort();
   return {
+    identitiesValid: normalizedBefore.ok && normalizedAfter.ok,
+    invalidIds: [...new Set([...normalizedBefore.invalidIds, ...normalizedAfter.invalidIds])].sort(),
+    collisionIds: [...new Set([...normalizedBefore.collisionIds, ...normalizedAfter.collisionIds])].sort(),
     targetChanged: changedIds.includes(targetThreadId),
     allowedNonTargetChangedIds: changedIds.filter((id) => id !== targetThreadId && allowedIds.has(id)),
     unexpectedNonTargetChangedIds: changedIds.filter(
@@ -454,6 +489,30 @@ function diffThreadHashes(beforeHashes, afterHashes, targetThreadId, allowThread
     ),
     addedIds,
     removedIds,
+  };
+}
+
+function normalizeThreadHashMap(hashes) {
+  const normalized = {};
+  const invalidIds = [];
+  const collisionIds = [];
+  for (const [rawId, hash] of Object.entries(hashes || {})) {
+    const id = canonicalUuid(rawId);
+    if (!id) {
+      invalidIds.push(rawId);
+      continue;
+    }
+    if (Object.hasOwn(normalized, id)) {
+      collisionIds.push(id);
+      continue;
+    }
+    normalized[id] = hash;
+  }
+  return {
+    ok: invalidIds.length === 0 && collisionIds.length === 0,
+    hashes: normalized,
+    invalidIds,
+    collisionIds,
   };
 }
 
