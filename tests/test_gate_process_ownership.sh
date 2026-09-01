@@ -186,18 +186,25 @@ rm -f "$T4FLAG"
 PATH="$SHIM_FLAGGED:$PATH" SHIM_FAIL_FLAG="$T4FLAG" "$BASH" "$RUNNER" --no-safety "$WORK/sentinel_idle8.sh" >"$T4OUT" 2>&1 &
 T4PID=$!
 T4_READY=0
+T4_INJECTED=0
 if wait_for_pattern "$T4OUT" "== running" 90; then
   T4_READY=1
   sleep 1
-  : > "$T4FLAG"
+  if : > "$T4FLAG"; then
+    T4_INJECTED=1
+  else
+    echo "  (warn) failed to create T4 outage flag; readiness=$T4_READY injected=$T4_INJECTED; T4 will fail on its assertions"
+  fi
 else
   echo "  (warn) runner never reached '== running'; T4 will fail on its assertions"
 fi
 wait "$T4PID"; T4RC=$?
-if [ "$T4_READY" -eq 1 ] && [ "$T4RC" -ne 0 ] && grep -q "GATE ERROR" "$T4OUT" && grep -qi "enumerat" "$T4OUT"; then
+if [ "$T4_READY" -eq 1 ] && [ "$T4_INJECTED" -eq 1 ] && [ "$T4RC" -ne 0 ] \
+   && grep -q "GATE ERROR" "$T4OUT" && grep -qi "enumerat" "$T4OUT" \
+   && grep -q "shim: simulated mid-run enumeration outage" "$T4OUT"; then
   t_pass "T4 runner aborted mid-suite (rc=$T4RC) with explicit enumeration error"
 else
-  t_fail "T4 expected observed readiness + nonzero rc + explicit 'GATE ERROR ... enumeration' abort; readiness=$T4_READY rc=$T4RC"
+  t_fail "T4 expected observed readiness + injected outage + nonzero rc + explicit shim/gate/enumeration abort; readiness=$T4_READY injected=$T4_INJECTED rc=$T4RC"
   sed 's/^/    T4| /' "$T4OUT"
 fi
 
