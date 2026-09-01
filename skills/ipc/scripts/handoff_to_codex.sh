@@ -84,9 +84,10 @@ case "${1:-}" in
             'GIT CONTEXT (CODEX_IPC_GIT_CONTEXT=bounded|full, default bounded):' \
             '  bounded caps the payload git-context sections (commits 4096 B, diffstat 4096 B,' \
             '  uncommitted 8192 B) at a whole-line boundary with an in-section notice naming what' \
-            '  was omitted and the LOCAL command that recovers it. full removes the caps and' \
-            '  reproduces the pre-0.1.11 payload byte-for-byte -- it is the rollback for that' \
-            '  default. An unrecognized value soft-resolves to bounded with one stderr note and an' \
+            '  was omitted and the LOCAL command that recovers it. full removes those caps and' \
+            '  restores only the three pre-0.1.11 unbounded git-context section bodies byte-for-byte;' \
+            '  all other payload guidance and framing remain current. An unrecognized value' \
+            '  soft-resolves to bounded with one stderr note and an' \
             '  unchanged exit code; there is no "none".'
         exit 0
         ;;
@@ -441,8 +442,8 @@ INBOUND="$(to_win "$INBOUND_MSYS")"
 # --- Git-context bounding policy (CODEX_IPC_GIT_CONTEXT) ---
 # bounded (DEFAULT since 0.1.11): each git-context section is capped, with an in-section
 #   truncation notice naming what was dropped and the LOCAL command that recovers it.
-# full: no cap; reproduces the pre-0.1.11 payload byte-for-byte. This is both the escape
-#   hatch and the rollback property, so it must keep working.
+# full: no cap; restores only the three pre-0.1.11 unbounded git-context section bodies
+#   byte-for-byte. It does not roll back other current envelope guidance or framing.
 # The caps are CHOSEN ceilings, not measured ones. An unrecognized value SOFT-RESOLVES to
 # bounded with one stderr note and an unchanged exit code -- the same shape as the
 # CODEX_IPC_INCLUDE_TRANSCRIPT gate below, which also never refuses on a bad value.

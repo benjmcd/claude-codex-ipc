@@ -15,10 +15,12 @@
 # `## Uncommitted changes` heading and forges a clean tree. Hence assertion 2b (heading present
 # AND body non-empty) and 2e (every kept line is a real, whole line of the true git output).
 #
-# ALSO SENTINELED: full-mode byte identity (the escape hatch and the rollback property),
-# soft-resolution of an unrecognized CODEX_IPC_GIT_CONTEXT value (a note, never a refusal),
-# the >=100 KB payload advisory, the nested-handoff advisory, and the invariant that both
-# advisories are STDERR-ONLY with stdout byte-identical and the exit code unchanged.
+# ALSO SENTINELED: full-mode raw identity for the three git-context bodies plus byte identity
+# with the current bounded envelope everywhere outside those bodies (the section-scoped escape
+# hatch and rollback property), soft-resolution of an unrecognized CODEX_IPC_GIT_CONTEXT value
+# (a note, never a refusal), the >=100 KB payload advisory, the nested-handoff advisory, and the
+# invariant that both advisories are STDERR-ONLY with stdout byte-identical and the exit code
+# unchanged.
 #
 # AC4 (falsifier discharge, recorded per owner acceptance): O2 assumes a receiving Codex
 # session can re-run git at its own WORKDIR, so a bounded list is recoverable there. Existence
@@ -71,13 +73,6 @@ EXPECT_UNCOMMITTED_MAX=8192
 EXPECT_DIFF_STAT_MAX=4096
 EXPECT_RECENT_COMMITS_MAX=4096
 EXPECT_WARN_BYTES=102400
-
-# Pre-bounding commit, used for the full-mode byte-identity baseline. Resolved with `git show`,
-# so it needs full history; where it is unreachable (shallow clone, installed layout with no
-# repo) that ONE assertion reports unavailable and the structural identity check in 4a still
-# runs. Both are needed: 4a proves the sections are the raw command output, 4b proves the whole
-# payload is unchanged.
-BASELINE_REF="2855e52a9c261c75bf5e469a1a14b21e9375e43a"
 
 PASS=0
 FAIL=0
@@ -370,7 +365,7 @@ else
     no "stdout is empty or carries the soft-resolve note"
 fi
 
-# ---- 4. full mode reproduces the pre-bounding payload ------------------------------------------
+# ---- 4. full mode restores raw git bodies inside the current payload scaffold ------------------
 do_render full full "$SMALL_TASK"
 FULL_FILE="$R_FILE"
 if [[ "$R_RC" -eq 0 && -n "$FULL_FILE" ]]; then
@@ -396,31 +391,102 @@ else
     no "no full-mode envelope to inspect"
 fi
 
-# 4b. whole-payload byte identity against the pre-bounding wrapper, normalized only for the
-# per-dispatch nonce and the generation timestamp (both are unique per run by construction).
+# 4b. Current-wrapper invariant: bounded and full are the SAME current envelope outside the three
+# git-context bodies. Normalize only the per-dispatch nonce and generation timestamp, then replace
+# each body with a stable DISTINCT sentinel while retaining its exact heading and trailing blank-line
+# framing. Missing, duplicate, empty, or out-of-order target sections fail closed.
 normalize() { # normalize <payload> <out>
     sed -e 's/[0-9]\{10\}-[0-9]\{1,\}-[0-9a-f]\{16\}/DISPATCH_ID/g' \
-        -e 's/^Generated: .*/Generated: NORMALIZED/' "$1" > "$2"
+        -e 's/^Generated: .* on branch `/Generated: NORMALIZED on branch `/' "$1" > "$2"
 }
-BASELINE_WRAPPER="$TMP/baseline_handoff.sh"
-if git -C "$ROOT" cat-file -e "${BASELINE_REF}:skills/ipc/scripts/handoff_to_codex.sh" 2>/dev/null \
-   && git -C "$ROOT" show "${BASELINE_REF}:skills/ipc/scripts/handoff_to_codex.sh" > "$BASELINE_WRAPPER" 2>/dev/null; then
-    do_render baseline - "$SMALL_TASK" "$BASELINE_WRAPPER"
-    BASE_FILE="$R_FILE"
-    if [[ "$R_RC" -eq 0 && -n "$BASE_FILE" && -n "$FULL_FILE" ]]; then
-        normalize "$BASE_FILE" "$TMP/n-base"
-        normalize "$FULL_FILE" "$TMP/n-full"
-        if cmp -s "$TMP/n-base" "$TMP/n-full"; then
-            ok "full-mode payload is byte-identical to the pre-bounding wrapper's (${BASELINE_REF:0:7}), modulo dispatch id and timestamp"
-        else
-            no "full-mode payload diverged from the pre-bounding wrapper's (${BASELINE_REF:0:7}):"
-            diff "$TMP/n-base" "$TMP/n-full" | head -12 | sed 's/^/      /'
-        fi
+normalize_payload() { # normalize_payload <payload> <out>
+    local ids
+    ids="$(grep -Eo '[0-9]{10}-[0-9]+-[0-9a-f]{16}' "$1" | LC_ALL=C sort -u)"
+    [[ "$(printf '%s\n' "$ids" | grep -c .)" -eq 1 ]] || return 1
+    [[ "$(grep -c '^Generated: ' "$1")" -eq 1 ]] || return 1
+    normalize "$1" "$2" || return 1
+    grep -Fq 'DISPATCH_ID' "$2" \
+        && [[ "$(grep -c '^Generated: NORMALIZED on branch `.*` (dispatch DISPATCH_ID)$' "$2")" -eq 1 ]] \
+        && ! grep -Eq '[0-9]{10}-[0-9]+-[0-9a-f]{16}' "$2"
+}
+mask_git_context_sections() { # mask_git_context_sections <normalized-payload> <out>
+    local sentinel
+    for sentinel in '[[GIT_CONTEXT_BODY_COMMITS]]' '[[GIT_CONTEXT_BODY_DIFFSTAT]]' \
+        '[[GIT_CONTEXT_BODY_UNCOMMITTED]]'; do
+        grep -Fq "$sentinel" "$1" && return 1
+    done
+    awk '
+function target_id(line) {
+    if (line == "## Commits on this branch (not yet on main)") return 1
+    if (line == "## Files changed vs main") return 2
+    if (line == "## Uncommitted changes") return 3
+    return 0
+}
+function sentinel_for(id) {
+    if (id == 1) return "[[GIT_CONTEXT_BODY_COMMITS]]"
+    if (id == 2) return "[[GIT_CONTEXT_BODY_DIFFSTAT]]"
+    return "[[GIT_CONTEXT_BODY_UNCOMMITTED]]"
+}
+function fail_closed(message) {
+    print "mask_git_context_sections: " message > "/dev/stderr"
+    failed=1
+    exit 1
+}
+function flush_body(    i,last) {
+    last=body_n
+    while (last > 0 && body[last] ~ /^[[:space:]]*$/) last--
+    if (last == 0) fail_closed("target section has no body")
+    print sentinel_for(active)
+    for (i=last+1; i<=body_n; i++) print body[i]
+    delete body
+    body_n=0
+}
+BEGIN { expected=1 }
+{
+    if (active && /^## /) {
+        flush_body()
+        active=0
+    }
+    id=target_id($0)
+    if (id) {
+        if (id != expected || seen[id])
+            fail_closed("target headings are missing, duplicate, or out of order")
+        seen[id]=1
+        expected++
+        print
+        active=id
+        next
+    }
+    if (active) {
+        body[++body_n]=$0
+        next
+    }
+    print
+}
+END {
+    if (!failed && active) flush_body()
+    if (!failed && (expected != 4 || seen[1] != 1 || seen[2] != 1 || seen[3] != 1))
+        fail_closed("did not extract all three target sections exactly once")
+    if (failed) exit 1
+}' "$1" > "$2" || return 1
+    [[ "$(grep -Fxc '[[GIT_CONTEXT_BODY_COMMITS]]' "$2")" -eq 1 ]] \
+        && [[ "$(grep -Fxc '[[GIT_CONTEXT_BODY_DIFFSTAT]]' "$2")" -eq 1 ]] \
+        && [[ "$(grep -Fxc '[[GIT_CONTEXT_BODY_UNCOMMITTED]]' "$2")" -eq 1 ]]
+}
+
+if [[ -n "$BOUNDED_FILE" && -n "$FULL_FILE" ]] \
+   && normalize_payload "$BOUNDED_FILE" "$TMP/n-bounded-current" \
+   && normalize_payload "$FULL_FILE" "$TMP/n-full-current" \
+   && mask_git_context_sections "$TMP/n-bounded-current" "$TMP/m-bounded-current" \
+   && mask_git_context_sections "$TMP/n-full-current" "$TMP/m-full-current"; then
+    if cmp -s "$TMP/m-bounded-current" "$TMP/m-full-current"; then
+        ok "bounded and full current envelopes are byte-identical outside the three git-context bodies, modulo dispatch id and timestamp"
     else
-        no "could not render the ${BASELINE_REF:0:7} baseline wrapper (rc=$R_RC)"
+        no "bounded and full current envelopes diverged outside the three git-context bodies:"
+        diff "$TMP/m-bounded-current" "$TMP/m-full-current" | head -12 | sed 's/^/      /'
     fi
 else
-    echo "  (baseline ${BASELINE_REF:0:7} unreachable in this checkout: byte-identity vs the pre-bounding wrapper not asserted; 4a still ran)"
+    no "could not normalize and mask all three git-context bodies in both current envelopes"
 fi
 
 # ---- 5. oversized-payload advisory ---------------------------------------------------------

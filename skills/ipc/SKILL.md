@@ -436,7 +436,8 @@ this branch`, `## Files changed vs <main>`, `## Uncommitted changes` — are **b
   8192 B), cuts at a whole-line boundary, and appends an in-section notice naming bytes kept,
   bytes total, lines omitted, and the **local** command that recovers the rest at the receiving
   workspace. Nothing is silently dropped: a bounded section never loses its heading.
-- `full` removes the caps and reproduces the pre-0.1.11 payload byte-for-byte. Use it when the
+- `full` removes the caps and restores only those three pre-0.1.11 unbounded git-context section
+  bodies byte-for-byte; all other payload guidance and framing remain current. Use it when the
   receiver cannot re-run git at the dispatch's workspace.
 - Any unrecognized value **soft-resolves** to `bounded` with one stderr note and an unchanged exit
   code. Unset and empty are not "unrecognized": both take the `bounded` default silently, with no
