@@ -60,12 +60,15 @@ const RETAINED_EVENT_TYPES = new Set([
   "turn_aborted",
   "user_message",
 ]);
-// Named item_completed classes. Pinned to a dated corpus census: re-derived over the retained
-// ~/.codex/sessions corpus on 2026-09-03 (2026/08 + 2026/09 enumerated in full). The eleven
-// original entries plus FunctionCallOutput (91 records across 12 files, produced whenever a
-// thread uses Codex's own send_message_to_thread delegation tool) and Plan (2026/03-04 files).
-// Re-derive this census at each release cut; classes outside it are governed by the unknown-class
-// rule below, not by this set.
+// Named item_completed classes. Pinned to a dated corpus census, whose instant and enumeration
+// scope travel with it: a parse-based census over the whole retained rollout corpus, 6,145 files
+// and 17,112,800,722 bytes, measured 2026-09-03T02:42:28Z, read 88,498 item_completed records in
+// exactly thirteen classes - the eleven of the audit window plus FunctionCallOutput (91 records
+// in 12 files; written whenever a thread uses Codex's own send_message_to_thread delegation tool)
+// and Plan (77 records in 18 files corpus-wide). No fourteenth class exists at that instant. The
+// FunctionCallOutput count is live and rose at every measurement, which is why this set is pinned
+// to a date rather than to a number. Re-derive this census at each release cut; classes outside it
+// are governed by the unknown-class rule below, not by this set.
 const COMPLETED_ITEM_TYPES = new Set([
   "AgentMessage",
   "CollabAgentToolCall",
@@ -87,11 +90,30 @@ const COMPLETED_ITEM_SEMANTICS = new Map([
 ]);
 // Owner ruling B-1 (2026-09-03): an item_completed wrapper whose item class is not named above is
 // inert-but-logged rather than drift, UNLESS the item itself carries a body- or role-bearing field.
-// Such a field means the record could hold a reply body or a speaker role this reader cannot read,
-// which is the only condition under which an unrecognised class may poison its turn. The closed
-// promotion set above is unchanged by this rule: an unknown class is never promoted, never exposes
-// text, phase or role, and never reaches correlation retention.
+// Such a field means the record could hold a reply body or a speaker role this reader cannot read.
+// The closed promotion set above is unchanged by this rule: an unknown class is never promoted,
+// never exposes text, phase or role, and never reaches correlation retention.
+//
+// Four conditions keep an unnamed wrapper POISON and fail-closed, not inert. Two come from the
+// ruling and two are what IPC-ROLLOUT-SCHEMA-AUDIT.md section 11.2 (2026-09-03) left unchanged
+// when it relaxed the rest of section 6.2 ("Missing class and casing drift are unchanged: both
+// remain poison and fail closed"):
+//   1. the item carries one of ITEM_BODY_BEARING_KEYS;
+//   2. the record's outer turn/thread identity is invalid;
+//   3. the item names NO class, or names one that is not a string - a missing class is not an
+//      unknown class, and an admission that cannot name its class could not be logged either,
+//      so admitting it would certify a record the reader never classified, with no audit trail;
+//   4. the class is a case- or separator-variant of a named class. The reader carries two
+//      namespaces that differ from each other by exactly case and separator (PascalCase item
+//      classes here, snake_case semantic types in RETAINED_EVENT_TYPES), so "agent_message" or
+//      "agentmessage" in the item slot is a mis-spelling of AgentMessage, never a fourteenth
+//      class; treating it as a new class would let a real final answer go inert whenever its
+//      body sits under a key outside ITEM_BODY_BEARING_KEYS. Section 11.2 names casing drift;
+//      separator drift is folded with it because the two are indistinguishable in intent and
+//      folding fails closed. Recorded in J3b as a residual widening for the audit's next append.
 const ITEM_BODY_BEARING_KEYS = ["content", "text", "phase", "role"];
+const foldItemClass = (name) => name.toLowerCase().replace(/[_-]/gu, "");
+const NAMED_ITEM_TYPES_FOLDED = new Set([...COMPLETED_ITEM_TYPES].map(foldItemClass));
 
 function itemCarriesBodyOrRole(item) {
   if (!item || typeof item !== "object") return false;
@@ -652,9 +674,20 @@ export function normalizeRolloutRecord(value, context = {}) {
         expectedThreadId.toLowerCase() === outerThreadId.toLowerCase());
     const namedClass = Boolean(item && itemType !== null && COMPLETED_ITEM_TYPES.has(itemType));
     const accepted = Boolean(namedClass && identityValid);
-    // Unknown-but-inert: an unnamed class with valid outer identity and no body/role-bearing field.
+    // A case- or separator-variant of a named class is drift on that class, not a new class.
+    const classDrift =
+      itemType !== null && !namedClass && NAMED_ITEM_TYPES_FOLDED.has(foldItemClass(itemType));
+    // Unknown-but-inert: a class that names itself, is not a spelling of a named class, has valid
+    // outer identity and carries no body/role-bearing field. `itemType !== null` is what keeps a
+    // missing or non-string class poison and guarantees every inert admission can name the class
+    // its diagnostic logs; see the four fail-closed conditions above ITEM_BODY_BEARING_KEYS.
     const inertUnknown = Boolean(
-      item && !namedClass && identityValid && !itemCarriesBodyOrRole(item),
+      item &&
+        itemType !== null &&
+        !namedClass &&
+        !classDrift &&
+        identityValid &&
+        !itemCarriesBodyOrRole(item),
     );
     const semanticType = accepted ? COMPLETED_ITEM_SEMANTICS.get(itemType) || null : null;
     const semanticRoleValid =

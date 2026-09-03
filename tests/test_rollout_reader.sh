@@ -3408,7 +3408,7 @@ test("repair RED: item_completed normalization is exact, outer-bound, and envelo
   assert.equal(agent.text, "sanitized final");
 
   for (const bad of [
-    completedItem("agent_message", { role: "assistant", message: "nested spoof" }),
+    completedItem("agent_message"),
     completedItem("FutureItem", { content: [{ type: "output_text", text: "future body" }] }),
     completedItem("AgentMessage", { turn_id: "other-turn" }),
     completedItem("AgentMessage", {}, { turn_id: undefined }),
@@ -3578,6 +3578,91 @@ test("repair RED: an unknown item class is inert-but-logged unless it carries bo
   const poisonResult = correlateDispatch(poisonParsed, poisonDispatch);
   assert.notEqual(poisonResult.status, "complete");
   assert.equal(poisonResult.lifecycle.certifiable, false);
+});
+
+// IPC-ROLLOUT-SCHEMA-AUDIT.md section 11.2 (2026-09-03) relaxed section 6.2 for unknown classes
+// and explicitly did NOT relax it for the other two: "Missing class and casing drift are
+// unchanged: both remain poison and fail closed." An inert admission must also be able to name
+// the class it logs, which a class-less record cannot, so admitting one would certify a turn with
+// no audit trail at all. Separator drift is folded in with casing drift; see the reader comment.
+test("repair RED: a missing or drifted item class stays poison, never an inert unknown", () => {
+  const withoutItemType = () => {
+    const record = completedItem("FutureInertItem", { name: "opaque", output: "opaque" });
+    delete record.payload.item.type;
+    return record;
+  };
+  const notInert = [
+    ["missing class", withoutItemType()],
+    ["numeric class", completedItem("FutureInertItem", { type: 7 })],
+    ["null class", completedItem("FutureInertItem", { type: null })],
+    ["object class", completedItem("FutureInertItem", { type: { a: 1 } })],
+    ["lowercase drift on a promoted class", completedItem("agentmessage", { output: "opaque" })],
+    ["uppercase drift on a promoted class", completedItem("AGENTMESSAGE", { output: "opaque" })],
+    ["mixed-case drift on a promoted class", completedItem("AgentMEssage", { output: "opaque" })],
+    ["separator drift on a promoted class", completedItem("agent_message", { output: "opaque" })],
+    ["separator drift on a named inert class", completedItem("functioncalloutput", { output: "opaque" })],
+    ["mixed drift on a lifecycle-inert class", completedItem("Command_Execution", { output: "opaque" })],
+  ];
+  for (const [label, record] of notInert) {
+    const rejected = normalizeRolloutRecord(record, { rolloutThreadId: WRAPPER_THREAD });
+    assert.equal(rejected.knownPair, false, `${label} must stay fail-closed`);
+    assert.equal(rejected.unknownItemClass, null, `${label} is not an inert unknown class`);
+    assert.equal(rejected.text, "", `${label} must expose no text`);
+    assert.equal(rejected.phase, null);
+    assert.equal(rejected.role, null);
+  }
+  // A genuinely new class next to them stays inert, so the assertions above cannot pass merely
+  // because every unnamed class is poison again.
+  const stillInert = normalizeRolloutRecord(
+    completedItem("FutureInertItem", { name: "opaque", output: "opaque" }),
+    { rolloutThreadId: WRAPPER_THREAD },
+  );
+  assert.equal(stillInert.knownPair, true);
+  assert.equal(stillInert.unknownItemClass, "FutureInertItem");
+
+  // A drifted promoted class whose body sits under a key outside ITEM_BODY_BEARING_KEYS is the
+  // case that made this fail-closed condition load-bearing: `message` is read by
+  // textFromAllowedFields but is not a poison key, so without the fold a real final answer would
+  // have gone inert and unlogged.
+  const driftedFinal = normalizeRolloutRecord(
+    completedItem("agent_message", { message: "a final answer this reader must not drop" }),
+    { rolloutThreadId: WRAPPER_THREAD },
+  );
+  assert.equal(driftedFinal.knownPair, false);
+  assert.equal(driftedFinal.unknownItemClass, null);
+  assert.equal(driftedFinal.text, "");
+
+  const missingDispatch = "8330000000-3-abcdef0123456789";
+  const missingParsed = writeAndRead("missing-item-class", [
+    { type: "session_meta", payload: { id: WRAPPER_THREAD } },
+    ev("task_started", { turn_id: WRAPPER_TURN }),
+    completedItem("UserMessage", {
+      content: [{ type: "input_text", text: `read C:/x/${missingDispatch}.task.md and proceed` }],
+    }),
+    withoutItemType(),
+    completedItem("AgentMessage", {
+      phase: "final_answer",
+      content: [{ type: "output_text", text: "unreachable body" }],
+    }),
+    ev("task_complete", { turn_id: WRAPPER_TURN, last_agent_message: "unreachable body" }),
+  ]);
+  const missingDrift = missingParsed.diagnostics.filter((item) => item.code === "schema-drift");
+  assert.equal(missingDrift.length, 1, "a class-less wrapper emits exactly one schema-drift");
+  assert.equal(missingDrift[0].itemType, null);
+  assert.equal(
+    missingParsed.diagnostics.some((item) => item.code === "unknown-item-class"),
+    false,
+    "a class-less record must never be admitted as an inert unknown",
+  );
+  const missingResult = correlateDispatch(missingParsed, missingDispatch);
+  assert.notEqual(missingResult.status, "complete");
+  assert.equal(missingResult.lifecycle.certifiable, false);
+  assert.equal(activityOfRecords("missing-item-class-activity", [
+    { type: "session_meta", payload: { id: WRAPPER_THREAD } },
+    ev("task_started", { turn_id: WRAPPER_TURN }),
+    withoutItemType(),
+    ev("task_complete", { turn_id: WRAPPER_TURN, last_agent_message: "unreachable body" }),
+  ]), "ambiguous");
 });
 
 test("repair RED: semantic event roles are presence-aware across direct, wrapped, and legacy shapes", () => {
