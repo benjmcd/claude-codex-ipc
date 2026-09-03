@@ -294,6 +294,16 @@ case "\$*" in
       warning-no-client) echo 'synthetic client warning' >&2; no_client; exit 1;;
       warning-malformed) echo 'synthetic client warning' >&2; echo '{malformed'; exit 1;;
       warning-empty) echo 'synthetic client warning' >&2; exit 1;;
+      deep-error)
+        # A pretty-printed client document whose echoed request runs past twenty lines, so the
+        # router's own answer is only reachable if the wrapper stops clipping the head.
+        printf '{\n  "ok": false,\n  "targetThreadId": "$UUIDF",\n  "sentRequests": [\n'
+        for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22; do
+          printf '    "SECRET_TASK_ECHO_LINE_%s",\n' "\$i"
+        done
+        printf '    "tail"\n  ],\n  "initialize": { "resultType": "success" },\n'
+        printf '  "response": {\n    "resultType": "error",\n    "error": "ROUTER_ERROR_SENTINEL_TOKEN"\n  }\n}\n'
+        exit 1;;
       fail-then-ok)
         if [[ "\$n" -le 1 ]]; then no_client; exit 1
         else client_success; exit 0; fi;;
@@ -450,6 +460,17 @@ for warning_mode in warning-malformed warning-empty; do
     || no "$warning_mode escaped ambiguity handling (rc=$RC)"
   assert_tax "t18c-$warning_mode"
 done
+
+echo "== 18d. a failure branch surfaces the router response, not a clipped request echo =="
+fgreset deep-error ok 0
+fgrun --ipc "$UUIDF" "t18d deep error"
+[[ $RC -ne 0 ]] \
+  && printf '%s' "$OUT" | grep -q "RESULT: failed-closed -- reason=router-pipe-failure -- confirmation=unknown" \
+  && printf '%s' "$OUT" | grep -q "ROUTER_ERROR_SENTINEL_TOKEN" \
+  && ! printf '%s' "$OUT" | grep -q "SECRET_TASK_ECHO_LINE_" \
+  && ok "the router error token reaches the operator and the request echo does not" \
+  || no "router response was clipped away or the request echo leaked (rc=$RC)"
+assert_tax "t18d"
 
 echo "== 19. invalid policy value: envelope written, fails closed before live IPC =="
 fgreset always-ok ok 0

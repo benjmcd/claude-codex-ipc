@@ -1109,6 +1109,7 @@ console.log(JSON.stringify({
   initialize: { resultType: "success", result: { clientId: "stub-client" } },
   response: {
     resultType: mode === "error-response-result" ? "error" : clientOk ? "success" : "error",
+    ...(mode === "error-response-result" ? { error: "no-client-found" } : {}),
     handledByClientId: "stub-client",
     result,
   },
@@ -1242,8 +1243,8 @@ if [[ -n "$WRITE_PROOF" ]]; then
   wp_live_run "$TMP/wp-live-error-response-result" error-response-result
   if [[ $WPRC -ne 0 ]] \
     && wp_sent_once \
-    && wp_field 'v.ok===false && v.send.ok===false && v.send.occurrence==="confirmed" && v.send.responseType==="error" && v.send.error.includes("resultType") && v.send.turnIdResolution.status==="resolved" && v.send.verificationStatus==="sent-but-unverified" && v.send.retrySafe===false && v.rolloutProbe.attempts===0'; then
-    ok "an error response with a plausible turn carrier preserves the send but cannot trigger polling"
+    && wp_field 'v.ok===false && v.send.ok===false && v.send.occurrence==="confirmed" && v.send.responseType==="error" && v.send.responseError==="no-client-found" && v.send.error.includes("resultType") && v.send.turnIdResolution.status==="resolved" && v.send.verificationStatus==="sent-but-unverified" && v.send.retrySafe===false && v.rolloutProbe.attempts===0'; then
+    ok "an error response with a plausible turn carrier preserves the send, surfaces the router error token, and cannot trigger polling"
   else
     no "an error response was certified or lost send evidence (rc=$WPRC, sends=$(cat "$WP_LIVE_SEND_COUNT" 2>/dev/null))"
     wp_live_debug

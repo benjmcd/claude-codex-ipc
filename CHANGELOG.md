@@ -13,6 +13,11 @@ All notable changes to this project will be documented in this file.
   remaps, and unsupported pagination/alias ambiguity fail visibly instead of borrowing completion.
   Multiple distinct final records certify only when one nonempty terminal body copy matches exactly
   one final; missing or nonmatching terminal evidence remains unavailable.
+- `codex_ipc_write_proof.mjs` now projects the router's structured follower-response error token
+  as `send.responseError` (`null` when absent) beside `send.responseType` in the live proof
+  receipt. Previously only the harness's 500-character clipped command summary reached the
+  receipt, so a router error such as `no-client-found` could be unrecoverable after the fact.
+  Diagnostic projection only: send, certification, polling, and no-resend behavior are unchanged.
 - These changes are covered by sanitized hermetic tests and offline gates only. No fresh live IPC
   proof, installed-root propagation, release, or deployment is claimed.
 - Documentation and repository gates now enforce the UTF-8/LF text policy and documentation

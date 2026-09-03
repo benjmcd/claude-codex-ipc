@@ -1377,6 +1377,7 @@ async function main() {
       followerRequestCount: send.followerRequestCount ?? null,
       matchingFollowerRequestCount: send.matchingFollowerRequestCount ?? null,
       responseType: send.response?.resultType || null,
+      responseError: send.response?.error ?? null,
       handledByClientId: send.response?.handledByClientId || null,
       turnId: postSend.sendTurnId,
       turnIdResolution: {

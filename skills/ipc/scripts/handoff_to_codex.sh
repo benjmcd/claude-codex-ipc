@@ -753,6 +753,33 @@ const exact =
 process.exit(exact ? 0 : 1);
 ' "$IPC_CID"
     }
+    print_router_response() {
+        # The client pretty-prints its document with `response` LAST, after the echoed
+        # `sentRequests`, so a twenty-line clip of the whole document ends inside the request echo
+        # and never reaches the router's own answer -- which is the only part that says WHY a send
+        # failed. A live failure was left with an unrecoverable cause for exactly this reason.
+        # Print the router's answer in full instead, and deliberately NOT the request echo, which
+        # carries the dispatch transport path and the task text. Fall back to the old clip only
+        # when the output is not parseable JSON (the client failed before printing a document).
+        if ! printf '%s' "$IPC_OUTPUT" | node --input-type=module -e '
+import fs from "node:fs";
+let value;
+try {
+  value = JSON.parse(fs.readFileSync(0, "utf8"));
+} catch {
+  process.exit(1);
+}
+if (!value || typeof value !== "object") process.exit(1);
+console.log(JSON.stringify({
+  ok: value.ok ?? null,
+  targetThreadId: value.targetThreadId ?? null,
+  initialize: value.initialize ?? null,
+  response: value.response ?? null,
+}, null, 2));
+' >&2; then
+            printf '%s\n' "$IPC_OUTPUT" | sed -n '1,20p' >&2
+        fi
+    }
     classify_inspected_target() {
         printf '%s' "$INSPECT_OUTPUT" | node --input-type=module -e '
 import fs from "node:fs";
@@ -822,7 +849,7 @@ if (dbTrusted && thread?.exists === false) {
             # Exit 0 without the exact one-target follower proof is still post-attempt
             # ambiguity. Never call it delivered and never retry automatically.
             echo "RESULT: failed-closed -- reason=router-pipe-failure -- confirmation=unknown" >&2
-            printf '%s\n' "$IPC_OUTPUT" | sed -n '1,20p' >&2
+            print_router_response
             fallback_ambiguous
             exit 1
         fi
@@ -841,7 +868,7 @@ if (dbTrusted && thread?.exists === false) {
         # auto-load would be pointless or misleading -- and it is not `not-attempted`,
         # so the outcome is reported as UNKNOWN and no pickup line is emitted.
         echo "RESULT: failed-closed -- reason=router-pipe-failure -- confirmation=unknown" >&2
-        printf '%s\n' "$IPC_OUTPUT" | sed -n '1,20p' >&2
+        print_router_response
         fallback_ambiguous
         exit 1
     fi
@@ -951,7 +978,7 @@ if (dbTrusted && thread?.exists === false) {
         if send_live; then
             if ! authoritative_success; then
                 echo "RESULT: failed-closed -- reason=retry-ambiguous-outcome -- confirmation=unknown" >&2
-                printf '%s\n' "$IPC_OUTPUT" | sed -n '1,20p' >&2
+                print_router_response
                 fallback_ambiguous
                 exit 1
             fi
@@ -971,7 +998,7 @@ if (dbTrusted && thread?.exists === false) {
         # this release is named for. Terminate ambiguously instead of looping.
         if ! authoritative_no_client; then
             echo "RESULT: failed-closed -- reason=retry-ambiguous-outcome -- confirmation=unknown" >&2
-            printf '%s\n' "$IPC_OUTPUT" | sed -n '1,20p' >&2
+            print_router_response
             fallback_ambiguous
             exit 1
         fi
