@@ -48,9 +48,10 @@ All notable changes to this project will be documented in this file.
   6,188 retained rollout files (the twelve above 150 MB excluded) and 17,150,905,722 bytes,
   6,479,880 records in exactly eight envelope types, measured 2026-09-03T22:08:25Z.
   `token_usage_record` was the only unnamed typeless envelope in that census - 1,368 records
-  across 42 files, first written by Codex CLI `0.147.0-alpha.6.6` on 2026-08-13, absent from every
-  `0.149`-`0.152` rollout, and written again by `0.153.0-alpha.5` and `0.153.0` - so naming it and
-  adding the forward rule changes no other retained rollout's verdict.
+  across 42 files, first written by Codex CLI `0.147.0-alpha.6.6` on 2026-08-13 and again by
+  `0.148.0-alpha.9` on 2026-08-19, then absent from every `0.149`-`0.152` rollout, and written
+  again by `0.153.0-alpha.5` and `0.153.0` - so naming it and adding the forward rule changes no
+  other retained rollout's verdict.
 - The fork ordinal contract now applies only where the producer declares it. A rollout whose first
   record carries `forked_from_id` with neither `subagent_history_start_ordinal` nor a top-level
   `ordinal` declares no ordinal stream, so it is admitted and read as an unforked rollout. Every
