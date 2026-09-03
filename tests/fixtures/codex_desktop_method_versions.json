@@ -47,18 +47,51 @@
         "offset": 22253630,
         "sha256": "bf0c9bca95bc45b3a2ff76714cde7647f7999f9df170e29dff865a37a4103402",
         "note": "replaced across the update; the derivation build carried webview/assets/app-initial-bca8cba1737e.js (10285987 B)"
+      },
+      {
+        "path": ".vite/build/src-KMpTO78a.js",
+        "size": 10987,
+        "offset": 5334239,
+        "sha256": "09f47f71abbd6e00a3cb93967bc04f9dc2565e88d164d6b0c3901cefb0ce405f",
+        "note": "third scanned member; carries none of the facts below, and is recorded so turnStartParamsInScannedMembers is reproducible at the scope this block states"
       }
     ],
     "unchanged": {
+      "$comment": "Every *Offset below is an ABSOLUTE BYTE offset into this build's app.asar, so it can be checked by reading bytes at that position with no archive tooling: open the file, seek to the offset, and compare against the matching `bytes` string in offsetsVerifyBy. Member offsets in `members` above are asar-INTERNAL instead - absolute member start = asarDataStart + member.offset - which is why asarDataStart is recorded here. An earlier stamp of this block recorded UTF-16 code-unit indices within the member added to that base; those values did not address bytes and are superseded.",
+      "asarDataStart": 2430400,
+      "offsetsRestampedAtUtc": "2026-09-03T23:10:35.216Z",
+      "offsetsRestampNote": "Independent second read of the same archive: size, mtime, SHA-256 and all three member digests were unchanged from the reverification above, the 22-entry table still matched entry for entry, each offset below was proved by re-reading its bytes at that position, and the literal turnStartParams still had zero occurrences.",
       "methodVersions": "identical, all 22 entries in the same order and with the same values",
-      "methodVersionsOffset": 6525897,
+      "methodVersionsOffset": 6544668,
       "followerStartTurnVersion": 2,
-      "payloadKeyOffset": 27395472,
-      "threadIdIdentityThrowOffset": 27592537,
-      "hostIdPlusOneResolverOffset": 6526804,
-      "turnStartParamsInScannedMembers": 0
+      "payloadKeyOffset": 27432559,
+      "threadIdIdentityThrowOffset": 27629626,
+      "hostIdPlusOneResolverOffset": 6545575,
+      "turnStartParamsInScannedMembers": 0,
+      "offsetsVerifyBy": [
+        {
+          "field": "methodVersionsOffset",
+          "member": ".vite/build/src-BXVxNf6C.js",
+          "bytes": "{\"thread-stream-state-changed\":11"
+        },
+        {
+          "field": "hostIdPlusOneResolverOffset",
+          "member": ".vite/build/src-BXVxNf6C.js",
+          "bytes": "startsWith(`thread-follower-`))return(Ev[e]??0)+1"
+        },
+        {
+          "field": "payloadKeyOffset",
+          "member": "webview/assets/app-initial-14e7352db43a.js",
+          "bytes": "startTurn(t.params.conversationId,t.params.turnStart)"
+        },
+        {
+          "field": "threadIdIdentityThrowOffset",
+          "member": "webview/assets/app-initial-14e7352db43a.js",
+          "bytes": "if(p.threadId!==t)throw Error(`Turn request thread does not match the conversation`)"
+        }
+      ]
     },
-    "scope": "Read-only byte scan of the three IPC-relevant archive members. The archive was not extracted, diffed in full, or executed; whether any OTHER follower method moved is undetermined."
+    "scope": "Read-only byte scan of the three IPC-relevant archive members named above. The archive was not extracted, diffed in full, or executed; whether any OTHER follower method moved is undetermined. turnStartParamsInScannedMembers counts every byte occurrence of the literal turnStartParams in those three members and no others."
   },
   "frame": {
     "payloadKey": "turnStart",
