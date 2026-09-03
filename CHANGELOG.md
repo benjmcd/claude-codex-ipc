@@ -87,7 +87,12 @@ All notable changes to this project will be documented in this file.
   version 1 with `params.turnStartParams` - carrying no frame-level `hostId` key and no
   `turnStart.context`. `request.threadId` repeats `params.conversationId`, which the app requires.
   The shape was derived read-only from the installed Desktop bundle at build `26.901.1978.0`
-  (`app.asar` SHA-256 `09c7ef96...95183d`), never guessed; the method-version table it came from is
+  (`app.asar` SHA-256 `09c7ef96...95183d`), never guessed, and **re-verified unchanged against its
+  successor build `26.901.2854.0`** (`app.asar` SHA-256 `a09cab16...34f66f`) at
+  2026-09-03T22:18:50.443Z, after the Desktop updated some six hours later: the method-version
+  table is identical entry for entry, the payload key, the thread-identity check and the `hostId`
+  version rule are all unchanged, and the main bundle member carrying the table is byte-identical
+  across the update. The method-version table it came from is
   checked in under `tests/fixtures/` with the archive and member digests, and
   `tests/test_router_contract.sh` now derives its expectation from that table and fails when the
   table drifts, instead of pinning the constants. The previous shape was rejected at discovery,
@@ -97,8 +102,9 @@ All notable changes to this project will be documented in this file.
   stored settings, so the client still omits all three unless the operator passes them; a
   `--turn-trigger` flag selects the provenance label, defaulting to the app's own literal for a
   tool delivering a message into an existing thread. **Nonclaim: this is a static derivation
-  qualified by hermetic tests. No send has been attempted on this build, so live delivery over the
-  repaired contract is unverified, and nothing here certifies that a turn now starts.**
+  qualified by hermetic tests. No send has been attempted on either of the two builds named above,
+  so live delivery over the repaired contract is unverified, and nothing here certifies that a turn
+  now starts.**
 - `codex_ipc_owner_probe.mjs` is retired and inert. It sent a version-1 follower start-turn at a
   synthetic sentinel thread and read `no-client-found` as evidence that the follower route is
   reachable from an external client. That inference never held and cannot hold now: the router

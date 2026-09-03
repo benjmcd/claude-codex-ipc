@@ -1,9 +1,9 @@
 {
-  "$comment": "Derived read-only from the installed Codex Desktop app.asar. Do not hand-edit: re-derive at each release cut and after every Desktop update.",
+  "$comment": "Derived read-only from the installed Codex Desktop app.asar on build 26.901.1978.0, and re-verified unchanged on build 26.901.2854.0 at 2026-09-03T22:18:50.443Z - see the reverification block. Do not hand-edit: re-derive at each release cut and after every Desktop update.",
   "build": "26.901.1978.0",
   "package": "OpenAI.Codex_26.901.1978.0_x64__2p2nqsd0c76g0",
   "derivedAtUtc": "2026-09-03T10:36:50Z",
-  "reverifiedAtUtc": "2026-09-03T12:57:12Z",
+  "reverifiedAtUtc": "2026-09-03T22:18:50.443Z",
   "asar": {
     "size": 298996178,
     "mtimeUtc": "2026-09-02T21:05:48.620Z",
@@ -23,9 +23,49 @@
       "sha256": "6b27d8af43d4436f6577d75c069681409589b9e98dbfce440ca5010da9b38bd0"
     }
   ],
+  "reverification": {
+    "$comment": "Owner decision OD-S4 (2026-09-03). The Desktop build moved off the derivation build about six hours after the derivation. Every fact this table asserts was re-derived first-hand from the successor archive, read-only, and each is unchanged. The derivation block above still describes 26.901.1978.0 and is NOT overwritten: that build is gone from the host and can never be re-measured, so its digests are evidence, not a current reading.",
+    "build": "26.901.2854.0",
+    "package": "OpenAI.Codex_26.901.2854.0_x64__2p2nqsd0c76g0",
+    "reverifiedAtUtc": "2026-09-03T22:18:50.443Z",
+    "asar": {
+      "size": 299067987,
+      "mtimeUtc": "2026-09-03T19:23:51.790Z",
+      "sha256": "a09cab163cee6527bb11e860ed5b51e17d12de23ad00b338b46cd3f09534f66f"
+    },
+    "members": [
+      {
+        "path": ".vite/build/src-BXVxNf6C.js",
+        "size": 1587207,
+        "offset": 3747032,
+        "sha256": "4c68eec5cc8a1bd1a8bbe70fc7ff325999df5e47b2ed795198af85779be9fe7f",
+        "note": "byte-identical to the derivation build; only its archive offset moved"
+      },
+      {
+        "path": "webview/assets/app-initial-14e7352db43a.js",
+        "size": 10293627,
+        "offset": 22253630,
+        "sha256": "bf0c9bca95bc45b3a2ff76714cde7647f7999f9df170e29dff865a37a4103402",
+        "note": "replaced across the update; the derivation build carried webview/assets/app-initial-bca8cba1737e.js (10285987 B)"
+      }
+    ],
+    "unchanged": {
+      "methodVersions": "identical, all 22 entries in the same order and with the same values",
+      "methodVersionsOffset": 6525897,
+      "followerStartTurnVersion": 2,
+      "payloadKeyOffset": 27395472,
+      "threadIdIdentityThrowOffset": 27592537,
+      "hostIdPlusOneResolverOffset": 6526804,
+      "turnStartParamsInScannedMembers": 0
+    },
+    "scope": "Read-only byte scan of the three IPC-relevant archive members. The archive was not extracted, diffed in full, or executed; whether any OTHER follower method moved is undetermined."
+  },
   "frame": {
     "payloadKey": "turnStart",
-    "requestRequiredFields": ["threadId", "input"],
+    "requestRequiredFields": [
+      "threadId",
+      "input"
+    ],
     "hostIdMustBeAbsent": true,
     "hostIdNonNullRaisesFollowerVersionBy": 1,
     "contextOmitted": true
