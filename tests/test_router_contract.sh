@@ -49,10 +49,19 @@ fi
 # derived read-only from the installed Codex Desktop bundle at a recorded build. Without it there
 # is nothing to assert against, and pinning a literal version is exactly the failure this file
 # now exists to prevent.
+#
+# A missing table is a repository defect, NOT an inapplicable environment, so it must fail hard.
+# The two skips above are platform-conditional: node or the scripts are genuinely absent and no
+# assertion is possible anywhere. The table is different. It is checked in, it is covered by no
+# release manifest and by no other test, and nothing else in the repository would notice its
+# absence - so skipping on it would silently convert this whole suite into a green no-op the one
+# time someone deletes or mistypes the path.
 METHOD_TABLE="$SCRIPT_DIR/fixtures/codex_desktop_method_versions.json"
 if [[ ! -f "$METHOD_TABLE" ]]; then
-  echo "SKIP: checked-in method table is absent; router-contract sentinel not applicable"
-  exit 0
+  echo "FAIL: the checked-in method table is missing at tests/fixtures/codex_desktop_method_versions.json" >&2
+  echo "  This sentinel derives its expectation from that file. Without it the suite would exit" >&2
+  echo "  green while asserting nothing about the wire contract. Restore or re-derive the table." >&2
+  exit 1
 fi
 export CODEX_IPC_METHOD_TABLE="$METHOD_TABLE"
 
@@ -266,28 +275,60 @@ else
   no "method table lacks the build/digest provenance that makes it re-derivable"
 fi
 
+# A demonstration that scores any non-zero exit as a caught drift cannot tell a catch from a
+# crash: pointing the table at a nonexistent path also exits non-zero, from ENOENT inside
+# readFileSync, and would be reported as "drift caught" while proving nothing. So each case
+# asserts that the mutated table was actually written, and that the failure carries the specific
+# assertion message this sentinel exists to produce. The vacuity_case below is the control that
+# keeps those two checks honest.
 drift_case(){
-  # $1 = label, $2 = node expression mutating the parsed table object `o`
-  local label="$1" mutation="$2"
+  # $1 = label, $2 = node expression mutating the parsed table object `o`, $3 = expected message
+  local label="$1" mutation="$2" expected="$3"
   local drift="$TMP/method-table-drift-$RANDOM.json"
+  local errlog="$TMP/method-table-drift-$RANDOM.err"
   "$NODE_BIN" -e '
 const fs = require("node:fs");
 const o = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
 (new Function("o", process.argv[3]))(o);
 fs.writeFileSync(process.argv[2], JSON.stringify(o, null, 2));
 ' "$METHOD_TABLE" "$drift" "$mutation"
+  if [[ ! -s "$drift" ]]; then
+    no "$label (the mutated table was never written, so nothing was demonstrated)"
+    return
+  fi
   if printf '%s' "$DRY_OUT" \
     | CODEX_IPC_METHOD_TABLE="$drift" "$NODE_BIN" "$ASSERT_JSON" follower "$THREAD" "$TASK_TEXT" "$CLIENT_TYPE" \
-      >/dev/null 2>&1; then
+      >/dev/null 2>"$errlog"; then
     no "$label (the sentinel pins the client instead of asserting the app's table)"
+  elif ! grep -qF "$expected" "$errlog"; then
+    no "$label (failed for the wrong reason: $(grep -m1 -oE 'Error: .*' "$errlog" | cut -c1-120))"
   else
     ok "$label"
   fi
 }
 drift_case "a table pinned to the pre-repair version 1 makes the follower assertion fail" \
-  'o.methodVersions["thread-follower-start-turn"] = 1;'
+  'o.methodVersions["thread-follower-start-turn"] = 1;' \
+  "follower version does not match the checked-in table"
 drift_case "a table pinned to the pre-repair payload key turnStartParams makes it fail" \
-  'o.frame.payloadKey = "turnStartParams";'
+  'o.frame.payloadKey = "turnStartParams";' \
+  "method table payload key drifted"
+
+# Control for the two cases above: an unreadable table must NOT look like a caught drift.
+vacuity_case(){
+  local missing="$TMP/method-table-absent-$RANDOM.json"
+  local errlog="$TMP/method-table-absent-$RANDOM.err"
+  rm -f "$missing"
+  if printf '%s' "$DRY_OUT" \
+    | CODEX_IPC_METHOD_TABLE="$missing" "$NODE_BIN" "$ASSERT_JSON" follower "$THREAD" "$TASK_TEXT" "$CLIENT_TYPE" \
+      >/dev/null 2>"$errlog"; then
+    no "an unreadable method table is not silently treated as a passing contract"
+  elif grep -qF "follower version does not match the checked-in table" "$errlog"; then
+    no "an unreadable method table is misreported as a caught version drift"
+  else
+    ok "an unreadable method table fails distinguishably from a caught drift"
+  fi
+}
+vacuity_case
 
 echo "== 3. wrapper process-result classification =="
 STUB_BIN="$TMP/bin"

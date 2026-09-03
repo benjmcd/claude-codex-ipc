@@ -61,6 +61,16 @@ All notable changes to this project will be documented in this file.
   `rollout-unavailable`, the
   waiter returned `unavailable` before it could reach an existing reply file, harvest returned
   `unavailable`, and the write-proof preflight returned a non-overridable `ambiguous`.
+  **Fixing the gate does not empty the class.** What still refuses a subagent fork of a
+  legacy-history thread is a second, independent cause the gate used to mask by tripping first:
+  `schema-drift` with reason `rollout-thread-id-mismatch`, raised on records inside the inherited
+  prefix whose `thread_id` is the **parent's**. Seventeen retained rollouts read worse under this
+  release than under the previously shipped reader for exactly that reason, measured
+  2026-09-03T21:14Z - eight written 2026-04 through 2026-08, and nine written on 2026-09-01 by
+  `0.151.0-alpha.7.2`. This is a current-producer class, not a historical one: it recurs whenever a
+  legacy-history thread spawns a subagent, so the seventeen are a count at an instant and not a
+  closed set. Record-owner integrity is deliberately not relaxed here; that would be a separate
+  decision with its own evidence.
 - A turn the boundary machine did not close can no longer be projected complete or certifiable. The
   dispatch projection now applies the marker proof's own predicate: a snapshot carrying a terminal
   but not `closed` returns unavailable with the snapshot's diagnostics. Previously a malformed line
