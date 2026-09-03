@@ -566,9 +566,13 @@ else
   no "terminal-selected rollout fallback authority was wrong"; dump_output
 fi
 # Owner ruling D-34 / OD-11 (2026-09-03): the waiter must disclose that the terminal copy chose
-# among distinct final bodies, and the disclosure must carry no body text.
-if grep -Fq 'WAIT_DIAGNOSTIC {"code":"terminal-copy-disambiguated"' "$ERR_FILE" \
-  && grep -Fq '"count":2' "$ERR_FILE"; then
+# among distinct final bodies, and the disclosure must carry no body text. Both conditions are
+# read off the SAME line: matching "count":2 anywhere in the file would let an unrelated
+# diagnostic satisfy the count, and the no-body condition is only meaningful about this line.
+T_DISCLOSE="$(grep -F 'WAIT_DIAGNOSTIC {"code":"terminal-copy-disambiguated"' "$ERR_FILE" || true)"
+if [[ -n "$T_DISCLOSE" ]] \
+  && printf '%s\n' "$T_DISCLOSE" | grep -Fq '"count":2' \
+  && ! printf '%s\n' "$T_DISCLOSE" | grep -q 'SAFE\|OTHER'; then
   ok "terminal-selected fallback discloses that a choice among distinct finals was made"
 else
   no "terminal-selected rollout fallback did not disclose the disambiguation"; dump_output
