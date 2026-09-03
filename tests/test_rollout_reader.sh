@@ -3665,6 +3665,231 @@ test("repair RED: a missing or drifted item class stays poison, never an inert u
   ]), "ambiguous");
 });
 
+// ---- Envelope-level inert classes (owner decision OD-35, 2026-09-03) -------------------------
+// `token_usage_record` is a top-level envelope the producer writes with no `payload.type` at all.
+// The shipped reader and every candidate before this change read it as an unknown envelope/payload
+// pair, so it poisoned its turn: an ordinary completed turn read `ambiguous` on the producer
+// version now in use. The synthetic record below mirrors the observed shape - the same eight
+// payload keys - with synthetic identifiers and counts. No observed bytes are reproduced.
+const USAGE_BLOCK = {
+  input_tokens: 1024,
+  cached_input_tokens: 512,
+  cache_write_input_tokens: 0,
+  output_tokens: 128,
+  reasoning_output_tokens: 64,
+  total_tokens: 1152,
+};
+const tokenUsageRecord = (extra = {}) => ({
+  type: "token_usage_record",
+  payload: {
+    thread_id: WRAPPER_THREAD,
+    turn_id: WRAPPER_TURN,
+    session_id: WRAPPER_THREAD,
+    root_turn_id: WRAPPER_TURN,
+    response_id: "resp_synthetic_0001",
+    usage: { ...USAGE_BLOCK },
+    turn_token_usage: { ...USAGE_BLOCK },
+    thread_token_usage: { ...USAGE_BLOCK },
+    ...extra,
+  },
+});
+
+test("repair RED: a current-format rollout carrying token_usage_record closes and certifies", () => {
+  const record = normalizeRolloutRecord(tokenUsageRecord(), { rolloutThreadId: WRAPPER_THREAD });
+  assert.equal(record.knownPair, true, "token_usage_record is a named inert envelope");
+  assert.equal(record.envelopeType, "token_usage_record");
+  assert.equal(record.payloadType, null);
+  assert.equal(record.unknownEnvelopeType, null, "a named envelope is not an unknown one");
+  assert.equal(record.text, "", "an inert envelope must not expose semantic text");
+  assert.equal(record.role, null);
+  assert.equal(record.phase, null);
+
+  // Naming the envelope does not relax record-owner integrity: a thread_id that is not the
+  // rollout's own still fails the file closed, exactly as it does for every other record.
+  const foreign = normalizeRolloutRecord(
+    tokenUsageRecord({ thread_id: "33333333-3333-4333-8333-333333333333" }),
+    { rolloutThreadId: WRAPPER_THREAD },
+  );
+  assert.equal(foreign.knownPair, false, "a foreign owner keeps the record fail-closed");
+
+  const dispatch = "8340000000-3-abcdef0123456789";
+  const stream = [
+    { type: "session_meta", payload: { id: WRAPPER_THREAD } },
+    ev("task_started", { turn_id: WRAPPER_TURN }),
+    completedItem("UserMessage", {
+      content: [{ type: "input_text", text: `read C:/x/${dispatch}.task.md and proceed` }],
+    }),
+    completedItem("AgentMessage", {
+      phase: "final_answer",
+      content: [{ type: "output_text", text: "current-format body" }],
+    }),
+    tokenUsageRecord(),
+    ev("token_count", { turn_id: WRAPPER_TURN, info: { total_token_usage: { ...USAGE_BLOCK } } }),
+    ev("task_complete", { turn_id: WRAPPER_TURN, last_agent_message: "current-format body" }),
+  ];
+  const parsed = writeAndRead("token-usage-record", stream);
+  assert.equal(parsed.ok, true);
+  assert.equal(parsed.diagnostics.some((item) => item.code === "schema-drift"), false);
+  assert.equal(parsed.diagnostics.some((item) => item.code === "unknown-envelope-type"), false);
+  const result = correlateDispatch(parsed, dispatch);
+  assert.equal(result.status, "complete");
+  assert.equal(result.text, "current-format body");
+  assert.equal(result.lifecycle.certifiable, true);
+  assert.equal(activityOfRecords("token-usage-record-activity", stream), "closed");
+
+  // The marker-proof path reads the same stream through readRolloutFile, so it inherits the
+  // envelope rule rather than re-deriving it.
+  const markerTarget = path.join(tmp, `rollout-tur-marker-${WRAPPER_THREAD}.jsonl`);
+  fs.writeFileSync(markerTarget, `${stream.map((r) => JSON.stringify(r)).join("\n")}\n`);
+  const proof = inspectRolloutMarker(markerTarget, "current-format body");
+  assert.equal(proof.agentMarkerSeen, true);
+  assert.equal(proof.taskCompleteAfterAgentMarker, true);
+  assert.equal(proof.error, null);
+  assert.equal(proof.parseErrorCount, 0);
+});
+
+test("repair RED: an unknown typeless envelope is inert-but-logged and certifies its turn", () => {
+  const futureEnvelope = (payload) => ({ type: "future_envelope_x", payload });
+  const inert = normalizeRolloutRecord(
+    futureEnvelope({ thread_id: WRAPPER_THREAD, turn_id: WRAPPER_TURN, counter: 3 }),
+    { rolloutThreadId: WRAPPER_THREAD },
+  );
+  assert.equal(inert.knownPair, true);
+  assert.equal(inert.envelopeType, "future_envelope_x");
+  assert.equal(inert.payloadType, null);
+  assert.equal(inert.unknownEnvelopeType, "future_envelope_x");
+  assert.equal(inert.text, "");
+  assert.equal(inert.role, null);
+  assert.equal(inert.phase, null);
+
+  // A payload-less unknown envelope carries nothing to lose and is admitted on the same terms.
+  const bare = normalizeRolloutRecord({ type: "future_envelope_y" }, { rolloutThreadId: WRAPPER_THREAD });
+  assert.equal(bare.knownPair, true);
+  assert.equal(bare.unknownEnvelopeType, "future_envelope_y");
+
+  const dispatch = "8350000000-3-abcdef0123456789";
+  const stream = [
+    { type: "session_meta", payload: { id: WRAPPER_THREAD } },
+    ev("task_started", { turn_id: WRAPPER_TURN }),
+    completedItem("UserMessage", {
+      content: [{ type: "input_text", text: `read C:/x/${dispatch}.task.md and proceed` }],
+    }),
+    futureEnvelope({ thread_id: WRAPPER_THREAD, turn_id: WRAPPER_TURN, counter: 1 }),
+    completedItem("AgentMessage", {
+      phase: "final_answer",
+      content: [{ type: "output_text", text: "unaffected by the new envelope" }],
+    }),
+    futureEnvelope({ thread_id: WRAPPER_THREAD, turn_id: WRAPPER_TURN, counter: 2 }),
+    ev("task_complete", { turn_id: WRAPPER_TURN, last_agent_message: "unaffected by the new envelope" }),
+  ];
+  const parsed = writeAndRead("unknown-typeless-envelope", stream);
+  assert.equal(parsed.diagnostics.some((item) => item.code === "schema-drift"), false);
+  const logged = parsed.diagnostics.filter((item) => item.code === "unknown-envelope-type");
+  assert.equal(logged.length, 2, "every occurrence is logged, so the diagnostics carry the count");
+  assert.equal(logged[0].envelopeType, "future_envelope_x");
+  assert.equal(logged[0].payloadType, null);
+  assert.equal(typeof logged[0].line, "number");
+  // Admitted, but never retained: an inert envelope must not enter the correlation stream.
+  assert.equal(
+    (parsed.records || []).some((item) => item.envelopeType === "future_envelope_x"),
+    false,
+    "an inert unknown envelope must never be retained for correlation",
+  );
+  const result = correlateDispatch(parsed, dispatch);
+  assert.equal(result.status, "complete");
+  assert.equal(result.text, "unaffected by the new envelope");
+  assert.equal(result.lifecycle.certifiable, true);
+  assert.equal(activityOfRecords("unknown-typeless-envelope-activity", stream), "closed");
+});
+
+// The envelope rule is the twin of owner ruling B-1 for item classes, and it fails closed in the
+// same four directions. An unknown envelope that declares a payload type is an unknown PAIR, which
+// is what `schema-drift` has always meant; one that carries an item is a wrapper shape whose
+// adapter this reader owns; one whose payload is not a plain object, or carries a body- or
+// role-bearing key, could hold a reply body the reader would drop while certifying the turn.
+test("repair RED: an unknown envelope that declares a pair, an item, or a body stays poison", () => {
+  const notInert = [
+    ["declared payload type", { type: "future_envelope_x", payload: { type: "future_event" } }],
+    ["non-string payload type", { type: "future_envelope_x", payload: { type: 7 } }],
+    ["null payload type", { type: "future_envelope_x", payload: { type: null } }],
+    [
+      "carries an item",
+      {
+        type: "future_envelope_x",
+        payload: { item: { id: "i", type: "AgentMessage", content: [{ text: "hidden" }] } },
+      },
+    ],
+    ["string payload", { type: "future_envelope_x", payload: "a final answer as a bare string" }],
+    ["array payload", { type: "future_envelope_x", payload: [{ text: "hidden" }] }],
+    ["body under content", { type: "future_envelope_x", payload: { content: [{ text: "hidden" }] } }],
+    ["body under text", { type: "future_envelope_x", payload: { text: "hidden" } }],
+    ["body under message", { type: "future_envelope_x", payload: { message: "hidden final answer" } }],
+    ["role", { type: "future_envelope_x", payload: { role: "assistant" } }],
+    ["phase", { type: "future_envelope_x", payload: { phase: "final_answer" } }],
+    ["non-string envelope type", { type: 7, payload: { counter: 1 } }],
+    ["absent envelope type", { payload: { counter: 1 } }],
+  ];
+  for (const [label, record] of notInert) {
+    const rejected = normalizeRolloutRecord(record, { rolloutThreadId: WRAPPER_THREAD });
+    assert.equal(rejected.knownPair, false, `${label} must stay fail-closed`);
+    assert.equal(rejected.unknownEnvelopeType, null, `${label} is not an inert unknown envelope`);
+  }
+  // Deliberately NOT asserted above: that a rejected envelope's `text` is empty. An unknown
+  // envelope carrying `content`/`text`/`message` has always had those fields projected onto the
+  // normalized record, and this change does not touch that. What makes the record harmless is
+  // that `knownPair === false` keeps it out of correlation retention and poisons its turn, which
+  // is what the end-to-end fixture below proves. Asserting an empty `text` here would assert a
+  // contract the reader has never had.
+
+  // A foreign record owner keeps an otherwise-inert unknown envelope poison.
+  const foreign = normalizeRolloutRecord(
+    {
+      type: "future_envelope_x",
+      payload: { thread_id: "33333333-3333-4333-8333-333333333333", counter: 1 },
+    },
+    { rolloutThreadId: WRAPPER_THREAD },
+  );
+  assert.equal(foreign.knownPair, false);
+  assert.equal(foreign.unknownEnvelopeType, null);
+
+  // A named envelope next to them is still admitted, so the assertions above cannot pass merely
+  // because every unnamed envelope became poison again.
+  const stillInert = normalizeRolloutRecord(
+    { type: "future_envelope_x", payload: { thread_id: WRAPPER_THREAD, counter: 1 } },
+    { rolloutThreadId: WRAPPER_THREAD },
+  );
+  assert.equal(stillInert.knownPair, true);
+  assert.equal(stillInert.unknownEnvelopeType, "future_envelope_x");
+
+  const poisonDispatch = "8360000000-3-abcdef0123456789";
+  const poisonStream = [
+    { type: "session_meta", payload: { id: WRAPPER_THREAD } },
+    ev("task_started", { turn_id: WRAPPER_TURN }),
+    completedItem("UserMessage", {
+      content: [{ type: "input_text", text: `read C:/x/${poisonDispatch}.task.md and proceed` }],
+    }),
+    { type: "future_envelope_x", payload: { turn_id: WRAPPER_TURN, message: "unreadable body" } },
+    completedItem("AgentMessage", {
+      phase: "final_answer",
+      content: [{ type: "output_text", text: "poisoned body" }],
+    }),
+    ev("task_complete", { turn_id: WRAPPER_TURN, last_agent_message: "poisoned body" }),
+  ];
+  const poisonParsed = writeAndRead("unknown-envelope-body", poisonStream);
+  const drift = poisonParsed.diagnostics.filter((item) => item.code === "schema-drift");
+  assert.equal(drift.length, 1, "a body-bearing unknown envelope emits exactly one schema-drift");
+  assert.equal(drift[0].envelopeType, "future_envelope_x");
+  assert.equal(
+    poisonParsed.diagnostics.some((item) => item.code === "unknown-envelope-type"),
+    false,
+    "a body-bearing envelope must never be admitted as an inert unknown",
+  );
+  const poisonResult = correlateDispatch(poisonParsed, poisonDispatch);
+  assert.notEqual(poisonResult.status, "complete");
+  assert.equal(poisonResult.lifecycle.certifiable, false);
+  assert.equal(activityOfRecords("unknown-envelope-body-activity", poisonStream), "ambiguous");
+});
+
 test("repair RED: semantic event roles are presence-aware across direct, wrapped, and legacy shapes", () => {
   const semanticBody = (semanticType, extra = {}) => ({
     turn_id: WRAPPER_TURN,

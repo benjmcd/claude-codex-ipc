@@ -46,13 +46,25 @@ const RESPONSE_TYPES = new Set([
   "web_search_call",
 ]);
 
+// Top-level envelope types the producer writes with no `payload.type` at all. Pinned to a dated
+// corpus census whose instant and enumeration scope travel with it: a parse-based census over the
+// whole retained rollout corpus, 6,176 files of 6,188 enumerated (the twelve above 150 MB are
+// excluded, as every rollout census in this repository excludes them) and 17,150,905,722 bytes,
+// measured 2026-09-03T22:08:25Z, read 6,479,880 records in exactly EIGHT top-level envelope types:
+// `event_msg`, `response_item` and the six below. No ninth type exists at that instant.
+// `token_usage_record` is named by owner decision OD-35 (2026-09-03): it carries per-turn and
+// per-thread token accounting and no body, and it appears in 1,368 records across 42 files.
+// Re-derive this census at each release cut; envelope types outside this set are governed by the
+// unknown-envelope rule below, not by it.
 const TYPELESS_ENVELOPES = new Set([
   "compacted",
   "inter_agent_communication_metadata",
   "session_meta",
+  "token_usage_record",
   "turn_context",
   "world_state",
 ]);
+const NAMED_ENVELOPES = new Set(["event_msg", "response_item", ...TYPELESS_ENVELOPES]);
 const RETAINED_EVENT_TYPES = new Set([
   "agent_message",
   "task_complete",
@@ -112,12 +124,57 @@ const COMPLETED_ITEM_SEMANTICS = new Map([
 //      separator drift is folded with it because the two are indistinguishable in intent and
 //      folding fails closed. Recorded in J3b as a residual widening for the audit's next append.
 const ITEM_BODY_BEARING_KEYS = ["content", "text", "phase", "role"];
+// Envelope-level twin of the list above (owner decision OD-35). It adds `message` because
+// textFromAllowedFields reads payload.message first: an unknown envelope carrying a body under
+// that key would otherwise go inert and unlogged, which is the same failure the item rule's
+// case/separator fold exists to prevent. This list is therefore exactly the union of every key
+// textFromAllowedFields reads with the two keys that carry a speaker role, which is what makes
+// "an inert unknown envelope exposes no text, role or phase" true by construction rather than by
+// a second guard that could drift away from it.
+const ENVELOPE_BODY_BEARING_KEYS = [...ITEM_BODY_BEARING_KEYS, "message"];
 const foldItemClass = (name) => name.toLowerCase().replace(/[_-]/gu, "");
 const NAMED_ITEM_TYPES_FOLDED = new Set([...COMPLETED_ITEM_TYPES].map(foldItemClass));
 
+function carriesBodyOrRole(value, keys) {
+  if (!value || typeof value !== "object") return false;
+  return keys.some((key) => Object.hasOwn(value, key));
+}
+
 function itemCarriesBodyOrRole(item) {
-  if (!item || typeof item !== "object") return false;
-  return ITEM_BODY_BEARING_KEYS.some((key) => Object.hasOwn(item, key));
+  return carriesBodyOrRole(item, ITEM_BODY_BEARING_KEYS);
+}
+
+// Owner decision OD-35 (2026-09-03), the envelope-level twin of ruling B-1: a top-level record
+// whose envelope type is outside NAMED_ENVELOPES, and which declares no payload type, is inert
+// but logged rather than drift. It is never promoted, never exposes text/role/phase, is never
+// retained for correlation, and emits an `unknown-envelope-type` diagnostic naming the type.
+//
+// Six conditions keep an unnamed envelope POISON and fail-closed, not inert:
+//   1. the record names NO envelope type, or names one that is not a string - an admission that
+//      cannot name its type could not be logged either, so admitting it would certify a record
+//      the reader never classified, with no audit trail (item-rule condition 3, transposed);
+//   2. the payload is present but is not a plain object - a bare string or array payload could
+//      BE the body, and no key inspection can rule that out;
+//   3. the payload declares a `type` key in any form. A declared payload type makes the record an
+//      envelope/payload PAIR, and an unknown pair is exactly what `schema-drift` has always
+//      meant; relaxing that would silently admit every future event class as well;
+//   4. the payload carries an `item` key - the item_completed adapter above owns that shape, and
+//      an unknown envelope wrapping an item could hold a reply body it would read as opaque;
+//   5. the payload carries one of ENVELOPE_BODY_BEARING_KEYS;
+//   6. the record's owner identity is invalid, which the caller conjoins below.
+// Condition 5 is a widening beyond the decision's literal "(no payload.type, no item)" wording,
+// in the fail-closed direction and for the reason the decision itself names it a twin of B-1.
+// At the 2026-09-03T22:08:25Z census the whole retained corpus contains exactly one unknown
+// typeless envelope class, `token_usage_record`, which this change names outright, so the rule
+// admits nothing new on any retained rollout: it is a forward guard, not a behaviour change.
+function unknownTypelessEnvelope(envelopeType, rawPayload) {
+  if (typeof envelopeType !== "string" || NAMED_ENVELOPES.has(envelopeType)) return false;
+  if (rawPayload !== undefined && rawPayload !== null) {
+    if (typeof rawPayload !== "object" || Array.isArray(rawPayload)) return false;
+    if (Object.hasOwn(rawPayload, "type") || Object.hasOwn(rawPayload, "item")) return false;
+    if (carriesBodyOrRole(rawPayload, ENVELOPE_BODY_BEARING_KEYS)) return false;
+  }
+  return true;
 }
 
 function diagnostic(code, details = {}) {
@@ -710,6 +767,7 @@ export function normalizeRolloutRecord(value, context = {}) {
       byteOffset: context.byteOffset ?? null,
       interAgent: false,
       unknownItemClass: inertUnknown ? itemType : null,
+      unknownEnvelopeType: null,
       knownPair: (accepted || inertUnknown) && semanticRoleValid,
     };
   }
@@ -763,6 +821,7 @@ export function normalizeRolloutRecord(value, context = {}) {
     identityValid && semanticRoleValid && typeof body.phase === "string" ? body.phase : null;
   const interAgent = envelopeType === "response_item" && payloadType === "agent_message";
   const inertResponseItem = envelopeType === "response_item" && payloadType === "compaction";
+  const inertUnknownEnvelope = unknownTypelessEnvelope(envelopeType, value?.payload);
   const lastAgentMessage =
     typeof body.last_agent_message === "string" || body.last_agent_message === null
       ? body.last_agent_message
@@ -777,6 +836,7 @@ export function normalizeRolloutRecord(value, context = {}) {
     itemType: null,
     itemId: null,
     unknownItemClass: null,
+    unknownEnvelopeType: inertUnknownEnvelope && identityValid ? envelopeType : null,
     lastAgentMessage,
     text:
       interAgent || inertResponseItem || !identityValid || !semanticRoleValid
@@ -786,7 +846,10 @@ export function normalizeRolloutRecord(value, context = {}) {
     line: context.line ?? null,
     byteOffset: context.byteOffset ?? null,
     interAgent,
-    knownPair: identityValid && semanticRoleValid && knownPair(envelopeType, payloadType),
+    knownPair:
+      identityValid &&
+      semanticRoleValid &&
+      (knownPair(envelopeType, payloadType) || inertUnknownEnvelope),
   };
 }
 
@@ -1486,6 +1549,22 @@ export function readRolloutFile(filePath, options = {}) {
           envelopeType: normalized.envelopeType,
           payloadType: normalized.payloadType,
           itemType: normalized.unknownItemClass,
+        }),
+      );
+    } else if (
+      normalized.unknownEnvelopeType !== null &&
+      normalized.unknownEnvelopeType !== undefined
+    ) {
+      // Inert-but-logged at the envelope level (owner decision OD-35), on the same terms and for
+      // the same reason: one diagnostic per occurrence, so the diagnostics themselves carry the
+      // count and an unrecognised envelope type is visible and datable without poisoning a turn.
+      diagnostics.push(
+        diagnostic("unknown-envelope-type", {
+          path: filePath,
+          line: lineNumber,
+          byteOffset,
+          envelopeType: normalized.unknownEnvelopeType,
+          payloadType: normalized.payloadType,
         }),
       );
     }

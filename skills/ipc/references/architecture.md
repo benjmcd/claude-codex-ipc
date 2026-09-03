@@ -100,6 +100,33 @@ Four conditions still fail such a record closed, as `schema-drift` naming the cl
    fourteenth class, and treating it as new would let a real final answer go inert whenever its
    body sits under a key outside the four in condition 1.
 
+### Top-level envelope types
+
+The same problem exists one level up. Every rollout record is a top-level envelope: `event_msg` and
+`response_item` declare a `payload.type` the reader matches as a **pair**, and six further types -
+`compacted`, `inter_agent_communication_metadata`, `session_meta`, `token_usage_record`,
+`turn_context` and `world_state` - declare none at all and are lifecycle-inert. That set is pinned
+to the same kind of dated census: 6,479,880 records in exactly eight envelope types over 6,176
+retained rollout files, measured 2026-09-03T22:08:25Z.
+
+An envelope type outside the set that declares no `payload.type` is **inert but logged**, on the
+same terms as an unknown item class and for the same reason, with an `unknown-envelope-type`
+diagnostic naming the type once per occurrence. Six conditions still fail such a record closed as
+`schema-drift`: it names no envelope type or names one that is not a string; its payload is present
+but is not a plain object; the payload declares a `type` key, which makes the record an unknown
+*pair* rather than an unknown envelope, and relaxing that would silently admit every future event
+class as well; the payload carries an `item`, a shape the `item_completed` adapter owns; the
+payload carries `content`, `text`, `message`, `phase` or `role` - one key wider than the item rule,
+because `textFromAllowedFields` reads `payload.message` first and a body under that key would
+otherwise go inert and unlogged; or the record's owner identity is invalid.
+
+`token_usage_record` is the class that forced the rule. It carries per-turn and per-thread token
+accounting and no body, and it is the only unnamed typeless envelope the census found, so naming it
+and adding the forward rule changes no other retained rollout's verdict. Before it was named, every
+rollout carrying one read `ambiguous` even where the turn had completed - which meant the reader
+withdrew certification from the producer version then in use, for a record that says nothing about
+whether the turn finished.
+
 Historical completion is monotone evidence for that occurrence. A readable primary reply therefore
 remains selected for viewing when later schema makes freshness opaque, but it may be stale and the
 waiter returns `unavailable`. Two distinct bound-turn exact marker occurrences reuse one dispatch

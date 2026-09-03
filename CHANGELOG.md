@@ -28,6 +28,25 @@ All notable changes to this project will be documented in this file.
   made its whole turn ambiguous, so an ordinary working thread that had delegated could not be
   observed, waited on, harvested, or dispatched to, despite a real `task_complete` carrying a
   non-empty final body.
+- `token_usage_record` is now a named inert envelope, and an unknown typeless envelope no longer
+  poisons its turn. The producer writes `token_usage_record` as a top-level envelope with no
+  `payload.type` at all, carrying per-turn and per-thread token accounting and no body; both the
+  shipped and the previous candidate reader treated it as an unknown envelope/payload pair, so an
+  ordinary completed turn read `ambiguous` on the producer version now in use. Generalising the
+  same shape, a top-level record whose envelope type is outside the named set and which declares
+  no `payload.type` is now inert but logged, emitting an `unknown-envelope-type` diagnostic naming
+  the type once per occurrence. Six conditions still fail such a record closed as `schema-drift`:
+  the record names no envelope type or names one that is not a string; its payload is present but
+  is not a plain object; the payload declares a `type` key, which makes the record an unknown
+  *pair* rather than an unknown envelope; the payload carries an `item`; the payload carries
+  `content`, `text`, `message`, `phase` or `role`; or the record's owner identity is invalid. The
+  named envelope set is pinned to a dated corpus census re-derived at each release cut: 6,176 of
+  6,188 retained rollout files (the twelve above 150 MB excluded) and 17,150,905,722 bytes,
+  6,479,880 records in exactly eight envelope types, measured 2026-09-03T22:08:25Z.
+  `token_usage_record` was the only unnamed typeless envelope in that census - 1,368 records
+  across 42 files, first written by Codex CLI `0.147.0-alpha.6.6` on 2026-08-13, absent from every
+  `0.149`-`0.152` rollout, and written again by `0.153.0-alpha.5` and `0.153.0` - so naming it and
+  adding the forward rule changes no other retained rollout's verdict.
 - The fork ordinal contract now applies only where the producer declares it. A rollout whose first
   record carries `forked_from_id` with neither `subagent_history_start_ordinal` nor a top-level
   `ordinal` declares no ordinal stream, so it is admitted and read as an unforked rollout. Every
