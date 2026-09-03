@@ -281,6 +281,18 @@ no_client(){
 client_success(){
   echo '{"ok":true,"targetThreadId":"$UUIDF","sentRequests":[{"name":"thread-follower-start-turn","json":{"method":"thread-follower-start-turn","params":{"conversationId":"$UUIDF"}}}],"response":{"resultType":"success"}}'
 }
+# A pretty-printed client document whose echoed request runs past twenty lines, so the router's
+# own answer is only reachable if the wrapper stops clipping the head. \$1 is the "ok" literal:
+# false models a client that failed, true a client that exited 0 without the exact one-target
+# follower proof. Neither carries a follower object, so it is authoritative for nothing.
+deep_error(){
+  printf '{\n  "ok": %s,\n  "targetThreadId": "$UUIDF",\n  "sentRequests": [\n' "\$1"
+  for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22; do
+    printf '    "SECRET_TASK_ECHO_LINE_%s",\n' "\$i"
+  done
+  printf '    "tail"\n  ],\n  "initialize": { "resultType": "success" },\n'
+  printf '  "response": {\n    "resultType": "error",\n    "error": "ROUTER_ERROR_SENTINEL_TOKEN"\n  }\n}\n'
+}
 case "\$*" in
   *codex_ipc_client.mjs*)
     printf '%s\n' "\$*" >> "\$FG/nodeargs.log"
@@ -294,16 +306,14 @@ case "\$*" in
       warning-no-client) echo 'synthetic client warning' >&2; no_client; exit 1;;
       warning-malformed) echo 'synthetic client warning' >&2; echo '{malformed'; exit 1;;
       warning-empty) echo 'synthetic client warning' >&2; exit 1;;
-      deep-error)
-        # A pretty-printed client document whose echoed request runs past twenty lines, so the
-        # router's own answer is only reachable if the wrapper stops clipping the head.
-        printf '{\n  "ok": false,\n  "targetThreadId": "$UUIDF",\n  "sentRequests": [\n'
-        for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22; do
-          printf '    "SECRET_TASK_ECHO_LINE_%s",\n' "\$i"
-        done
-        printf '    "tail"\n  ],\n  "initialize": { "resultType": "success" },\n'
-        printf '  "response": {\n    "resultType": "error",\n    "error": "ROUTER_ERROR_SENTINEL_TOKEN"\n  }\n}\n'
-        exit 1;;
+      deep-error)            deep_error false; exit 1;;
+      deep-error-exit-zero)  deep_error true;  exit 0;;
+      no-client-then-deep-error)
+        if [[ "\$n" -le 1 ]]; then no_client; exit 1
+        else deep_error false; exit 1; fi;;
+      no-client-then-deep-error-exit-zero)
+        if [[ "\$n" -le 1 ]]; then no_client; exit 1
+        else deep_error true; exit 0; fi;;
       fail-then-ok)
         if [[ "\$n" -le 1 ]]; then no_client; exit 1
         else client_success; exit 0; fi;;
@@ -461,16 +471,36 @@ for warning_mode in warning-malformed warning-empty; do
   assert_tax "t18c-$warning_mode"
 done
 
-echo "== 18d. a failure branch surfaces the router response, not a clipped request echo =="
-fgreset deep-error ok 0
-fgrun --ipc "$UUIDF" "t18d deep error"
-[[ $RC -ne 0 ]] \
-  && printf '%s' "$OUT" | grep -q "RESULT: failed-closed -- reason=router-pipe-failure -- confirmation=unknown" \
-  && printf '%s' "$OUT" | grep -q "ROUTER_ERROR_SENTINEL_TOKEN" \
-  && ! printf '%s' "$OUT" | grep -q "SECRET_TASK_ECHO_LINE_" \
-  && ok "the router error token reaches the operator and the request echo does not" \
-  || no "router response was clipped away or the request echo leaked (rc=$RC)"
-assert_tax "t18d"
+echo "== 18d. every failure branch surfaces the router response, not a clipped request echo =="
+# All FOUR print_router_response call sites, not just one. The 2026-09-01 live failure was left
+# with an unrecoverable cause because the twenty-line clip cut off the router's own answer; a
+# regression on any one of these four branches reinstates exactly that. Covering only one lets
+# the other three silently revert, which is the adequacy failure this suite exists to prevent.
+#   row 1: send_live fails and the answer is not an authoritative no-client   (first path)
+#   row 2: send_live exits 0 without the exact one-target follower proof      (first path)
+#   row 3: same, inside the auto-load retry loop                              (retry path)
+#   row 4: send_live fails inside the retry loop with a non-no-client answer  (retry path)
+while IFS='|' read -r t18d_label t18d_mode t18d_reason t18d_policy; do
+  [[ -z "$t18d_label" ]] && continue
+  fgreset "$t18d_mode" ok 0
+  if [[ "$t18d_policy" == "switch" ]]; then
+    fgrun --ipc "$UUIDF" --foreground-policy switch --ack-foreground-switch -- "t18d $t18d_label"
+  else
+    fgrun --ipc "$UUIDF" "t18d $t18d_label"
+  fi
+  [[ $RC -ne 0 ]] \
+    && printf '%s' "$OUT" | grep -q "RESULT: failed-closed -- reason=${t18d_reason} -- confirmation=unknown" \
+    && printf '%s' "$OUT" | grep -q "ROUTER_ERROR_SENTINEL_TOKEN" \
+    && ! printf '%s' "$OUT" | grep -q "SECRET_TASK_ECHO_LINE_" \
+    && ok "$t18d_label: the router error token reaches the operator and the request echo does not" \
+    || no "$t18d_label: router response was clipped away or the request echo leaked (rc=$RC)"
+  assert_tax "t18d-$t18d_label"
+done <<'T18D'
+send-failed|deep-error|router-pipe-failure|
+exit-zero-unproven|deep-error-exit-zero|router-pipe-failure|
+retry-exit-zero-unproven|no-client-then-deep-error-exit-zero|retry-ambiguous-outcome|switch
+retry-send-failed|no-client-then-deep-error|retry-ambiguous-outcome|switch
+T18D
 
 echo "== 19. invalid policy value: envelope written, fails closed before live IPC =="
 fgreset always-ok ok 0
