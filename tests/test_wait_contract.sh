@@ -565,6 +565,14 @@ if grep -Fxq 'WAIT_DIAGNOSTIC {"code":"reply-source","source":"rollout-fallback"
 else
   no "terminal-selected rollout fallback authority was wrong"; dump_output
 fi
+# Owner ruling D-34 / OD-11 (2026-09-03): the waiter must disclose that the terminal copy chose
+# among distinct final bodies, and the disclosure must carry no body text.
+if grep -Fq 'WAIT_DIAGNOSTIC {"code":"terminal-copy-disambiguated"' "$ERR_FILE" \
+  && grep -Fq '"count":2' "$ERR_FILE"; then
+  ok "terminal-selected fallback discloses that a choice among distinct finals was made"
+else
+  no "terminal-selected rollout fallback did not disclose the disambiguation"; dump_output
+fi
 
 CASE="$TMP/fallback-conflict"; mkdir -p "$CASE"; write_conflicting_body "$CASE/rollout-$THREAD.jsonl"
 run_case "$CASE" --rollout-path "$CASE/rollout-$THREAD.jsonl" --reply-path "$CASE/absent.reply.md" \

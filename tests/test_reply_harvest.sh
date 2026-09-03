@@ -644,6 +644,18 @@ await test("terminal binding selects one body while unbound conflicts and schema
   assert.equal(selected.source, "rollout-fallback");
   assert.equal(selected.reason, null);
   assert.equal(Buffer.from(selected.bodyBase64, "base64").toString("utf8"), "SAFE");
+  // Owner ruling D-34 / OD-11 (2026-09-03): a fallback served after the terminal copy chose among
+  // distinct finals must disclose that it did so, and must not report the count as one.
+  const disclosure = (selected.diagnostics || []).filter(
+    (item) => item.code === "terminal-copy-disambiguated",
+  );
+  assert.equal(disclosure.length, 1);
+  assert.equal(disclosure[0].count, 2);
+  assert.equal(
+    JSON.stringify(selected.diagnostics || []).includes("OTHER"),
+    false,
+    "the disclosure must not carry the rejected body",
+  );
 
   const unboundPath = path.join(tmp, `rollout-body-unbound-${threadId}.jsonl`);
   fs.writeFileSync(unboundPath, `${[
@@ -833,6 +845,9 @@ await test("a terminal-selected supersession annotates without replacing the pri
   assert.equal(result.replySupersessionStatus, "confirmed");
   assert.equal(result.replySupersessionCaution, false);
   assert.ok(!result.diagnostics.some((item) => item.code === "reply-supersession-unavailable"));
+  // Owner ruling D-34 / OD-11 (2026-09-03): a supersession confirmed off a disambiguated final
+  // discloses the disambiguation on the same path that confirms it.
+  assert.ok(result.diagnostics.some((item) => item.code === "terminal-copy-disambiguated"));
   assert.equal(fs.readFileSync(reply, "utf8"), "PRIMARY-UNCHANGED");
 });
 

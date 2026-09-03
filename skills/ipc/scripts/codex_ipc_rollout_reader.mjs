@@ -2073,15 +2073,21 @@ function completionBodyDecision(agentMessages, lastAgentMessage, options = {}) {
     logicalFinals.push(item);
   }
   let selected = logicalFinals[0] || null;
-  if (!selected) return { status: "missing", selected: null, count: 0 };
+  if (!selected) return { status: "missing", selected: null, count: 0, disambiguated: false };
+  // The true number of distinct logical final bodies this turn carried. It is reported even when
+  // the terminal copy resolves them to one, so the disambiguation is disclosed rather than erased
+  // (owner ruling D-34 / OD-11, 2026-09-03; IPC-ROLLOUT-SCHEMA-AUDIT.md sections 6.5 and 8-9).
+  const distinctFinalCount = logicalFinals.length;
   const hasTerminalCopy =
     typeof lastAgentMessage === "string" && lastAgentMessage.length > 0;
-  if (logicalFinals.length > 1) {
+  let disambiguated = false;
+  if (distinctFinalCount > 1) {
     if (!hasTerminalCopy) {
       return {
         status: options.requireTerminalCopy === true ? "terminal-missing" : "conflict",
         selected: null,
-        count: logicalFinals.length,
+        count: distinctFinalCount,
+        disambiguated: false,
       };
     }
     const terminalMatches = logicalFinals.filter(
@@ -2091,21 +2097,23 @@ function completionBodyDecision(agentMessages, lastAgentMessage, options = {}) {
       return {
         status: "mismatch",
         selected: null,
-        count: logicalFinals.length,
+        count: distinctFinalCount,
+        disambiguated: false,
       };
     }
     [selected] = terminalMatches;
+    disambiguated = true;
   }
   if (
     options.requireTerminalCopy === true &&
     !hasTerminalCopy
   ) {
-    return { status: "terminal-missing", selected: null, count: 1 };
+    return { status: "terminal-missing", selected: null, count: distinctFinalCount, disambiguated: false };
   }
   if (typeof lastAgentMessage === "string" && lastAgentMessage !== selected.text) {
-    return { status: "mismatch", selected: null, count: 1 };
+    return { status: "mismatch", selected: null, count: distinctFinalCount, disambiguated: false };
   }
-  return { status: "ok", selected, count: 1 };
+  return { status: "ok", selected, count: distinctFinalCount, disambiguated };
 }
 
 function sameLogicalUserDelivery(left, right) {
@@ -2239,7 +2247,18 @@ function computeOccurrence(snapshot, bucket, marker) {
     certifiable: Boolean(selected),
     text: selected ? selected.text : null,
     finalMessageCount: bodyDecision.count,
-    diagnostics: [],
+    // Disclosure on the certifying path: when the terminal copy resolved more than one distinct
+    // final body to exactly one, say so. The body is served, and the fact that a choice was made
+    // is carried with it instead of being dropped (owner ruling D-34 / OD-11, 2026-09-03).
+    diagnostics: bodyDecision.disambiguated
+      ? [
+          diagnostic("terminal-copy-disambiguated", {
+            line: snapshot.terminalLine,
+            turnId: snapshot.turnId,
+            count: bodyDecision.count,
+          }),
+        ]
+      : [],
   };
 }
 

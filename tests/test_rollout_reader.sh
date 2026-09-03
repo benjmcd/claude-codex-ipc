@@ -4061,13 +4061,81 @@ test("repair RED: terminal copy selects exactly one of multiple explicit final b
   const result = correlateDispatch(writeAndRead("terminal-selects-final", records), dispatch);
   assert.equal(result.status, "complete");
   assert.equal(result.text, selectedBody);
-  assert.equal(result.finalMessageCount, 1);
+  // Owner ruling D-34 / OD-11 (2026-09-03): the disambiguation is disclosed, not erased. The true
+  // number of distinct logical finals is reported, and the certifying path carries a diagnostic
+  // saying the terminal copy chose among them. This assertion is the inversion of the absence
+  // assertion that stood here; the audit erratum of 2026-09-03 is its authority.
+  assert.equal(result.finalMessageCount, 2);
   assert.equal(result.lifecycle.status, "complete");
   assert.equal(result.lifecycle.certifiable, true);
+  const disclosure = result.diagnostics.filter(
+    (item) => item.code === "terminal-copy-disambiguated",
+  );
+  assert.equal(disclosure.length, 1);
+  assert.equal(disclosure[0].count, 2);
+  assert.equal(disclosure[0].turnId, WRAPPER_TURN);
+  // The hard-conflict signal stays reserved for turns that do NOT certify.
   assert.equal(
     result.diagnostics.some((item) => item.code === "multiple-final-message-bodies"),
     false,
   );
+
+  // A single final body certifies with neither the count inflated nor the disclosure emitted.
+  const soleDispatch = "8211000000-2-abcdef0123456789";
+  const sole = correlateDispatch(writeAndRead("terminal-single-final", [
+    { type: "session_meta", payload: { id: WRAPPER_THREAD } },
+    ev("task_started", { turn_id: WRAPPER_TURN }),
+    ev("user_message", { turn_id: WRAPPER_TURN, message: `read C:/x/${soleDispatch}.task.md and proceed` }),
+    ev("agent_message", { turn_id: WRAPPER_TURN, phase: "final_answer", message: "only body" }),
+    ev("task_complete", { turn_id: WRAPPER_TURN, last_agent_message: "only body" }),
+  ]), soleDispatch);
+  assert.equal(sole.status, "complete");
+  assert.equal(sole.finalMessageCount, 1);
+  assert.equal(
+    sole.diagnostics.some((item) => item.code === "terminal-copy-disambiguated"),
+    false,
+  );
+});
+
+test("repair RED: an item_completed wrapper reaches the boundary machine and closes its turn", () => {
+  // F2 gap: every other wrapper test feeds correlateDispatch, whose record stream is filtered to
+  // RETAINED records, so no test had ever pushed an item_completed wrapper through the turn
+  // boundary accumulator itself. readRolloutActivity feeds the FULL observation stream, which is
+  // the path the observer, the waiter and the write-proof preflight actually use.
+  const closed = activityOfRecords("wrapper-through-accumulator", [
+    { type: "session_meta", payload: { id: WRAPPER_THREAD } },
+    ev("task_started", { turn_id: WRAPPER_TURN }),
+    completedItem("UserMessage", {
+      content: [{ type: "input_text", text: "current-format user delivery" }],
+    }),
+    completedItem("Reasoning", { content: [] }),
+    completedItem("CommandExecution", { content: [] }),
+    completedItem("AgentMessage", {
+      phase: "final_answer",
+      content: [{ type: "output_text", text: "current-format final" }],
+    }),
+    ev("task_complete", { turn_id: WRAPPER_TURN, last_agent_message: "current-format final" }),
+  ]);
+  assert.equal(closed, "closed");
+
+  // The same stream with one in-turn unknown body-bearing class must still read ambiguous, so the
+  // test cannot pass merely because wrappers are invisible to the machine.
+  const poisoned = activityOfRecords("wrapper-through-accumulator-drift", [
+    { type: "session_meta", payload: { id: WRAPPER_THREAD } },
+    ev("task_started", { turn_id: WRAPPER_TURN }),
+    completedItem("UserMessage", {
+      content: [{ type: "input_text", text: "current-format user delivery" }],
+    }),
+    completedItem("FutureBodyItem", {
+      content: [{ type: "output_text", text: "unreadable" }],
+    }),
+    completedItem("AgentMessage", {
+      phase: "final_answer",
+      content: [{ type: "output_text", text: "current-format final" }],
+    }),
+    ev("task_complete", { turn_id: WRAPPER_TURN, last_agent_message: "current-format final" }),
+  ]);
+  assert.equal(poisoned, "ambiguous");
 });
 
 await test("repair RED: strict marker proof binds the terminal-selected final rather than record order", async () => {
