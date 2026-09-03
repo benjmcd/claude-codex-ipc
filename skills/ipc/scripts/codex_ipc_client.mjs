@@ -13,7 +13,17 @@ const DEFAULT_PIPE = "\\\\.\\pipe\\codex-ipc";
 const DEFAULT_TIMEOUT_MS = 6000;
 const DEFAULT_CLIENT_TYPE = "external-handoff";
 const FOLLOWER_START_TURN_METHOD = "thread-follower-start-turn";
-const FOLLOWER_START_TURN_VERSION = 1;
+// Derived read-only from the installed Codex Desktop app.asar; see docs/COMPATIBILITY.md and
+// tests/fixtures/codex_desktop_method_versions.json. The app matches this value EXACTLY, before
+// ownership is evaluated. A frame-level `hostId` would raise the required value to 3 for every
+// `thread-follower-*` method, so this client never sets one: the key must be absent, not null.
+const FOLLOWER_START_TURN_VERSION = 2;
+// Provenance label only. Nothing in the app branches on this value, and it is stripped wholesale
+// for app-servers older than 0.150.0-alpha.10. This is the app's own literal for a tool delivering
+// a message into an existing thread, which is what this client does; `composer` (the human
+// composer's default) is the other observed literal and is one `--turn-trigger` away.
+const DEFAULT_TURN_TRIGGER = "app_tool_send_message";
+const TURN_TRIGGER_RE = /^[a-z][a-z0-9_]*$/;
 // Optional operator-designated test thread. When set (a UUID of a thread the operator
 // owns), --send may target it without --allow-any-thread. No default is shipped:
 // there is deliberately no built-in authorized thread id.
@@ -35,9 +45,15 @@ Options:
   --thread <uuid>                  Explicit target conversation/thread id. Required.
   --task <text>                    User text to inject as a new turn.
   --task-file <path>               Read user text from a UTF-8 file.
-  --model <name>                   Optional per-thread model override for the turn.
-  --effort <level>                 Optional per-thread reasoning effort override for the turn.
-  --cwd <path>                     Optional per-thread cwd override for the turn.
+  --model <name>                   Optional model for the turn. NOT a per-turn override: the app
+                                   rewrites the thread's stored model with it. Omit it unless the
+                                   operator asked for that change.
+  --effort <level>                 Optional reasoning effort for the turn. NOT a per-turn override:
+                                   the app rewrites the thread's stored reasoning effort with it.
+  --cwd <path>                     Optional cwd for the turn. Honored only when the conversation
+                                   has no environment cwd of its own.
+  --turn-trigger <name>            Provenance label sent with the turn. Default:
+                                   ${DEFAULT_TURN_TRIGGER}
   --pipe <path>                    Named pipe path. Default: ${DEFAULT_PIPE}
   --timeout-ms <n>                 Live attempt timeout. Default: ${DEFAULT_TIMEOUT_MS}
   --client-type <text>             Router initialize client type. Default: ${DEFAULT_CLIENT_TYPE}
@@ -51,7 +67,10 @@ Safety:
   Dry-run is the default. --send requires --ack-live-write. --send additionally requires
   --allow-any-thread unless the target equals the optional operator-set
   CODEX_IPC_AUTHORIZED_TEST_THREAD environment variable (no default is shipped).
-  The router forwards only to the owning renderer of the given conversationId (no broadcast).`;
+  The router forwards only to the owning renderer of the given conversationId (no broadcast).
+  The app answers a follower start-turn within 5000ms or returns
+  error "thread-follower-start-turn-timeout" while the turn may still start: treat that token as
+  possibly-started and never resend.`;
 }
 
 function parseArgs(argv) {
@@ -62,6 +81,7 @@ function parseArgs(argv) {
     model: null,
     effort: null,
     cwd: null,
+    turnTrigger: null,
     pipePath: DEFAULT_PIPE,
     timeoutMs: DEFAULT_TIMEOUT_MS,
     clientType: DEFAULT_CLIENT_TYPE,
@@ -92,6 +112,9 @@ function parseArgs(argv) {
         break;
       case "--cwd":
         opts.cwd = takeValue(argv, ++index, arg);
+        break;
+      case "--turn-trigger":
+        opts.turnTrigger = takeValue(argv, ++index, arg);
         break;
       case "--pipe":
         opts.pipePath = takeValue(argv, ++index, arg);
@@ -166,6 +189,10 @@ async function normalizeOptions(opts) {
     throw new Error("--task or --task-file must provide non-empty text");
   }
 
+  if (opts.turnTrigger !== null && !TURN_TRIGGER_RE.test(opts.turnTrigger)) {
+    throw new Error("--turn-trigger must match /^[a-z][a-z0-9_]*$/");
+  }
+
   if (opts.send) {
     if (!opts.ackLiveWrite) {
       throw new Error("--send requires --ack-live-write because this starts a real turn");
@@ -197,7 +224,12 @@ function buildInitializeRequest(opts) {
 }
 
 function buildFollowerStartTurnRequest(opts, clientId) {
-  const turnStartParams = {
+  // `turnStart.request`: threadId and input are the only REQUIRED fields, and threadId MUST equal
+  // params.conversationId or the renderer throws "Turn request thread does not match the
+  // conversation". The input item shape is the app's own plain user-message form.
+  const request = {
+    threadId: opts.threadId,
+    turnTrigger: opts.turnTrigger || DEFAULT_TURN_TRIGGER,
     input: [
       {
         type: "text",
@@ -207,16 +239,20 @@ function buildFollowerStartTurnRequest(opts, clientId) {
     ],
   };
 
+  // Optional operator opt-ins. Unlike the pre-repair payload these are now actually read, and
+  // model/effort rewrite the target thread's stored settings, so they stay absent by default.
   if (opts.model) {
-    turnStartParams.model = opts.model;
+    request.model = opts.model;
   }
   if (opts.effort) {
-    turnStartParams.effort = opts.effort;
+    request.effort = opts.effort;
   }
   if (opts.cwd) {
-    turnStartParams.cwd = opts.cwd;
+    request.cwd = opts.cwd;
   }
 
+  // No frame-level `hostId` key (absent, never null) and no `turnStart.context`: both are how the
+  // app itself calls the local host, and either would reproduce the original rejection.
   return {
     type: "request",
     requestId: randomUUID(),
@@ -225,7 +261,7 @@ function buildFollowerStartTurnRequest(opts, clientId) {
     method: FOLLOWER_START_TURN_METHOD,
     params: {
       conversationId: opts.threadId,
-      turnStartParams,
+      turnStart: { request },
     },
   };
 }
@@ -338,8 +374,13 @@ function dryRunResponse(opts, initializeRequest, followerRequest) {
       Boolean(AUTHORIZED_TEST_THREAD_ID && opts.threadId === AUTHORIZED_TEST_THREAD_ID),
     warnings: [
       "Dry-run only: no pipe connection and no live write were attempted.",
-      "The proven router path has no external read-only owner query; real owner proof is coupled to the first controlled follower write unless another read surface is found.",
+      "This client issues no read-only owner query: the app's method table does carry a thread-owner-discovery method, but nothing here has ever exercised it, so real owner proof stays coupled to the first controlled follower write.",
       "thread-follower-start-turn starts a real model turn when sent.",
+      "--model/--effort rewrite the target thread's stored model/reasoning settings; omit them " +
+        "unless the operator asked for that change.",
+      "The app answers a follower start-turn within 5000ms or returns error " +
+        "'thread-follower-start-turn-timeout' while the turn may still start - treat that token " +
+        "as possibly-started and never resend.",
     ],
     requests: [
       {

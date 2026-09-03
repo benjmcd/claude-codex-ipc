@@ -63,6 +63,23 @@ All notable changes to this project will be documented in this file.
   receipt. Previously only the harness's 500-character clipped command summary reached the
   receipt, so a router error such as `no-client-found` could be unrecoverable after the fact.
   Diagnostic projection only: send, certification, polling, and no-resend behavior are unchanged.
+- The Codex Desktop follower wire contract is repaired. `thread-follower-start-turn` is now sent at
+  protocol version 2 with `params.turnStart = {request:{threadId,turnTrigger,input}}` - previously
+  version 1 with `params.turnStartParams` - carrying no frame-level `hostId` key and no
+  `turnStart.context`. `request.threadId` repeats `params.conversationId`, which the app requires.
+  The shape was derived read-only from the installed Desktop bundle at build `26.901.1978.0`
+  (`app.asar` SHA-256 `09c7ef96...95183d`), never guessed; the method-version table it came from is
+  checked in under `tests/fixtures/` with the archive and member digests, and
+  `tests/test_router_contract.sh` now derives its expectation from that table and fails when the
+  table drifts, instead of pinning the constants. The previous shape was rejected at discovery,
+  before ownership was evaluated, and the router masks that and eight other distinct causes behind
+  the single token `no-client-found`. Under the new payload the app actually reads
+  `request.model`/`request.effort`/`request.cwd`, and model and effort rewrite the target thread's
+  stored settings, so the client still omits all three unless the operator passes them; a
+  `--turn-trigger` flag selects the provenance label, defaulting to the app's own literal for a
+  tool delivering a message into an existing thread. **Nonclaim: this is a static derivation
+  qualified by hermetic tests. No send has been attempted on this build, so live delivery over the
+  repaired contract is unverified, and nothing here certifies that a turn now starts.**
 - These changes are covered by sanitized hermetic tests and offline gates only. No fresh live IPC
   proof, installed-root propagation, release, or deployment is claimed.
 - Documentation and repository gates now enforce the UTF-8/LF text policy and documentation

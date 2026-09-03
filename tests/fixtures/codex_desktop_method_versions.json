@@ -1,0 +1,57 @@
+{
+  "$comment": "Derived read-only from the installed Codex Desktop app.asar. Do not hand-edit: re-derive at each release cut and after every Desktop update.",
+  "build": "26.901.1978.0",
+  "package": "OpenAI.Codex_26.901.1978.0_x64__2p2nqsd0c76g0",
+  "derivedAtUtc": "2026-09-03T10:36:50Z",
+  "reverifiedAtUtc": "2026-09-03T12:57:12Z",
+  "asar": {
+    "size": 298996178,
+    "mtimeUtc": "2026-09-02T21:05:48.620Z",
+    "sha256": "09c7ef96b5d524fef9b76270de216cf6d661ffad4727680a9b9631d18795183d"
+  },
+  "members": [
+    {
+      "path": ".vite/build/src-BXVxNf6C.js",
+      "size": 1587207,
+      "offset": 3746719,
+      "sha256": "4c68eec5cc8a1bd1a8bbe70fc7ff325999df5e47b2ed795198af85779be9fe7f"
+    },
+    {
+      "path": "webview/assets/app-initial-bca8cba1737e.js",
+      "size": 10285987,
+      "offset": 23176050,
+      "sha256": "6b27d8af43d4436f6577d75c069681409589b9e98dbfce440ca5010da9b38bd0"
+    }
+  ],
+  "frame": {
+    "payloadKey": "turnStart",
+    "requestRequiredFields": ["threadId", "input"],
+    "hostIdMustBeAbsent": true,
+    "hostIdNonNullRaisesFollowerVersionBy": 1,
+    "contextOmitted": true
+  },
+  "methodVersions": {
+    "thread-stream-state-changed": 11,
+    "thread-stream-following-changed": 1,
+    "thread-stream-following-status-requested": 1,
+    "ipc-connection-reset": 1,
+    "thread-read-state-changed": 2,
+    "thread-archived": 2,
+    "thread-unarchived": 1,
+    "thread-owner-discovery": 1,
+    "thread-follower-start-turn": 2,
+    "thread-follower-load-complete-history": 1,
+    "thread-follower-compact-thread": 1,
+    "thread-follower-steer-turn": 1,
+    "thread-follower-interrupt-turn": 4,
+    "thread-follower-update-thread-settings": 1,
+    "thread-follower-edit-last-user-turn": 2,
+    "thread-follower-command-approval-decision": 1,
+    "thread-follower-file-approval-decision": 1,
+    "thread-follower-permissions-request-approval-response": 1,
+    "thread-follower-submit-user-input": 1,
+    "thread-follower-submit-mcp-server-elicitation-response": 1,
+    "thread-follower-set-queued-follow-ups-state": 1,
+    "thread-queued-followups-changed": 1
+  }
+}

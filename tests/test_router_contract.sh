@@ -3,7 +3,12 @@
 #
 # SENTINELED:
 # - Real-client dry-run emits initialize then thread-follower-start-turn with the exact
-#   observable request keys, method names, version, target, text input, and UUID ids.
+#   observable request keys, method names, the protocol version DERIVED FROM
+#   tests/fixtures/codex_desktop_method_versions.json, the absence of a frame-level hostId,
+#   target, text input, and UUID ids.
+# - The checked-in method table fails closed on drift: editing it to the pre-repair value makes
+#   the follower assertion fail, so this file asserts the app's contract instead of pinning a
+#   constant the app no longer accepts.
 # - Dry-run byte totals equal UTF-8 JSON bytes plus the four-byte frame overhead.
 # - The real client's pure live-response projection preserves the follower request on a
 #   non-success router response without opening a pipe.
@@ -40,6 +45,16 @@ if [[ -z "$CLIENT" || -z "$WRAPPER" ]]; then
   echo "SKIP: client or wrapper is absent; router-contract sentinel not applicable"
   exit 0
 fi
+# The wire contract is asserted against a checked-in copy of the app's own method-version table,
+# derived read-only from the installed Codex Desktop bundle at a recorded build. Without it there
+# is nothing to assert against, and pinning a literal version is exactly the failure this file
+# now exists to prevent.
+METHOD_TABLE="$SCRIPT_DIR/fixtures/codex_desktop_method_versions.json"
+if [[ ! -f "$METHOD_TABLE" ]]; then
+  echo "SKIP: checked-in method table is absent; router-contract sentinel not applicable"
+  exit 0
+fi
+export CODEX_IPC_METHOD_TABLE="$METHOD_TABLE"
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
@@ -54,6 +69,7 @@ no(){ echo "  FAIL: $1"; FAIL=$((FAIL+1)); }
 
 ASSERT_JSON="$TMP/assert-json.mjs"
 cat > "$ASSERT_JSON" <<'EOF'
+import fs from "node:fs";
 let raw = "";
 process.stdin.setEncoding("utf8");
 for await (const chunk of process.stdin) raw += chunk;
@@ -95,27 +111,58 @@ switch (mode) {
     assert(keys(initialize.json.params) === "clientType", "initialize params keys drifted");
     assert(initialize.json.params.clientType === expectedClientType, "client type mismatch");
     break;
-  case "follower":
+  case "follower": {
+    // The expectation is read from the checked-in table, never written here: a literal version in
+    // this file is what let the client keep sending a shape the app had stopped accepting.
+    const tablePath = process.env.CODEX_IPC_METHOD_TABLE;
+    assert(Boolean(tablePath), "CODEX_IPC_METHOD_TABLE must point at the checked-in method table");
+    const table = JSON.parse(fs.readFileSync(tablePath, "utf8"));
+    const expectedVersion = table.methodVersions["thread-follower-start-turn"];
+    assert(Number.isInteger(expectedVersion), "method table has no thread-follower-start-turn entry");
+    assert(table.frame.payloadKey === "turnStart", "method table payload key drifted");
+    assert(table.frame.hostIdMustBeAbsent === true, "method table hostId rule drifted");
+
     assert(keys(follower) === "bytes,json,name", "follower envelope keys drifted");
     assert(
       keys(follower.json) === "method,params,requestId,sourceClientId,type,version",
       "follower request keys drifted",
     );
+    // A frame-level hostId raises the app's required version for every thread-follower-* method,
+    // so the key must be absent - not null.
+    assert(!("hostId" in follower.json), "follower frame must not carry hostId");
     assert(follower.json.type === "request", "follower type mismatch");
     assert(follower.json.method === "thread-follower-start-turn", "follower method mismatch");
-    assert(follower.json.version === 1, "follower version mismatch");
+    assert(
+      follower.json.version === expectedVersion,
+      "follower version does not match the checked-in table",
+    );
     assert(isUuid(follower.json.requestId), "follower requestId is not a UUID");
     assert(follower.json.requestId !== initialize.json.requestId, "requestIds must be distinct");
     assert(follower.json.sourceClientId === "<client-id-from-initialize>", "source client placeholder drifted");
-    assert(keys(follower.json.params) === "conversationId,turnStartParams", "follower params keys drifted");
+    assert(
+      keys(follower.json.params) === `conversationId,${table.frame.payloadKey}`,
+      "follower params keys drifted",
+    );
     assert(follower.json.params.conversationId === expectedThread, "conversationId mismatch");
-    assert(keys(follower.json.params.turnStartParams) === "input", "turnStartParams keys drifted");
-    assert(follower.json.params.turnStartParams.input.length === 1, "input count mismatch");
-    const input = follower.json.params.turnStartParams.input[0];
+    const turnStart = follower.json.params[table.frame.payloadKey];
+    assert(keys(turnStart) === "request", "turnStart keys drifted (context must be omitted)");
+    const request = turnStart.request;
+    assert(keys(request) === "input,threadId,turnTrigger", "turnStart.request keys drifted");
+    assert(
+      request.threadId === follower.json.params.conversationId,
+      "request.threadId must equal conversationId",
+    );
+    assert(
+      typeof request.turnTrigger === "string" && request.turnTrigger.length > 0,
+      "turnTrigger missing",
+    );
+    assert(Array.isArray(request.input) && request.input.length === 1, "input count mismatch");
+    const input = request.input[0];
     assert(keys(input) === "text,text_elements,type", "text input keys drifted");
     assert(input.type === "text" && input.text === expectedTask, "text input mismatch");
     assert(Array.isArray(input.text_elements) && input.text_elements.length === 0, "text_elements mismatch");
     break;
+  }
   case "framing":
     for (const request of value.requests) {
       assert(request.bytes === 4 + Buffer.byteLength(JSON.stringify(request.json)), `${request.name} byte total drifted`);
@@ -201,6 +248,48 @@ else
   no "real-client non-success projection lost follower-send occurrence"
 fi
 
+echo "== 2. the checked-in method table is provenanced and fails closed on drift =="
+if "$NODE_BIN" -e '
+const fs = require("node:fs");
+const table = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+const ok =
+  typeof table.build === "string" && table.build.length > 0 &&
+  typeof table.package === "string" && table.package.includes(table.build) &&
+  /^[0-9a-f]{64}$/.test(table.asar?.sha256 ?? "") &&
+  Number.isInteger(table.asar?.size) &&
+  Array.isArray(table.members) && table.members.length >= 2 &&
+  table.members.every((m) => /^[0-9a-f]{64}$/.test(m.sha256 ?? "") && typeof m.path === "string");
+process.exit(ok ? 0 : 1);
+' "$METHOD_TABLE" >/dev/null 2>&1; then
+  ok "method table names the build it was derived from with archive and member digests"
+else
+  no "method table lacks the build/digest provenance that makes it re-derivable"
+fi
+
+drift_case(){
+  # $1 = label, $2 = node expression mutating the parsed table object `o`
+  local label="$1" mutation="$2"
+  local drift="$TMP/method-table-drift-$RANDOM.json"
+  "$NODE_BIN" -e '
+const fs = require("node:fs");
+const o = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+(new Function("o", process.argv[3]))(o);
+fs.writeFileSync(process.argv[2], JSON.stringify(o, null, 2));
+' "$METHOD_TABLE" "$drift" "$mutation"
+  if printf '%s' "$DRY_OUT" \
+    | CODEX_IPC_METHOD_TABLE="$drift" "$NODE_BIN" "$ASSERT_JSON" follower "$THREAD" "$TASK_TEXT" "$CLIENT_TYPE" \
+      >/dev/null 2>&1; then
+    no "$label (the sentinel pins the client instead of asserting the app's table)"
+  else
+    ok "$label"
+  fi
+}
+drift_case "a table pinned to the pre-repair version 1 makes the follower assertion fail" \
+  'o.methodVersions["thread-follower-start-turn"] = 1;'
+drift_case "a table pinned to the pre-repair payload key turnStartParams makes it fail" \
+  'o.frame.payloadKey = "turnStartParams";'
+
+echo "== 3. wrapper process-result classification =="
 STUB_BIN="$TMP/bin"
 mkdir -p "$STUB_BIN"
 TOOL_LOG="$TMP/tool.log"
@@ -317,7 +406,6 @@ run_wrapper_case(){
   fi
 }
 
-echo "== 2. wrapper process-result classification =="
 run_wrapper_case acceptance 0 \
   "RESULT: gui-delivered -- reason=renderer-owned -- confirmation=rollout-hit" \
   "successful client process is classified as renderer-owned acceptance"
