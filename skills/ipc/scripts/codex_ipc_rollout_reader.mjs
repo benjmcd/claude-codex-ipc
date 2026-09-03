@@ -2169,6 +2169,21 @@ function computeOccurrence(snapshot, bucket, marker) {
       diagnostics: [diagnostic("intervening-user-message", { line: disqualifying.line })],
     };
   }
+  // One rule, one signal: a turn the boundary machine did not close is not a turn this projection
+  // may certify. The checks above catch every gap they were written for, but they cannot see a gap
+  // the machine attributed to an UNBOUND turn — a malformed line or an unknown-pair record arriving
+  // while no turn is open opens one, and its integrity window then collapses to the marker line, so
+  // the parse error that made the turn ambiguous falls outside it. Mirror the marker-proof
+  // consumer's predicate instead, which already refuses on exactly this snapshot.
+  if (snapshot.activity !== "closed" && snapshot.terminalType) {
+    return {
+      ...base,
+      waitStatus: "unavailable",
+      harvestStatus: "none",
+      harvestReason: "unparseable",
+      diagnostics: [...snapshot.diagnostics],
+    };
+  }
   if (!snapshot.terminalType) {
     return { ...base, waitStatus: "pending", harvestStatus: "none", harvestReason: "pending", diagnostics: [] };
   }

@@ -4215,6 +4215,34 @@ test("repair RED: in-turn pre-marker malformed JSON blocks lifecycle and harvest
   assert.ok(result.diagnostics.some((item) => item.code === "malformed-json"));
 });
 
+test("repair RED: a turn the boundary machine calls ambiguous can never be certified", () => {
+  const dispatch = "8270000000-2-abcdef0123456789";
+  const target = path.join(tmp, `rollout-unbound-fail-open-${WRAPPER_THREAD}.jsonl`);
+  const records = [
+    { type: "session_meta", payload: { id: WRAPPER_THREAD } },
+    "{bad json}",
+    ev("user_message", { message: `read C:/x/${dispatch}.task.md and proceed` }),
+    ev("agent_message", { phase: "final_answer", message: "leaked body" }),
+    ev("task_complete", { last_agent_message: "leaked body" }),
+  ];
+  fs.writeFileSync(
+    target,
+    `${records.map((record) => typeof record === "string" ? record : JSON.stringify(record)).join("\n")}\n`,
+  );
+  // The same file, the same parse: the activity projection and the dispatch projection are two
+  // views of one boundary machine and must not disagree about whether the turn is trustworthy.
+  const activity = readRolloutActivity(target, { rolloutThreadId: WRAPPER_THREAD });
+  assert.equal(activity.turnActivity, "ambiguous");
+  assert.equal(activity.boundarySnapshot.boundaryMode, "unbound");
+
+  const result = correlateDispatch(readRolloutFile(target), dispatch);
+  assert.equal(result.lifecycle.certifiable, false);
+  assert.equal(result.lifecycle.status, "unavailable");
+  assert.equal(result.status, "none");
+  assert.equal(result.text, null);
+  assert.ok(result.diagnostics.some((item) => item.code === "malformed-json"));
+});
+
 test("repair RED: a repeated identical user event remains an intervening-user refusal", () => {
   const dispatch = "8260000000-2-abcdef0123456789";
   const marker = `read C:/x/${dispatch}.task.md and proceed`;
