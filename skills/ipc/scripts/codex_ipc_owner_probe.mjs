@@ -1,305 +1,89 @@
 #!/usr/bin/env node
-// Negative owner-discovery probe for the Codex Desktop IPC router.
+// RETIRED: negative owner-discovery probe for the Codex Desktop IPC router.
 //
-// PURPOSE
-//   Answer one question with near-zero risk: will the live Desktop IPC router
-//   accept a `thread-follower-start-turn` from an EXTERNAL client at all?
-//   The proven write route is owner-gated; static analysis could not confirm
-//   whether an external (non-renderer) client is allowed to drive it.
+// This tool is deliberately inert. It answers no question, opens no pipe, and sends nothing.
+// The file is kept so the required-file contracts in codex_ipc_contract_audit.mjs and
+// codex_ipc_revalidate.mjs stay satisfied, and so anyone who reaches for the probe reads why it
+// is gone instead of trusting what it used to print.
 //
-// HOW IT IS SAFE
-//   - The conversationId is ALWAYS a fixed synthetic sentinel UUID set in-process
-//     (verifiably absent from the state DB; pre-checked with codex_ipc_snapshot.mjs).
-//     No external/real thread id can be supplied. Because no renderer owns the
-//     sentinel, owner-discovery must come back empty and NO turn can start on any
-//     real thread or session.
-//   - Dry-run by default. --send is required to open the pipe.
-//   - Single connection, hard timeout, no files written.
+// WHAT IT USED TO DO
+//   It sent one `thread-follower-start-turn` at protocol version 1 with a `params.turnStartParams`
+//   payload against a fixed synthetic sentinel conversationId, then interpreted the reply:
+//   a structured "client not found" was read as VIABLE (the follower route is reachable from an
+//   external client) and anything else as BLOCKED.
 //
-// INTERPRETING THE RESULT
-//   - Router returns a structured "owner/client not found" (or similar) ->
-//     the follower route IS externally reachable; only the missing owner stopped
-//     it. A real conversationId would very likely be forwarded. => VIABLE.
-//   - Router rejects/ignores the request (error "unexpected", closes, or denies
-//     the method for external clients) => follower route is NOT externally
-//     reachable. => BLOCKED (file-drop stays the answer).
+// WHY IT WAS RETIRED
+//   That inference does not hold, and on the current Desktop builds it cannot hold.
+//   1. The router matches a per-method protocol version EXACTLY, and it does so during client
+//      discovery - before ownership is ever evaluated. A version-1 `thread-follower-start-turn` is
+//      answered `canHandle:false` by every candidate client, so the probe's own frame was refused
+//      on the way in. `no-client-found` then says nothing about whether the route is reachable.
+//   2. The router collapses at least nine distinct causes into that single `no-client-found`
+//      token: no other client, every candidate refusing, a version mismatch, no registered
+//      handler, a failed ownership predicate, a discovery timeout, and a client disconnecting
+//      mid-request among them. A tool whose whole output is an interpretation of that token is
+//      reporting a guess as a finding.
+//   3. Its "safety" rested on the sentinel thread being unowned. That is a property of the host,
+//      not of the tool: the same code aimed at an owned thread starts a real model turn. A
+//      diagnostic should not be one argument away from a write.
+//
+// WHAT TO USE INSTEAD
+//   - `codex_ipc_probe.mjs` - transport/framing check that sends only `initialize`.
+//   - `codex_ipc_revalidate.mjs --allow-live-ipc-read` - the same initialize-only reachability
+//     check, wrapped in the static/presence checks.
+//   - `codex_ipc_session_inspect.mjs --thread <uuid>` - read-only thread state, no IPC at all.
+//   - `docs/COMPATIBILITY.md` and `tests/fixtures/codex_desktop_method_versions.json` - the wire
+//     contract itself, derived read-only from the installed Desktop bundle and asserted by
+//     `tests/test_router_contract.sh`.
+//   None of these can prove that an external client may drive a follower turn on a thread it does
+//   not own. That question is answered by an authorized live attempt, not by a probe.
 
-import net from "node:net";
-import { randomUUID } from "node:crypto";
-
-const DEFAULT_PIPE = "\\\\.\\pipe\\codex-ipc";
-const DEFAULT_TIMEOUT_MS = 4000;
-const FOLLOWER_METHOD = "thread-follower-start-turn";
-const FOLLOWER_VERSION = 1;
+const RETIREMENT = {
+  ok: false,
+  retired: true,
+  tool: "codex_ipc_owner_probe.mjs",
+  reason:
+    "The follower-route reachability inference this probe encoded is invalid: the router matches " +
+    "the per-method protocol version exactly during discovery, before ownership is evaluated, and " +
+    "it reports at least nine distinct causes as the single token no-client-found.",
+  sends: null,
+  useInstead: [
+    "codex_ipc_probe.mjs (initialize only)",
+    "codex_ipc_revalidate.mjs --allow-live-ipc-read (initialize only)",
+    "codex_ipc_session_inspect.mjs --thread <uuid> (read-only, no IPC)",
+    "docs/COMPATIBILITY.md + tests/fixtures/codex_desktop_method_versions.json (the wire contract)",
+  ],
+};
 
 function usage() {
   return `Usage:
-  node scripts/codex_ipc_owner_probe.mjs            # dry-run (no connection)
-  node scripts/codex_ipc_owner_probe.mjs --send --ack-live-write
-                                                     # one live negative probe
+  node scripts/codex_ipc_owner_probe.mjs [--help]
 
-Options:
-  --send                Open the pipe and send initialize + one follower-start-turn
-                        against the fixed synthetic sentinel (absent) thread id.
-  --ack-live-write      Required with --send; acknowledges this opens live IPC.
-  --timeout-ms <n>      Per-step timeout. Default: ${DEFAULT_TIMEOUT_MS}
-  --pipe <path>         Named pipe path. Default: ${DEFAULT_PIPE}
-  --client-type <text>  Router initialize clientType. Default: external-owner-probe
-  --help                Show this help.
+RETIRED. This tool is inert: it opens no pipe and sends nothing, on any argument.
 
-Safety: conversationId is ALWAYS the fixed synthetic sentinel UUID in this script,
-pre-verifiable as absent from the state DB. No real thread can be targeted; no turn
-can start on any real session. Read-only otherwise.`;
+It used to send one version-1 thread-follower-start-turn against a synthetic sentinel thread and
+read a "client not found" reply as proof that the follower route is reachable from an external
+client. That inference is invalid. The router matches the per-method protocol version exactly
+during client discovery, before ownership is evaluated, so the probe's own frame was refused on
+the way in - and the router reports at least nine distinct causes as the same no-client-found
+token. Its safety also depended on the sentinel thread being unowned, which is a property of the
+host rather than of the tool.
+
+Use instead:
+  codex_ipc_probe.mjs                                 transport/framing, sends initialize only
+  codex_ipc_revalidate.mjs --allow-live-ipc-read      same reachability check, with static checks
+  codex_ipc_session_inspect.mjs --thread <uuid>       read-only thread state, no IPC
+  docs/COMPATIBILITY.md                               the derived wire contract and its provenance`;
 }
 
-function parseArgs(argv) {
-  const opts = {
-    send: false,
-    ackLiveWrite: false,
-    timeoutMs: DEFAULT_TIMEOUT_MS,
-    pipePath: DEFAULT_PIPE,
-    clientType: "external-owner-probe",
-    help: false,
-  };
-  for (let i = 0; i < argv.length; i += 1) {
-    const arg = argv[i];
-    switch (arg) {
-      case "--send":
-        opts.send = true;
-        break;
-      case "--ack-live-write":
-        opts.ackLiveWrite = true;
-        break;
-      case "--timeout-ms": {
-        opts.timeoutMs = parsePositiveInt(takeValue(argv, ++i, arg), arg);
-        break;
-      }
-      case "--pipe":
-        opts.pipePath = argv[++i];
-        if (!opts.pipePath) throw new Error("--pipe requires a value");
-        break;
-      case "--client-type":
-        opts.clientType = argv[++i];
-        if (!opts.clientType) throw new Error("--client-type requires a value");
-        break;
-      case "--help":
-      case "-h":
-        opts.help = true;
-        break;
-      default:
-        throw new Error(`Unknown argument: ${arg}`);
-    }
-  }
-  if (opts.send && !opts.ackLiveWrite) {
-    throw new Error("--send requires --ack-live-write because this opens live IPC");
-  }
-  return opts;
+const argv = process.argv.slice(2);
+if (argv.includes("--help") || argv.includes("-h")) {
+  console.log(usage());
+  process.exit(0);
 }
 
-function takeValue(argv, index, flag) {
-  const value = argv[index];
-  if (!value || value.startsWith("--")) {
-    throw new Error(`${flag} requires a value`);
-  }
-  return value;
-}
-
-function parsePositiveInt(value, flag) {
-  if (!/^\d+$/.test(String(value))) {
-    throw new Error(`${flag} must be a positive integer`);
-  }
-  const parsed = Number.parseInt(value, 10);
-  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
-    throw new Error(`${flag} must be a positive integer`);
-  }
-  return parsed;
-}
-
-function encodeFrame(message) {
-  const body = Buffer.from(JSON.stringify(message), "utf8");
-  const header = Buffer.alloc(4);
-  header.writeUInt32LE(body.length, 0);
-  return Buffer.concat([header, body]);
-}
-
-function parseFrames(raw) {
-  const messages = [];
-  let offset = 0;
-  while (offset + 4 <= raw.length) {
-    const len = raw.readUInt32LE(offset);
-    const start = offset + 4;
-    const end = start + len;
-    if (end > raw.length) break;
-    messages.push(JSON.parse(raw.subarray(start, end).toString("utf8")));
-    offset = end;
-  }
-  return messages;
-}
-
-function connect(pipePath, timeoutMs) {
-  return new Promise((resolve, reject) => {
-    const socket = net.createConnection(pipePath);
-    const timer = setTimeout(() => {
-      socket.destroy();
-      reject(new Error(`Timed out connecting after ${timeoutMs}ms`));
-    }, timeoutMs);
-    socket.once("connect", () => {
-      clearTimeout(timer);
-      resolve(socket);
-    });
-    socket.once("error", (err) => {
-      clearTimeout(timer);
-      reject(err);
-    });
-  });
-}
-
-function sendAndWait(socket, message, timeoutMs) {
-  return new Promise((resolve, reject) => {
-    const chunks = [];
-    const timer = setTimeout(() => {
-      cleanup();
-      reject(new Error(`Timed out waiting for ${message.method} after ${timeoutMs}ms`));
-    }, timeoutMs);
-    function cleanup() {
-      clearTimeout(timer);
-      socket.off("data", onData);
-      socket.off("error", onError);
-      socket.off("close", onClose);
-    }
-    function onError(err) {
-      cleanup();
-      reject(err);
-    }
-    function onClose() {
-      cleanup();
-      reject(new Error("Socket closed before response"));
-    }
-    function onData(chunk) {
-      chunks.push(chunk);
-      let frames;
-      try {
-        frames = parseFrames(Buffer.concat(chunks));
-      } catch {
-        return;
-      }
-      const hit = frames.find((f) => f.type === "response" && f.requestId === message.requestId);
-      if (hit) {
-        cleanup();
-        resolve(hit);
-      }
-    }
-    socket.on("data", onData);
-    socket.on("error", onError);
-    socket.on("close", onClose);
-    socket.write(encodeFrame(message));
-  });
-}
-
-function buildInitialize(clientType) {
-  return { type: "request", requestId: randomUUID(), method: "initialize", params: { clientType } };
-}
-
-function buildNegativeFollower(sentinelId, clientId) {
-  return {
-    type: "request",
-    requestId: randomUUID(),
-    sourceClientId: clientId,
-    version: FOLLOWER_VERSION,
-    method: FOLLOWER_METHOD,
-    params: {
-      conversationId: sentinelId,
-      turnStartParams: {
-        input: [
-          {
-            type: "text",
-            text: "[negative-owner-probe] sentinel thread; no owner expected; no-op",
-            text_elements: [],
-          },
-        ],
-      },
-    },
-  };
-}
-
-async function main() {
-  let opts;
-  try {
-    opts = parseArgs(process.argv.slice(2));
-  } catch (err) {
-    console.error(`ERROR: ${err.message}\n`);
-    console.error(usage());
-    process.exit(1);
-  }
-  if (opts.help) {
-    console.log(usage());
-    return;
-  }
-
-  // Fixed, clearly-synthetic sentinel so its absence can be pre-verified with
-  // codex_ipc_snapshot.mjs before any send. v4-shaped; not a real thread id.
-  const sentinelId = "00000000-0000-4000-8000-00000000c0de";
-  const initialize = buildInitialize(opts.clientType);
-  const followerPreview = buildNegativeFollower(sentinelId, "<client-id-from-initialize>");
-
-  if (!opts.send) {
-    console.log(
-      JSON.stringify(
-        {
-          ok: true,
-          dryRun: true,
-          pipePath: opts.pipePath,
-          sentinelId,
-          note: "Dry-run: no connection. sentinelId is the fixed synthetic sentinel and must be absent from the state DB before a live negative probe.",
-          requests: [
-            { name: "initialize", bytes: encodeFrame(initialize).length, json: initialize },
-            { name: FOLLOWER_METHOD, bytes: encodeFrame(followerPreview).length, json: followerPreview },
-          ],
-        },
-        null,
-        2,
-      ),
-    );
-    return;
-  }
-
-  const socket = await connect(opts.pipePath, opts.timeoutMs);
-  try {
-    const initResponse = await sendAndWait(socket, initialize, opts.timeoutMs);
-    const clientId = initResponse?.result?.clientId ?? null;
-    if (initResponse.resultType !== "success" || !clientId) {
-      console.log(JSON.stringify({ ok: false, stage: "initialize", sentinelId, initResponse }, null, 2));
-      process.exit(1);
-    }
-    const follower = buildNegativeFollower(sentinelId, clientId);
-    let followerResponse;
-    let followerError = null;
-    try {
-      followerResponse = await sendAndWait(socket, follower, opts.timeoutMs);
-    } catch (err) {
-      followerError = err.message;
-    }
-    console.log(
-      JSON.stringify(
-        {
-          ok: true,
-          stage: "follower-sent",
-          sentinelId,
-          clientId,
-          sentFollower: follower,
-          followerResponse: followerResponse ?? null,
-          followerError,
-          interpretation:
-            "If followerResponse is a structured owner/client-not-found, the route is externally reachable (VIABLE). " +
-            "If followerError/close or an 'unexpected'/denied response, the route is NOT externally reachable (BLOCKED).",
-        },
-        null,
-        2,
-      ),
-    );
-  } finally {
-    socket.destroy();
-  }
-}
-
-await main();
+console.error("ERROR: codex_ipc_owner_probe.mjs is retired and sends nothing.");
+console.error("");
+console.error(usage());
+console.log(JSON.stringify(RETIREMENT, null, 2));
+process.exit(2);

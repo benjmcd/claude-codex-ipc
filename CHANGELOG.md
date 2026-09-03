@@ -80,6 +80,16 @@ All notable changes to this project will be documented in this file.
   tool delivering a message into an existing thread. **Nonclaim: this is a static derivation
   qualified by hermetic tests. No send has been attempted on this build, so live delivery over the
   repaired contract is unverified, and nothing here certifies that a turn now starts.**
+- `codex_ipc_owner_probe.mjs` is retired and inert. It sent a version-1 follower start-turn at a
+  synthetic sentinel thread and read `no-client-found` as evidence that the follower route is
+  reachable from an external client. That inference never held and cannot hold now: the router
+  matches the per-method protocol version exactly during client discovery, before ownership is
+  evaluated, so the probe's own frame was refused on the way in, and the same token stands for at
+  least nine distinct causes. Its safety also rested on the sentinel thread being unowned, which is
+  a property of the host rather than of the tool. The file stays in place - the required-file
+  contracts in the contract audit and the revalidator depend on it - and now explains its own
+  retirement and names the read-only tools that answer real questions. It opens no pipe and sends
+  nothing on any argument.
 - These changes are covered by sanitized hermetic tests and offline gates only. No fresh live IPC
   proof, installed-root propagation, release, or deployment is claimed.
 - Documentation and repository gates now enforce the UTF-8/LF text policy and documentation

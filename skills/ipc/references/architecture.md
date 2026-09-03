@@ -337,8 +337,14 @@ live `--ipc` GUI injection.
   Desktop thread index. Candidates are discovery, not send authority.
 - `codex_ipc_snapshot.mjs` — config/state-DB evidence (hashes, marker counts) around a controlled
   write; also a pure-JSON `--compare` mode.
-- `codex_ipc_probe.mjs` / `codex_ipc_owner_probe.mjs` — transport/framing research tools; dry-run
-  by default, non-mutating methods only.
+- `codex_ipc_probe.mjs` — transport/framing research tool; dry-run by default, non-mutating
+  methods only.
+- `codex_ipc_owner_probe.mjs` — **retired and inert.** It sent a version-1 follower start-turn at a
+  synthetic sentinel thread and read `no-client-found` as proof that the follower route is
+  reachable from an external client. The router matches the per-method version exactly during
+  discovery, before ownership is evaluated, so that frame was refused on the way in — and the same
+  token stands for at least nine distinct causes. The file remains only to satisfy the
+  required-file contracts and to explain itself.
 - `codex_ipc_revalidate.mjs` — static/presence checks; pipe connection only with
   `--allow-live-ipc-read` (sends `initialize` only).
 - `codex_ipc_contract_audit.mjs` — static requirement matrix from the bundled skill files.
