@@ -116,9 +116,13 @@ diagnostic naming the type once per occurrence. Six conditions still fail such a
 but is not a plain object; the payload declares a `type` key, which makes the record an unknown
 *pair* rather than an unknown envelope, and relaxing that would silently admit every future event
 class as well; the payload carries an `item`, a shape the `item_completed` adapter owns; the
-payload carries `content`, `text`, `message`, `phase` or `role` - one key wider than the item rule,
-because `textFromAllowedFields` reads `payload.message` first and a body under that key would
-otherwise go inert and unlogged; or the record's owner identity is invalid.
+payload carries `content`, `text`, `message`, `last_agent_message`, `phase` or `role` - two keys
+wider than the item rule, because the reader reads both of the additions: `textFromAllowedFields`
+reads `payload.message` first, and `last_agent_message` is projected onto every normalized record
+before and regardless of correlation retention, so a body under either key would otherwise be
+admitted unread; or the record's owner identity is invalid. With both keys guarded, "an admitted
+envelope exposes no text, role, phase or final body" holds by construction rather than by a
+downstream guard that could drift away from this one.
 
 `token_usage_record` is the class that forced the rule. It carries per-turn and per-thread token
 accounting and no body, and it is the only unnamed typeless envelope the census found, so naming it

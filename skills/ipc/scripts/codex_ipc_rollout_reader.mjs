@@ -124,14 +124,21 @@ const COMPLETED_ITEM_SEMANTICS = new Map([
 //      separator drift is folded with it because the two are indistinguishable in intent and
 //      folding fails closed. Recorded in J3b as a residual widening for the audit's next append.
 const ITEM_BODY_BEARING_KEYS = ["content", "text", "phase", "role"];
-// Envelope-level twin of the list above (owner decision OD-35). It adds `message` because
-// textFromAllowedFields reads payload.message first: an unknown envelope carrying a body under
-// that key would otherwise go inert and unlogged, which is the same failure the item rule's
-// case/separator fold exists to prevent. This list is therefore exactly the union of every key
-// textFromAllowedFields reads with the two keys that carry a speaker role, which is what makes
-// "an inert unknown envelope exposes no text, role or phase" true by construction rather than by
-// a second guard that could drift away from it.
-const ENVELOPE_BODY_BEARING_KEYS = [...ITEM_BODY_BEARING_KEYS, "message"];
+// Envelope-level twin of the list above (owner decision OD-35). It is TWO keys wider than the
+// item list, and each addition closes a route by which an inert admission could still carry a
+// body:
+//   - `message`, because textFromAllowedFields reads payload.message first, so a body under that
+//     key would otherwise go inert and unlogged - the same failure the item rule's case/separator
+//     fold exists to prevent;
+//   - `last_agent_message`, because normalizeRolloutRecord projects that key onto EVERY normalized
+//     record, before and regardless of retention. An envelope carrying a final body there would
+//     otherwise be admitted with the body on the record, and its harmlessness would rest on
+//     retainForCorrelation's envelope-type gate several hundred lines away rather than on this
+//     list - a second invariant that could drift away from this one.
+// The list is therefore the union of every key textFromAllowedFields reads, the two keys that
+// carry a speaker role, and the one key that carries a terminal body, which is what makes "an
+// inert unknown envelope exposes no text, role, phase or final body" true by construction.
+const ENVELOPE_BODY_BEARING_KEYS = [...ITEM_BODY_BEARING_KEYS, "message", "last_agent_message"];
 const foldItemClass = (name) => name.toLowerCase().replace(/[_-]/gu, "");
 const NAMED_ITEM_TYPES_FOLDED = new Set([...COMPLETED_ITEM_TYPES].map(foldItemClass));
 

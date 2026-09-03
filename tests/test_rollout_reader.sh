@@ -3761,6 +3761,11 @@ test("repair RED: an unknown typeless envelope is inert-but-logged and certifies
   assert.equal(inert.text, "");
   assert.equal(inert.role, null);
   assert.equal(inert.phase, null);
+  // No final body either. `last_agent_message` is in ENVELOPE_BODY_BEARING_KEYS, so an envelope
+  // carrying one is poison rather than an inert admission, and an admitted record therefore never
+  // projects a terminal body. Asserted here because the projection happens for every normalized
+  // record, before and regardless of correlation retention.
+  assert.equal(inert.lastAgentMessage, undefined, "an inert envelope carries no final body");
 
   // A payload-less unknown envelope carries nothing to lose and is admitted on the same terms.
   const bare = normalizeRolloutRecord({ type: "future_envelope_y" }, { rolloutThreadId: WRAPPER_THREAD });
@@ -3824,6 +3829,13 @@ test("repair RED: an unknown envelope that declares a pair, an item, or a body s
     ["body under content", { type: "future_envelope_x", payload: { content: [{ text: "hidden" }] } }],
     ["body under text", { type: "future_envelope_x", payload: { text: "hidden" } }],
     ["body under message", { type: "future_envelope_x", payload: { message: "hidden final answer" } }],
+    // `last_agent_message` is projected onto every normalized record regardless of retention, so
+    // an envelope carrying a final body there must be poison, not an inert admission carrying a
+    // body the reader never read.
+    [
+      "final body under last_agent_message",
+      { type: "future_envelope_x", payload: { last_agent_message: "hidden final answer" } },
+    ],
     ["role", { type: "future_envelope_x", payload: { role: "assistant" } }],
     ["phase", { type: "future_envelope_x", payload: { phase: "final_answer" } }],
     ["non-string envelope type", { type: 7, payload: { counter: 1 } }],

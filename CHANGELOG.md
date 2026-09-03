@@ -39,7 +39,11 @@ All notable changes to this project will be documented in this file.
   the record names no envelope type or names one that is not a string; its payload is present but
   is not a plain object; the payload declares a `type` key, which makes the record an unknown
   *pair* rather than an unknown envelope; the payload carries an `item`; the payload carries
-  `content`, `text`, `message`, `phase` or `role`; or the record's owner identity is invalid. The
+  `content`, `text`, `message`, `last_agent_message`, `phase` or `role`; or the record's owner
+  identity is invalid. The last two body keys are the ones the reader itself would read - a body
+  under `message` through `textFromAllowedFields`, a terminal body under `last_agent_message`
+  through the projection every normalized record carries - so an admitted envelope exposes no
+  text, role, phase or final body by construction rather than by a downstream guard. The
   named envelope set is pinned to a dated corpus census re-derived at each release cut: 6,176 of
   6,188 retained rollout files (the twelve above 150 MB excluded) and 17,150,905,722 bytes,
   6,479,880 records in exactly eight envelope types, measured 2026-09-03T22:08:25Z.
