@@ -383,6 +383,25 @@ export function advanceRolloutHistoryScope(value, state = null, context = {}) {
       return { status: "invalid", reason: "fork-history-parent-invalid", state: null };
     }
     if (!Object.hasOwn(payload, "subagent_history_start_ordinal")) {
+      // Owner ruling D-33 / OD-10 (2026-09-03): the producer-ordinal contract is applied only to
+      // files that declare it. A fork whose first record carries neither the boundary field nor a
+      // record-level ordinal has no ordinal stream at all, so there is no inherited-history prefix
+      // to skip and nothing for the contract to check: it is admitted and read exactly as a
+      // non-fork, which is what the pre-candidate reader did. A first record that DOES carry an
+      // ordinal while omitting the boundary field is genuine producer drift within the contract's
+      // own grammar and stays fail-closed below.
+      if (!Object.hasOwn(value ?? {}, "ordinal")) {
+        // The state is byte-identical to the plain non-fork state, including the null parent id,
+        // so cursor validation and resume treat such a file exactly like an unforked rollout.
+        current = {
+          mode: "nonfork",
+          forkedFromId: null,
+          startOrdinal: null,
+          nextOrdinal: null,
+          boundarySeen: false,
+        };
+        return { status: "admit", reason: null, state: current };
+      }
       return { status: "missing", reason: "fork-history-boundary-missing", state: null };
     }
     const startOrdinal = payload.subagent_history_start_ordinal;

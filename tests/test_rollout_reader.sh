@@ -1438,6 +1438,54 @@ test("forks without an exact producer boundary fail closed without timestamp gue
   assert.equal(result.reason, "rollout-history-boundary-missing");
 });
 
+test("ordinal-less forks are read as non-forks rather than refused", () => {
+  const owner = "00000000-0000-4000-8000-000000000000";
+  const parent = "11111111-1111-4111-8111-111111111111";
+  const turn = "22222222-2222-4222-8222-222222222222";
+  const dispatch = "8400000000-4-abcdef0123456789";
+  const cases = [
+    ["user", { thread_source: "user" }],
+    ["subagent", { thread_source: "subagent", history_mode: "legacy" }],
+  ];
+  for (const [name, meta] of cases) {
+    const target = path.join(tmp, `rollout-fork-no-ordinal-${name}-${owner}.jsonl`);
+    fs.writeFileSync(target, `${[
+      { type: "session_meta", payload: { id: owner, forked_from_id: parent, ...meta } },
+      { type: "session_meta", payload: { id: parent } },
+      { type: "event_msg", payload: { type: "task_started", turn_id: turn } },
+      { type: "event_msg", payload: { type: "user_message", turn_id: turn, message: `read C:/x/${dispatch}.task.md and proceed` } },
+      { type: "event_msg", payload: { type: "agent_message", turn_id: turn, phase: "final_answer", message: `${name} body` } },
+      { type: "event_msg", payload: { type: "task_complete", turn_id: turn, last_agent_message: `${name} body` } },
+    ].map((item) => JSON.stringify(item)).join("\n")}\n`);
+    const result = readRolloutFile(target, { rolloutThreadId: owner });
+    assert.equal(result.ok, true, name);
+    assert.ok(!result.reason, name);
+    assert.equal(
+      result.diagnostics.some((item) => item.code === "rollout-history-boundary-missing"),
+      false,
+      name,
+    );
+    assert.equal(readRolloutActivity(target, { rolloutThreadId: owner }).turnActivity, "closed", name);
+    const correlated = correlateDispatch(result, dispatch);
+    assert.equal(correlated.status, "complete", name);
+    assert.equal(correlated.text, `${name} body`, name);
+    assert.equal(correlated.lifecycle.certifiable, true, name);
+  }
+});
+
+test("a fork that declares record ordinals without a boundary still fails closed", () => {
+  const owner = "00000000-0000-4000-8000-000000000000";
+  const parent = "11111111-1111-4111-8111-111111111111";
+  const target = path.join(tmp, `rollout-fork-ordinal-no-boundary-${owner}.jsonl`);
+  fs.writeFileSync(target, `${[
+    { ordinal: 0, type: "session_meta", payload: { id: owner, forked_from_id: parent, history_mode: "producer-ordinal" } },
+    { ordinal: 1, type: "event_msg", payload: { type: "task_started", turn_id: "22222222-2222-4222-8222-222222222222" } },
+  ].map((item) => JSON.stringify(item)).join("\n")}\n`);
+  const result = readRolloutFile(target, { rolloutThreadId: owner });
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "rollout-history-boundary-missing");
+});
+
 test("fork boundary values, ordinal order, and boundary record shape fail closed", () => {
   const owner = "00000000-0000-4000-8000-000000000000";
   const parent = "11111111-1111-4111-8111-111111111111";
