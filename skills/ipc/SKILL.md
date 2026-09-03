@@ -403,10 +403,15 @@ back to the file-drop handoff and ask the user to select/create the Desktop thre
 pickup line or provide the session id.
 
 The target thread's own settings — model, reasoning effort, sandbox policy, and approval mode —
-are NEVER changed by `/ipc`: a delegated turn runs under whatever the thread is already set to
-(the router ignores `turnStartParams.model` overrides in any case — verified 2026-07-10). Do not
-attempt to override them through the delivery route, the client flags, or any other mechanism —
-never mutate. Consistent with the advisory rule above, do NOT treat a stored `sandboxPolicy` or
+are NEVER changed by `/ipc`: a delegated turn runs under whatever the thread is already set to.
+**This is enforced by omission, not by the protocol.** The 2026-07-10 observation that the router
+ignores a `turnStartParams.model` override described a payload the app no longer reads; under the
+version-2 `params.turnStart` payload the app does read `request.model` and `request.effort`, and
+writes them back as the thread's stored model and reasoning effort. The wrapper and the write-proof
+harness pass neither, and the client omits both unless an operator explicitly supplies
+`--model`/`--effort` — which is a thread-settings change, not a per-turn override. Do not attempt
+to override these through the delivery route, the client flags, or any other mechanism — never
+mutate. Consistent with the advisory rule above, do NOT treat a stored `sandboxPolicy` or
 `approvalMode` as a prediction that the reply write will fail: a stored `managed` sandbox is not a
 reason to pick a different thread. A blocked reply write is expected, not an error, and is
 certified as named-dispatch completion with `replySource=rollout-fallback` by

@@ -90,6 +90,14 @@ All notable changes to this project will be documented in this file.
   contracts in the contract audit and the revalidator depend on it - and now explains its own
   retirement and names the read-only tools that answer real questions. It opens no pipe and sends
   nothing on any argument.
+- The skill no longer claims that the router ignores a model override. That 2026-07-10 observation
+  described the `turnStartParams` payload the app has stopped reading; under the version-2
+  `params.turnStart` payload the app reads `request.model` and `request.effort` and writes them
+  back as the thread's stored model and reasoning effort. The rule is unchanged - a dispatch never
+  alters the target thread's model, reasoning, sandbox or approval settings - but it is now stated
+  as what it is: enforced by omission rather than by the protocol. Neither the wrapper nor the
+  write-proof harness passes those flags, and the client omits them unless an operator supplies
+  them.
 - These changes are covered by sanitized hermetic tests and offline gates only. No fresh live IPC
   proof, installed-root propagation, release, or deployment is claimed.
 - Documentation and repository gates now enforce the UTF-8/LF text policy and documentation
