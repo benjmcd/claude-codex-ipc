@@ -60,6 +60,12 @@ const RETAINED_EVENT_TYPES = new Set([
   "turn_aborted",
   "user_message",
 ]);
+// Named item_completed classes. Pinned to a dated corpus census: re-derived over the retained
+// ~/.codex/sessions corpus on 2026-09-03 (2026/08 + 2026/09 enumerated in full). The eleven
+// original entries plus FunctionCallOutput (91 records across 12 files, produced whenever a
+// thread uses Codex's own send_message_to_thread delegation tool) and Plan (2026/03-04 files).
+// Re-derive this census at each release cut; classes outside it are governed by the unknown-class
+// rule below, not by this set.
 const COMPLETED_ITEM_TYPES = new Set([
   "AgentMessage",
   "CollabAgentToolCall",
@@ -68,7 +74,9 @@ const COMPLETED_ITEM_TYPES = new Set([
   "DynamicToolCall",
   "Extension",
   "FileChange",
+  "FunctionCallOutput",
   "McpToolCall",
+  "Plan",
   "Reasoning",
   "SubAgentActivity",
   "UserMessage",
@@ -77,6 +85,18 @@ const COMPLETED_ITEM_SEMANTICS = new Map([
   ["AgentMessage", "agent_message"],
   ["UserMessage", "user_message"],
 ]);
+// Owner ruling B-1 (2026-09-03): an item_completed wrapper whose item class is not named above is
+// inert-but-logged rather than drift, UNLESS the item itself carries a body- or role-bearing field.
+// Such a field means the record could hold a reply body or a speaker role this reader cannot read,
+// which is the only condition under which an unrecognised class may poison its turn. The closed
+// promotion set above is unchanged by this rule: an unknown class is never promoted, never exposes
+// text, phase or role, and never reaches correlation retention.
+const ITEM_BODY_BEARING_KEYS = ["content", "text", "phase", "role"];
+
+function itemCarriesBodyOrRole(item) {
+  if (!item || typeof item !== "object") return false;
+  return ITEM_BODY_BEARING_KEYS.some((key) => Object.hasOwn(item, key));
+}
 
 function diagnostic(code, details = {}) {
   return { code, ...details };
@@ -611,7 +631,12 @@ export function normalizeRolloutRecord(value, context = {}) {
       (!expectedThreadId ||
         !outerThreadId ||
         expectedThreadId.toLowerCase() === outerThreadId.toLowerCase());
-    const accepted = Boolean(item && COMPLETED_ITEM_TYPES.has(itemType) && identityValid);
+    const namedClass = Boolean(item && itemType !== null && COMPLETED_ITEM_TYPES.has(itemType));
+    const accepted = Boolean(namedClass && identityValid);
+    // Unknown-but-inert: an unnamed class with valid outer identity and no body/role-bearing field.
+    const inertUnknown = Boolean(
+      item && !namedClass && identityValid && !itemCarriesBodyOrRole(item),
+    );
     const semanticType = accepted ? COMPLETED_ITEM_SEMANTICS.get(itemType) || null : null;
     const semanticRoleValid =
       semanticType === null || semanticEventRoleValid(envelopeType, semanticType, item);
@@ -632,7 +657,8 @@ export function normalizeRolloutRecord(value, context = {}) {
       line: context.line ?? null,
       byteOffset: context.byteOffset ?? null,
       interAgent: false,
-      knownPair: accepted && semanticRoleValid,
+      unknownItemClass: inertUnknown ? itemType : null,
+      knownPair: (accepted || inertUnknown) && semanticRoleValid,
     };
   }
 
@@ -698,6 +724,7 @@ export function normalizeRolloutRecord(value, context = {}) {
     threadId,
     itemType: null,
     itemId: null,
+    unknownItemClass: null,
     lastAgentMessage,
     text:
       interAgent || inertResponseItem || !identityValid || !semanticRoleValid
@@ -1393,6 +1420,20 @@ export function readRolloutFile(filePath, options = {}) {
           byteOffset,
           envelopeType: normalized.envelopeType,
           payloadType: normalized.payloadType,
+          itemType: normalized.itemType ?? null,
+        }),
+      );
+    } else if (normalized.unknownItemClass !== null && normalized.unknownItemClass !== undefined) {
+      // Inert-but-logged (owner ruling B-1): recorded so an unrecognised class is visible and
+      // datable, but deliberately NOT a 'schema-drift' code, because it must not poison its turn.
+      diagnostics.push(
+        diagnostic("unknown-item-class", {
+          path: filePath,
+          line: lineNumber,
+          byteOffset,
+          envelopeType: normalized.envelopeType,
+          payloadType: normalized.payloadType,
+          itemType: normalized.unknownItemClass,
         }),
       );
     }

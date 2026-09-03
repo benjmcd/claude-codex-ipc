@@ -3303,6 +3303,9 @@ const WRAPPER_TYPES = [
   "McpToolCall",
   "DynamicToolCall",
 ];
+// Named inert classes admitted by owner ruling B-1 (2026-09-03): observed on Codex's own
+// thread-delegation path (FunctionCallOutput) and in 2026/03-04 rollouts (Plan).
+const INERT_NAMED_TYPES = ["FunctionCallOutput", "Plan"];
 const completedItem = (type, extra = {}, outer = {}) => ({
   type: "event_msg",
   payload: {
@@ -3313,6 +3316,13 @@ const completedItem = (type, extra = {}, outer = {}) => ({
     item: { id: `item-${type}`, type, ...extra },
   },
 });
+// Feeds the FULL observation stream (not only retained records) through the boundary machine,
+// which is the only path a lifecycle-inert item_completed wrapper ever reaches.
+const activityOfRecords = (name, records) => {
+  const target = path.join(tmp, `rollout-act-${name}-${WRAPPER_THREAD}.jsonl`);
+  fs.writeFileSync(target, `${records.map((r) => JSON.stringify(r)).join("\n")}\n`);
+  return readRolloutActivity(target, { rolloutThreadId: WRAPPER_THREAD }).turnActivity;
+};
 
 test("repair RED: item_completed normalization is exact, outer-bound, and envelope-discriminated", () => {
   for (const type of WRAPPER_TYPES) {
@@ -3350,8 +3360,8 @@ test("repair RED: item_completed normalization is exact, outer-bound, and envelo
   assert.equal(agent.text, "sanitized final");
 
   for (const bad of [
-    completedItem("agent_message"),
-    completedItem("FutureItem"),
+    completedItem("agent_message", { role: "assistant", message: "nested spoof" }),
+    completedItem("FutureItem", { content: [{ type: "output_text", text: "future body" }] }),
     completedItem("AgentMessage", { turn_id: "other-turn" }),
     completedItem("AgentMessage", {}, { turn_id: undefined }),
     completedItem("AgentMessage", {}, { thread_id: "33333333-3333-4333-8333-333333333333" }),
@@ -3398,6 +3408,128 @@ test("repair RED: item_completed normalization is exact, outer-bound, and envelo
   });
   assert.equal(response.payloadType, "message");
   assert.equal(response.text, "response root");
+});
+
+test("repair RED: named inert item classes stay lifecycle-neutral and certify their turn", () => {
+  for (const type of INERT_NAMED_TYPES) {
+    const record = normalizeRolloutRecord(
+      completedItem(type, type === "FunctionCallOutput"
+        ? { name: "send_message_to_thread", namespace: "codex_app", output: "<delegation/>" }
+        : { steps: [{ step: "one", status: "completed" }] }),
+      { rolloutThreadId: WRAPPER_THREAD },
+    );
+    assert.equal(record.knownPair, true, `${type} must be an allowlisted inert class`);
+    assert.equal(record.payloadType, "item_completed", `${type} must remain lifecycle-inert`);
+    assert.equal(record.text, "", `${type} must not expose semantic text`);
+    assert.equal(record.phase, null, `${type} must not expose a phase`);
+    assert.equal(record.role, null, `${type} must not expose a role`);
+    assert.equal(record.unknownItemClass, null, `${type} is named, not unknown`);
+  }
+
+  const dispatch = "8300000000-3-abcdef0123456789";
+  const parsed = writeAndRead("inert-named-classes", [
+    { type: "session_meta", payload: { id: WRAPPER_THREAD } },
+    ev("task_started", { turn_id: WRAPPER_TURN }),
+    completedItem("UserMessage", {
+      content: [{ type: "input_text", text: `read C:/x/${dispatch}.task.md and proceed` }],
+    }),
+    ...INERT_NAMED_TYPES.map((type) => completedItem(type, { output: "opaque" })),
+    completedItem("AgentMessage", {
+      phase: "final_answer",
+      content: [{ type: "output_text", text: "delegating body" }],
+    }),
+    ev("task_complete", { turn_id: WRAPPER_TURN, last_agent_message: "delegating body" }),
+  ]);
+  assert.equal(parsed.diagnostics.some((item) => item.code === "schema-drift"), false);
+  assert.equal(parsed.diagnostics.some((item) => item.code === "unknown-item-class"), false);
+  const result = correlateDispatch(parsed, dispatch);
+  assert.equal(result.status, "complete");
+  assert.equal(result.text, "delegating body");
+  assert.equal(result.lifecycle.certifiable, true);
+  assert.equal(activityOfRecords("inert-named-classes-activity", [
+    { type: "session_meta", payload: { id: WRAPPER_THREAD } },
+    ev("task_started", { turn_id: WRAPPER_TURN }),
+    ...INERT_NAMED_TYPES.map((type) => completedItem(type, { output: "opaque" })),
+    ev("task_complete", { turn_id: WRAPPER_TURN, last_agent_message: "x" }),
+  ]), "closed");
+});
+
+test("repair RED: an unknown item class is inert-but-logged unless it carries body or role fields", () => {
+  const inert = normalizeRolloutRecord(
+    completedItem("FutureInertItem", { name: "opaque", output: "opaque" }),
+    { rolloutThreadId: WRAPPER_THREAD },
+  );
+  assert.equal(inert.knownPair, true);
+  assert.equal(inert.payloadType, "item_completed");
+  assert.equal(inert.itemType, "FutureInertItem");
+  assert.equal(inert.unknownItemClass, "FutureInertItem");
+  assert.equal(inert.text, "");
+  assert.equal(inert.phase, null);
+  assert.equal(inert.role, null);
+
+  for (const key of ["content", "text", "phase", "role"]) {
+    const poison = normalizeRolloutRecord(
+      completedItem("FutureBodyItem", { [key]: key === "content" ? [] : "x" }),
+      { rolloutThreadId: WRAPPER_THREAD },
+    );
+    assert.equal(poison.knownPair, false, `${key} must keep an unknown class fail-closed`);
+    assert.equal(poison.unknownItemClass, null, `${key} is drift, not an inert unknown`);
+    assert.equal(poison.text, "");
+  }
+
+  const identityBroken = normalizeRolloutRecord(
+    completedItem("FutureInertItem", {}, { thread_id: "33333333-3333-4333-8333-333333333333" }),
+    { rolloutThreadId: WRAPPER_THREAD },
+  );
+  assert.equal(identityBroken.knownPair, false);
+  assert.equal(identityBroken.unknownItemClass, null);
+
+  const dispatch = "8310000000-3-abcdef0123456789";
+  const inertParsed = writeAndRead("unknown-inert-class", [
+    { type: "session_meta", payload: { id: WRAPPER_THREAD } },
+    ev("task_started", { turn_id: WRAPPER_TURN }),
+    completedItem("UserMessage", {
+      content: [{ type: "input_text", text: `read C:/x/${dispatch}.task.md and proceed` }],
+    }),
+    completedItem("FutureInertItem", { name: "opaque", output: "opaque" }),
+    completedItem("AgentMessage", {
+      phase: "final_answer",
+      content: [{ type: "output_text", text: "unaffected body" }],
+    }),
+    ev("task_complete", { turn_id: WRAPPER_TURN, last_agent_message: "unaffected body" }),
+  ]);
+  assert.equal(inertParsed.diagnostics.some((item) => item.code === "schema-drift"), false);
+  const logged = inertParsed.diagnostics.filter((item) => item.code === "unknown-item-class");
+  assert.equal(logged.length, 1);
+  assert.equal(logged[0].itemType, "FutureInertItem");
+  assert.equal(typeof logged[0].line, "number");
+  const inertResult = correlateDispatch(inertParsed, dispatch);
+  assert.equal(inertResult.status, "complete");
+  assert.equal(inertResult.text, "unaffected body");
+  assert.equal(inertResult.lifecycle.certifiable, true);
+
+  const poisonDispatch = "8320000000-3-abcdef0123456789";
+  const poisonParsed = writeAndRead("unknown-body-class", [
+    { type: "session_meta", payload: { id: WRAPPER_THREAD } },
+    ev("task_started", { turn_id: WRAPPER_TURN }),
+    completedItem("UserMessage", {
+      content: [{ type: "input_text", text: `read C:/x/${poisonDispatch}.task.md and proceed` }],
+    }),
+    completedItem("FutureBodyItem", {
+      content: [{ type: "output_text", text: "unreadable body" }],
+    }),
+    completedItem("AgentMessage", {
+      phase: "final_answer",
+      content: [{ type: "output_text", text: "poisoned body" }],
+    }),
+    ev("task_complete", { turn_id: WRAPPER_TURN, last_agent_message: "poisoned body" }),
+  ]);
+  const drift = poisonParsed.diagnostics.filter((item) => item.code === "schema-drift");
+  assert.equal(drift.length, 1);
+  assert.equal(drift[0].itemType, "FutureBodyItem");
+  const poisonResult = correlateDispatch(poisonParsed, poisonDispatch);
+  assert.notEqual(poisonResult.status, "complete");
+  assert.equal(poisonResult.lifecycle.certifiable, false);
 });
 
 test("repair RED: semantic event roles are presence-aware across direct, wrapped, and legacy shapes", () => {
