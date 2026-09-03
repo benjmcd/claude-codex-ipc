@@ -74,16 +74,31 @@ Current-format rollouts wrap semantic records in an `item_completed` envelope wh
 names an item class. Named classes are a closed, dated set: `AgentMessage` and `UserMessage` are
 promoted to their semantic types, and the rest are admitted as lifecycle-inert. The set is pinned
 to a corpus census re-derived at each release cut, so it is a statement about what the producer was
-observed writing on a date, not a permanent grammar.
+observed writing on a date, not a permanent grammar. The current census read 88,498
+`item_completed` records in exactly thirteen classes over 6,145 retained rollout files, measured
+2026-09-03T02:42:28Z.
 
 A class outside that set is **inert but logged**: it is never promoted, never exposes text, phase
 or role, is never retained for correlation, and does not make its turn ambiguous. The reader emits
 an `unknown-item-class` diagnostic naming the class, which is a distinct code from `schema-drift`
-precisely because every drift consumer treats drift as an integrity failure. An unnamed class does
-fail closed - as `schema-drift`, now naming the class in `itemType` - when the item itself carries a
-body- or role-bearing field (`content`, `text`, `phase`, `role`), or when the record's outer
-identity is invalid. `FunctionCallOutput`, which the app writes whenever a thread uses its own
-thread-delegation tool, and `Plan` are named explicitly in the inert set.
+precisely because every drift consumer treats drift as an integrity failure. `FunctionCallOutput`,
+which the app writes whenever a thread uses its own thread-delegation tool, and `Plan` are named
+explicitly in the inert set.
+
+Four conditions still fail such a record closed, as `schema-drift` naming the class in `itemType`:
+
+1. the item itself carries a body- or role-bearing field (`content`, `text`, `phase`, `role`);
+2. the record's outer turn/thread identity is invalid;
+3. the item names **no** class, or names one that is not a string. A missing class is not an
+   unknown class: the diagnostic that makes an inert admission acceptable is the one that names
+   the class, and a class-less record has no name to log, so admitting it would certify a turn
+   containing a record the reader never classified and leave no trace of it;
+4. the class is only a case or separator variant of a named class - `agent_message`,
+   `agentmessage` or `AgentMEssage` for `AgentMessage`. The two namespaces this reader carries,
+   PascalCase item classes and snake_case semantic types, differ from each other by exactly case
+   and separator, so a variant spelling is a producer mis-spelling of a known class rather than a
+   fourteenth class, and treating it as new would let a real final answer go inert whenever its
+   body sits under a key outside the four in condition 1.
 
 Historical completion is monotone evidence for that occurrence. A readable primary reply therefore
 remains selected for viewing when later schema makes freshness opaque, but it may be stale and the
@@ -231,11 +246,17 @@ A fork whose first record carries neither the boundary field nor a top-level `or
 ordinal stream at all. It has no inherited-history prefix to skip and nothing for the contract to
 check, so it is admitted and read exactly as an unforked rollout, with the same state the unforked
 path produces. This is not a legacy-only shape: both the Codex CLI in use on 2026-09-01 and its
-successor version have been observed writing it, and it is the majority fork shape among retained
-rollouts. Treating it as a contract violation made every such thread unreadable end to end - the
-observer reported `rollout-unavailable`, the waiter returned `unavailable` before it could reach an
-existing reply file, harvest returned `unavailable`, and the write-proof preflight returned a
-non-overridable `ambiguous`.
+successor version have been observed writing it, and it is the majority shape **among forks** -
+1,200 of the 1,390 retained rollout files whose first record is a fork, out of 6,145 retained
+rollout files in all, measured 2026-09-03T02:42:28Z. Treating it as a contract violation made
+every such thread unreadable end to end - the observer reported `rollout-unavailable`, the waiter
+returned `unavailable` before it could reach an existing reply file, harvest returned
+`unavailable`, and the write-proof preflight returned a non-overridable `ambiguous`.
+Because such a fork declares no ordinal stream, the whole file is in scope for the reader,
+including any ancestor records the producer physically copied into it - the prefix the
+declared-ordinal path skips. That is the behaviour this reader had before the ordinal contract
+existed, not a new hazard, but it is the same caution the inspector's `recentItems` carries below
+and it applies here for the same reason.
 The inspector's `recentItems` is the raw physical display tail and may therefore include copied
 ancestor records; it is not child-activity evidence. Use the owner- and history-scoped
 `activitySignals` projection for that determination.

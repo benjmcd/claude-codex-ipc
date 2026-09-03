@@ -60,7 +60,8 @@ determination exits 0.
 | Diagnostic | Meaning |
 |---|---|
 | `unknown-item-class` | An `item_completed` wrapper named an item class outside the reader's dated named set. Informational only: the record is inert, the turn is unaffected, and the class is named in `itemType`. Report it so the census can be re-derived; the named set is pinned to a corpus census re-derived at each release cut. |
-| `schema-drift` with an `itemType` | The unknown item class also carried a body- or role-bearing field (`content`, `text`, `phase`, `role`), or the record's outer turn/thread identity was invalid, so the reader could not rule out an unread body or speaker. This fails the turn closed by design. |
+| `schema-drift` with an `itemType` | One of three things about an unnamed item class: it carried a body- or role-bearing field (`content`, `text`, `phase`, `role`); the record's outer turn/thread identity was invalid; or the class is only a case or separator variant of a named one (`agent_message` for `AgentMessage`), which is a producer mis-spelling rather than a new class. In each case the reader could not rule out an unread body or speaker, so it fails the turn closed by design. |
+| `schema-drift` with `itemType` `null` | The `item_completed` wrapper named no item class at all, or named one that was not a string. This is a missing class, not an unknown one: there is no name to log, so it can never be admitted as inert. Fails the turn closed by design. |
 | `terminal-copy-disambiguated` | The turn carried more than one distinct final body and the non-empty `task_complete.last_agent_message` matched exactly one of them, which was served. `finalMessageCount` reports the true number of distinct finals. This is disclosure on a certifying path, not a failure; it carries no body text. |
 | `multiple-final-message-bodies` | Distinct final bodies that the terminal copy could **not** resolve. The turn refuses. |
 

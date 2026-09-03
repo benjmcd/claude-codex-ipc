@@ -15,23 +15,31 @@ All notable changes to this project will be documented in this file.
   one final; missing or nonmatching terminal evidence remains unavailable.
 - Unknown `item_completed` item classes are now inert but logged instead of poisoning their turn.
   A class outside the named set is never promoted, never exposes text/phase/role, is never retained
-  for correlation, and emits an `unknown-item-class` diagnostic naming the class. It still fails
-  closed as `schema-drift` when the item itself carries a body- or role-bearing field
-  (`content`, `text`, `phase`, `role`) or when the record's outer identity is invalid, and the
-  `schema-drift` diagnostic now names the class in `itemType`. `FunctionCallOutput` - written
-  whenever a thread uses the app's own thread-delegation tool - and `Plan` are named explicitly in
-  the inert set. The named set is pinned to a dated corpus census re-derived at each release cut.
-  Previously any such record made its whole turn ambiguous, so an ordinary working thread that had
-  delegated could not be observed, waited on, harvested, or dispatched to, despite a real
-  `task_complete` carrying a non-empty final body.
+  for correlation, and emits an `unknown-item-class` diagnostic naming the class. Four conditions
+  still fail the record closed as `schema-drift`, which now names the class in `itemType`: the item
+  carries a body- or role-bearing field (`content`, `text`, `phase`, `role`); the record's outer
+  identity is invalid; the item names no class at all, or names one that is not a string; or the
+  class is only a case or separator variant of a named class, such as `agent_message` or
+  `agentmessage` for `AgentMessage`, which is a producer mis-spelling rather than a new class.
+  `FunctionCallOutput` - written whenever a thread uses the app's own thread-delegation tool - and
+  `Plan` are named explicitly in the inert set. The named set is pinned to a dated corpus census
+  re-derived at each release cut: 6,145 retained rollout files carrying 88,498 `item_completed`
+  records in exactly thirteen classes, measured 2026-09-03T02:42:28Z. Previously any unnamed class
+  made its whole turn ambiguous, so an ordinary working thread that had delegated could not be
+  observed, waited on, harvested, or dispatched to, despite a real `task_complete` carrying a
+  non-empty final body.
 - The fork ordinal contract now applies only where the producer declares it. A rollout whose first
   record carries `forked_from_id` with neither `subagent_history_start_ordinal` nor a top-level
   `ordinal` declares no ordinal stream, so it is admitted and read as an unforked rollout. Every
   declared-contract check is unchanged, and a first record declaring an `ordinal` while omitting
   the boundary field still fails closed. **Forked threads were affected, and this is not a
-  historical class:** nine such rollouts were written on 2026-09-01 by the Codex CLI then in use, a
-  tenth on 2026-09-03 by the successor CLI version, and 1,200 retained rollouts regress under the
-  previous behaviour today. For those threads the observer reported `rollout-unavailable`, the
+  historical class:** nine such rollouts were written on 2026-09-01 by the Codex CLI then in use
+  (`0.151.0-alpha.7.2`), a tenth on 2026-09-03 by its successor (`0.153.0-alpha.5`), and 1,200
+  rollouts regress under the previous behaviour - 1,200 of the 1,390 retained rollout files whose
+  first record is a fork, out of 6,145 retained rollout files in all, measured
+  2026-09-03T02:42:28Z. One observation under the successor is existence, not a rate: no claim is
+  made about how often it writes the shape. For those threads the observer reported
+  `rollout-unavailable`, the
   waiter returned `unavailable` before it could reach an existing reply file, harvest returned
   `unavailable`, and the write-proof preflight returned a non-overridable `ambiguous`.
 - A turn the boundary machine did not close can no longer be projected complete or certifiable. The
