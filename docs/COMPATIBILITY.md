@@ -47,6 +47,20 @@ envelope remain available.
 | Touches live Desktop state | No (read-only) |
 | Fallback | Clear runtime error if `node:sqlite` is missing; file-drop continues to work |
 
+## Rollout reader (`codex_ipc_rollout_reader.mjs`) — producer-format coupling
+
+The reader parses a file format the Codex app owns and changes without notice, so its tolerance to
+producer drift is itself a compatibility surface:
+
+| Producer shape | Reader behaviour |
+|---|---|
+| `item_completed` wrapper, item class in the named set | Parsed. `AgentMessage`/`UserMessage` are promoted to their semantic types; every other named class is lifecycle-inert. The named set is pinned to a corpus census re-derived at each release cut, so it is a dated observation, not a permanent grammar. `FunctionCallOutput` (written whenever a thread uses the app's own thread-delegation tool) and `Plan` are named explicitly. |
+| `item_completed` wrapper, unnamed item class, no body/role field | **Inert but logged.** Not promoted, no text/phase/role exposed, not retained for correlation, turn unaffected; an `unknown-item-class` diagnostic names the class. A newly introduced item class therefore does not break existing threads. |
+| `item_completed` wrapper, unnamed item class carrying `content`, `text`, `phase` or `role`, or with invalid outer identity | Fails closed as `schema-drift`, now naming the class in `itemType`. The reader will not certify a turn containing a record that might hold an unread body or speaker. |
+| Fork with `forked_from_id` **and** `subagent_history_start_ordinal` | Full producer-ordinal contract: contiguous ordinals from zero, `event_msg/thread_settings_applied` at the boundary. Any violation fails closed. |
+| Fork with `forked_from_id`, no boundary field, no top-level `ordinal` | Read as an unforked rollout. Both the Codex CLI in use on 2026-09-01 and its successor version have been observed writing this shape; it is the majority fork shape among retained rollouts, so it is a current-producer concern, not a legacy one. |
+| Fork declaring a top-level `ordinal` while omitting the boundary field | Fails closed: drift inside the contract's own grammar. |
+
 ## Thread locator (`codex_ipc_thread_locator.mjs`)
 
 Same row as the session inspector (same dependencies/stability). Output is candidate discovery
@@ -93,6 +107,7 @@ Desktop delivery; there is no headless execution path in this tool.
 | Stability | Stable tooling around experimental surfaces; write-proof live path is gated (`--send --ack-live-write [--allow-any-thread]`) and dry-run by default |
 | Touches live Desktop state | Only the write-proof **live** path (one marker turn); everything else read-only |
 | Fallback | Dry-run/static modes always available |
+| Failure diagnosis | The write-proof receipt projects the router's own follower-response error token as `send.responseError` (`null` when absent) beside `send.responseType`, and the wrapper's failure branches print the router `response` in full. Neither is proof of anything: the router returns the same token for several distinct causes, so treat it as a starting point, not a diagnosis. |
 
 ## Dated historical evidence, not current certification
 

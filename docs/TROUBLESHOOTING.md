@@ -53,7 +53,22 @@ determination exits 0.
 | `reply-missing` | Only a genuinely absent reply is eligible for waiter rollout fallback. A present-but-invalid reply returns `reply-missing` without consulting rollout fallback. An absent reply with no certifiable rollout body exhausts the eligible sources. Inspect its diagnostics/thread; do not re-harvest, auto-resend, or hand-roll rollout/report-file polling. resuming the goal in a fresh, unmarked turn will NOT re-certify the original dispatch id; machine re-certification requires a NEW dispatch with a new marker. |
 | `aborted` | The dispatch's own turn ended in `turn_aborted` (any reply is unverified). Surface it; do not wait. resuming the goal in a fresh, unmarked turn will NOT re-certify the original dispatch id; machine re-certification requires a NEW dispatch with a new marker. |
 | `superseded` | A newer `task_started` opened before the dispatch turn's terminal. A later, unrelated terminal never certifies it; issue a NEW dispatch if the goal still matters. |
-| `unavailable` | No authoritative rollout candidate, or rollout/reply-scan ambiguity / schema failure. Re-inspect the thread; never infer non-delivery or auto-resend. |
+| `unavailable` | No authoritative rollout candidate, or rollout/reply-scan ambiguity / schema failure. Re-inspect the thread; never infer non-delivery or auto-resend. Also returned whenever the turn boundary machine did not mark the turn `closed`, even if a terminal record is present: a turn whose integrity the machine could not establish is never certified. |
+
+## Rollout diagnostics you may see
+
+| Diagnostic | Meaning |
+|---|---|
+| `unknown-item-class` | An `item_completed` wrapper named an item class outside the reader's dated named set. Informational only: the record is inert, the turn is unaffected, and the class is named in `itemType`. Report it so the census can be re-derived; the named set is pinned to a corpus census re-derived at each release cut. |
+| `schema-drift` with an `itemType` | The unknown item class also carried a body- or role-bearing field (`content`, `text`, `phase`, `role`), or the record's outer turn/thread identity was invalid, so the reader could not rule out an unread body or speaker. This fails the turn closed by design. |
+| `terminal-copy-disambiguated` | The turn carried more than one distinct final body and the non-empty `task_complete.last_agent_message` matched exactly one of them, which was served. `finalMessageCount` reports the true number of distinct finals. This is disclosure on a certifying path, not a failure; it carries no body text. |
+| `multiple-final-message-bodies` | Distinct final bodies that the terminal copy could **not** resolve. The turn refuses. |
+
+Forked threads whose first record carries `forked_from_id` with no
+`subagent_history_start_ordinal` and no top-level `ordinal` are read as ordinary rollouts. If such
+a thread previously returned `rollout-unavailable` from the observer, `unavailable` from the waiter
+and harvester, and a non-overridable `ambiguous` from the write-proof preflight, that is the
+behaviour this release changes; re-run the read rather than resending.
 
 ## Test issues
 

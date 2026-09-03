@@ -13,6 +13,43 @@ All notable changes to this project will be documented in this file.
   remaps, and unsupported pagination/alias ambiguity fail visibly instead of borrowing completion.
   Multiple distinct final records certify only when one nonempty terminal body copy matches exactly
   one final; missing or nonmatching terminal evidence remains unavailable.
+- Unknown `item_completed` item classes are now inert but logged instead of poisoning their turn.
+  A class outside the named set is never promoted, never exposes text/phase/role, is never retained
+  for correlation, and emits an `unknown-item-class` diagnostic naming the class. It still fails
+  closed as `schema-drift` when the item itself carries a body- or role-bearing field
+  (`content`, `text`, `phase`, `role`) or when the record's outer identity is invalid, and the
+  `schema-drift` diagnostic now names the class in `itemType`. `FunctionCallOutput` - written
+  whenever a thread uses the app's own thread-delegation tool - and `Plan` are named explicitly in
+  the inert set. The named set is pinned to a dated corpus census re-derived at each release cut.
+  Previously any such record made its whole turn ambiguous, so an ordinary working thread that had
+  delegated could not be observed, waited on, harvested, or dispatched to, despite a real
+  `task_complete` carrying a non-empty final body.
+- The fork ordinal contract now applies only where the producer declares it. A rollout whose first
+  record carries `forked_from_id` with neither `subagent_history_start_ordinal` nor a top-level
+  `ordinal` declares no ordinal stream, so it is admitted and read as an unforked rollout. Every
+  declared-contract check is unchanged, and a first record declaring an `ordinal` while omitting
+  the boundary field still fails closed. **Forked threads were affected, and this is not a
+  historical class:** nine such rollouts were written on 2026-09-01 by the Codex CLI then in use, a
+  tenth on 2026-09-03 by the successor CLI version, and 1,200 retained rollouts regress under the
+  previous behaviour today. For those threads the observer reported `rollout-unavailable`, the
+  waiter returned `unavailable` before it could reach an existing reply file, harvest returned
+  `unavailable`, and the write-proof preflight returned a non-overridable `ambiguous`.
+- A turn the boundary machine did not close can no longer be projected complete or certifiable. The
+  dispatch projection now applies the marker proof's own predicate: a snapshot carrying a terminal
+  but not `closed` returns unavailable with the snapshot's diagnostics. Previously a malformed line
+  arriving while no turn was open opened a turn whose integrity window was too narrow to see that
+  parse error, so a turn-less `task_complete` could serve a body as certified while the activity
+  projection of the same parse reported `ambiguous`.
+- When the terminal body copy resolves several distinct final bodies to one, the resolution is now
+  disclosed instead of erased: `finalMessageCount` reports the true number of distinct logical
+  finals, and the certifying path emits a `terminal-copy-disambiguated` diagnostic carrying the
+  terminal line, the turn id and that count, and no body text. `multiple-final-message-bodies`
+  stays reserved for turns that refuse. Selection itself is unchanged.
+- The wrapper's live-failure branches now print the router's own response in full instead of the
+  first twenty lines of the client document. The client pretty-prints `response` after the echoed
+  request, so the previous clip ended inside the request echo and never showed why a send failed.
+  The echoed request, which carries the dispatch transport path and task text, is deliberately not
+  printed.
 - `codex_ipc_write_proof.mjs` now projects the router's structured follower-response error token
   as `send.responseError` (`null` when absent) beside `send.responseType` in the live proof
   receipt. Previously only the harness's 500-character clipped command summary reached the

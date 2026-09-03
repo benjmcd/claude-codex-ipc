@@ -54,7 +54,36 @@ The rollout correlator exposes orthogonal evidence rather than one overloaded su
 
 Within the bound turn, final bodies are deduplicated by exact text. Multiple distinct explicit
 `final_answer` bodies certify only when a nonempty `task_complete.last_agent_message` exactly
-matches one body; missing, empty, or nonmatching terminal evidence remains unavailable.
+matches one body; missing, empty, or nonmatching terminal evidence remains unavailable. When that
+terminal copy does resolve several distinct finals to one, the resolution is disclosed rather than
+erased: `finalMessageCount` reports the true number of distinct logical finals, and the certifying
+path emits a `terminal-copy-disambiguated` diagnostic carrying the terminal line, the turn id and
+that count. The diagnostic never carries body text, and `multiple-final-message-bodies` stays
+reserved for turns that refuse.
+
+A turn the boundary machine did not close is never certified, whatever the terminal record says.
+The dispatch projection applies the same predicate the marker proof applies: a snapshot carrying a
+terminal but not marked `closed` returns `unavailable`/`unparseable` with the snapshot's own
+diagnostics. This matters for turns the machine opened defensively rather than from a
+`task_started` record, whose integrity window is too narrow for the in-window checks to see the
+gap that made them ambiguous.
+
+### `item_completed` item classes
+
+Current-format rollouts wrap semantic records in an `item_completed` envelope whose `item.type`
+names an item class. Named classes are a closed, dated set: `AgentMessage` and `UserMessage` are
+promoted to their semantic types, and the rest are admitted as lifecycle-inert. The set is pinned
+to a corpus census re-derived at each release cut, so it is a statement about what the producer was
+observed writing on a date, not a permanent grammar.
+
+A class outside that set is **inert but logged**: it is never promoted, never exposes text, phase
+or role, is never retained for correlation, and does not make its turn ambiguous. The reader emits
+an `unknown-item-class` diagnostic naming the class, which is a distinct code from `schema-drift`
+precisely because every drift consumer treats drift as an integrity failure. An unnamed class does
+fail closed - as `schema-drift`, now naming the class in `itemType` - when the item itself carries a
+body- or role-bearing field (`content`, `text`, `phase`, `role`), or when the record's outer
+identity is invalid. `FunctionCallOutput`, which the app writes whenever a thread uses its own
+thread-delegation tool, and `Plan` are named explicitly in the inert set.
 
 Historical completion is monotone evidence for that occurrence. A readable primary reply therefore
 remains selected for viewing when later schema makes freshness opaque, but it may be stale and the
@@ -188,11 +217,25 @@ owner. Later `session_meta` records are lineage only: their `payload.id` must al
 or have been predeclared through `forked_from_id` on an admitted metadata record; they may extend
 that lineage through their own `forked_from_id`, but never rebind the owner. Any recognized
 record-level `thread_id` carrier must resolve to one valid UUID matching the pinned owner.
-Forked rollouts additionally require a valid `forked_from_id`, a safe-integer
-`subagent_history_start_ordinal >= 1`, contiguous top-level ordinals beginning at zero, and
-`event_msg/thread_settings_applied` at that boundary. Earlier records are parsed and hashed but
-never observed, correlated, or projected as child activity. Missing, malformed, gapped, reordered,
-or unreached boundaries fail closed; UUID timestamps are never provenance authority.
+Forked rollouts are read under the producer-ordinal contract **only where the producer declares
+it**. When the first record carries `forked_from_id` together with a
+`subagent_history_start_ordinal`, that contract applies in full: a valid `forked_from_id`, a
+safe-integer `subagent_history_start_ordinal >= 1`, contiguous top-level ordinals beginning at
+zero, and `event_msg/thread_settings_applied` at that boundary. Earlier records are parsed and
+hashed but never observed, correlated, or projected as child activity. Malformed, gapped,
+reordered, or unreached boundaries fail closed, as does a first record that declares a top-level
+`ordinal` while omitting the boundary field - that is drift inside the contract's own grammar.
+UUID timestamps are never provenance authority.
+
+A fork whose first record carries neither the boundary field nor a top-level `ordinal` declares no
+ordinal stream at all. It has no inherited-history prefix to skip and nothing for the contract to
+check, so it is admitted and read exactly as an unforked rollout, with the same state the unforked
+path produces. This is not a legacy-only shape: both the Codex CLI in use on 2026-09-01 and its
+successor version have been observed writing it, and it is the majority fork shape among retained
+rollouts. Treating it as a contract violation made every such thread unreadable end to end - the
+observer reported `rollout-unavailable`, the waiter returned `unavailable` before it could reach an
+existing reply file, harvest returned `unavailable`, and the write-proof preflight returned a
+non-overridable `ambiguous`.
 The inspector's `recentItems` is the raw physical display tail and may therefore include copied
 ancestor records; it is not child-activity evidence. Use the owner- and history-scoped
 `activitySignals` projection for that determination.
