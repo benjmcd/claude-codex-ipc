@@ -107,7 +107,11 @@ All notable changes to this project will be documented in this file.
   2026-09-03T22:18:50.443Z, after the Desktop updated some six hours later: the method-version
   table is identical entry for entry, the payload key, the thread-identity check and the `hostId`
   version rule are all unchanged, and the main bundle member carrying the table is byte-identical
-  across the update. The method-version table it came from is
+  across the update. It was **re-verified unchanged again against the next build
+  `26.901.4073.0`** (`app.asar` SHA-256 `689a59ec...90b23e`) at 2026-09-05T02:33:11.490Z, read from
+  the archive of the build then both installed and running: the same four facts hold, and this time
+  both members carrying them were replaced, with the facts unchanged within them. The
+  method-version table it came from is
   checked in under `tests/fixtures/` with the archive and member digests, and
   `tests/test_router_contract.sh` now derives its expectation from that table and fails when the
   table drifts, instead of pinning the constants. The previous shape was rejected at discovery,
@@ -116,10 +120,18 @@ All notable changes to this project will be documented in this file.
   `request.model`/`request.effort`/`request.cwd`, and model and effort rewrite the target thread's
   stored settings, so the client still omits all three unless the operator passes them; a
   `--turn-trigger` flag selects the provenance label, defaulting to the app's own literal for a
-  tool delivering a message into an existing thread. **Nonclaim: this is a static derivation
-  qualified by hermetic tests. No send has been attempted on either of the two builds named above,
-  so live delivery over the repaired contract is unverified, and nothing here certifies that a turn
-  now starts.**
+  tool delivering a message into an existing thread. **Live status. The contract above is a static
+  derivation qualified by hermetic tests; live evidence now exists, and it is four separate facts
+  that are not interchangeable. (1) The version-2 frame was accepted live by `26.901.4073.0` on
+  2026-09-05: a direct write-proof run from a working tree of this branch started a real turn, and
+  the reader bound the proof to that turn id from the target thread's own rollout. (2) The `--ipc`
+  wrapper, run the same day from the same working tree, delivered into a thread the renderer already
+  owned, so the autoload, foreground-switch and deep-link paths are still unexercised at version 2.
+  (3) The pre-tag delivery smoke from the merged primary checkout has NOT been run; it is ordered
+  before the tag and before propagation. (4) Acceptance through the normal installed route has NOT
+  been achieved: the installed clients still send version 1, an installed-wrapper attempt that day
+  admitted nothing, and merging this branch does not update them — only propagation does. Nothing
+  here certifies the installed route.**
 - `codex_ipc_owner_probe.mjs` is retired and inert. It sent a version-1 follower start-turn at a
   synthetic sentinel thread and read `no-client-found` as evidence that the follower route is
   reachable from an external client. That inference never held and cannot hold now: the router
