@@ -14,6 +14,8 @@
 #   non-success router response without opening a pipe.
 # - Wrapper process-result classification covers acceptance, no-client-found, and
 #   malformed/unknown failures using stubbed client, observer, and inspector processes.
+# - Runtime CLI entry guards preserve direct execution through owned path aliases,
+#   reject usage/resolution failures, and keep ordinary/eval/stdin imports inert.
 #
 # EXCLUDED:
 # - Raw four-byte frame header contents/endianness (dry-run exposes only total bytes).
@@ -75,6 +77,152 @@ FAIL=0
 
 ok(){ echo "  PASS: $1"; PASS=$((PASS+1)); }
 no(){ echo "  FAIL: $1"; FAIL=$((FAIL+1)); }
+
+# CLI_GUARD_BEGIN: real processes and owned aliases only; no host state or IPC.
+if CLI_GUARD_SCRIPTS="$(dirname "$CLIENT")" \
+  "$NODE_BIN" --input-type=module <<'CLI_GUARD_NODE'
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { spawnSync } from "node:child_process";
+const source = fs.realpathSync(process.env.CLI_GUARD_SCRIPTS);
+const tempParent = fs.realpathSync(os.tmpdir());
+const owned = fs.mkdtempSync(path.join(tempParent, "ipc-guard-"));
+const scripts = path.join(owned, "owned scripts");
+const alias = path.join(owned, "alias scripts");
+let aliasCreated = false;
+let failed = 0;
+function check(name, fn) {
+  try { fn(); console.log(`PASS: CLI guard ${name}`); }
+  catch (error) { failed++; console.error(`FAIL: CLI guard ${name}: ${error.message}`); }
+}
+try {
+  fs.mkdirSync(scripts);
+  for (const entry of fs.readdirSync(source, { withFileTypes: true })) {
+    if (entry.isFile() && entry.name.endsWith(".mjs")) {
+      fs.copyFileSync(path.join(source, entry.name), path.join(scripts, entry.name));
+    }
+  }
+  fs.symlinkSync(scripts, alias, process.platform === "win32" ? "junction" : "dir");
+  aliasCreated = true;
+  assert.equal(fs.realpathSync(alias), fs.realpathSync(scripts));
+  const home = path.join(owned, "home");
+  fs.mkdirSync(home);
+  const env = { ...process.env, NODE_OPTIONS: "", NODE_NO_WARNINGS: "1",
+    HOME: home, USERPROFILE: home, CODEX_HOME: path.join(home, ".codex"),
+    CODEX_IPC_ROOT: path.join(home, "transport"),
+    CODEX_IPC_SESSIONS_ROOT: path.join(home, "sessions") };
+  const importer = path.join(owned, "ordinary import.mjs");
+  const importBody = 'import { pathToFileURL } from "node:url"; await import(pathToFileURL(process.env.CLI_GUARD_TARGET).href + (process.env.CLI_GUARD_SUFFIX || ""));';
+  fs.writeFileSync(importer, importBody);
+  const preload = path.join(owned, "realpath failure.cjs");
+  fs.writeFileSync(preload, `
+const fs = require("node:fs");
+const { fileURLToPath } = require("node:url");
+const { syncBuiltinESMExports } = require("node:module");
+const original = fs.realpathSync.native;
+fs.realpathSync.native = function (value, ...rest) {
+  if (value instanceof URL && fileURLToPath(value) === process.env.CLI_GUARD_TARGET) {
+    fs.appendFileSync(process.env.CLI_GUARD_FAULT_HIT, "hit\\n");
+    throw Object.assign(new Error("synthetic entry resolution failure"), { code: "EACCES" });
+  }
+  return original(value, ...rest);
+};
+syncBuiltinESMExports();
+`);
+  for (const name of [
+    "codex_ipc_client.mjs", "codex_ipc_reply_harvest.mjs",
+    "codex_ipc_rollout_observe.mjs", "codex_ipc_wait.mjs", "codex_ipc_write_proof.mjs",
+  ]) {
+    const target = path.join(scripts, name);
+    const aliased = path.join(alias, name);
+    assert.ok(fs.existsSync(target), `copied module missing: ${name}`);
+    const run = (args, input, extra = {}) => {
+      const result = spawnSync(process.execPath, args, { cwd: owned,
+        env: { ...env, CLI_GUARD_TARGET: target, ...extra }, input,
+        encoding: "utf8", timeout: 10000, windowsHide: true });
+      assert.ifError(result.error);
+      assert.equal(result.signal, null, "child was terminated");
+      return result;
+    };
+    const quiet = (result) => {
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(result.stdout, "", "import ran the CLI");
+      assert.equal(result.stderr, "", "import emitted a diagnostic");
+    };
+    const usageError = (result) => {
+      assert.notEqual(result.status, 0, "invalid option exited successfully");
+      assert.equal(result.stdout, "", "usage error emitted a success result");
+      assert.match(result.stderr, /--guard-invalid-option/, "CLI did not diagnose the option");
+    };
+    for (const [label, entry, prefix] of [
+      ["physical", target, []], ["alias with spaces", aliased, []],
+      ["title=-e", aliased, ["--title=-e"]], ["title=--eval", aliased, ["--title=--eval"]],
+      ["V8 -expose-gc", aliased, ["-expose-gc"]],
+      ["print without expression", aliased, ["-p", "--"]],
+      ["print followed by option", aliased, ["--print", "--title=x"]],
+    ]) {
+      check(`${name}: ${label} rejects invalid option`, () =>
+        usageError(run([...prefix, entry, "--guard-invalid-option"])));
+    }
+    if (["codex_ipc_client.mjs", "codex_ipc_write_proof.mjs"].includes(name)) {
+      check(`${name}: alias help executes`, () => {
+        const result = run([aliased, "--help"]);
+        assert.equal(result.status, 0, result.stderr);
+        assert.match(result.stdout, /usage:/i);
+      });
+    }
+    for (const arg of [undefined, path.join(owned, "nonexistent.mjs"), target]) {
+      const trailing = arg === undefined ? [] : [arg];
+      const label = arg === undefined ? "absent" : arg === target ? "module path" : "nonexistent";
+      check(`${name}: ordinary import with ${label} argument is silent`, () =>
+        quiet(run([importer, ...trailing])));
+      check(`${name}: eval import with ${label} argv is silent`, () =>
+        quiet(run(["--input-type=module", "-e", importBody, ...trailing])));
+      check(`${name}: stdin import with ${label} trailing argument is silent`, () =>
+        quiet(run(["--input-type=module", "-", ...trailing], importBody)));
+    }
+    check(`${name}: implicit stdin import without entry argv is silent`, () =>
+      quiet(run(["--input-type=module"], importBody)));
+    for (const suffix of ["?import-only", "#import-only"]) {
+      check(`${name}: ordinary import ${suffix} is silent`, () =>
+        quiet(run([importer], undefined, { CLI_GUARD_SUFFIX: suffix })));
+    }
+    check(`${name}: realpath failure cannot report successful empty CLI`, () => {
+      const hit = path.join(owned, name + ".fault");
+      const result = run(["--require", preload, target, "--guard-invalid-option"], undefined,
+        { CLI_GUARD_FAULT_HIT: hit });
+      assert.ok(fs.existsSync(hit), "resolution failure was not injected");
+      assert.notEqual(result.status, 0, "resolution failure exited successfully");
+      assert.equal(result.stdout, "", "resolution failure emitted a success result");
+      assert.equal(result.stderr, name === "codex_ipc_wait.mjs" ?
+        'ERROR {"code":"entrypoint-resolution-failed"}\n' :
+        "ERROR: entrypoint-resolution-failed\n", "resolution failure had the wrong diagnostic");
+    });
+  }
+  assert.deepEqual(fs.readdirSync(home), [], "guard checks wrote into isolated host state");
+} catch (error) {
+  failed++;
+  console.error(`FAIL: CLI guard fixture: ${error.stack}`);
+} finally {
+  // Only this mkdtemp tree is owned. Unlink its verified alias before recursive cleanup.
+  assert.equal(path.dirname(fs.realpathSync(owned)), tempParent);
+  assert.match(path.basename(owned), /^ipc-guard-/);
+  if (aliasCreated) {
+    assert.equal(fs.realpathSync(alias), fs.realpathSync(scripts));
+    fs.unlinkSync(alias);
+  }
+  fs.rmSync(owned, { recursive: true, force: true });
+}
+process.exitCode = failed ? 1 : 0;
+CLI_GUARD_NODE
+then
+  ok "CLI entry guards preserve direct execution and inert imports"
+else
+  no "CLI entry-guard regressions"
+fi
+# CLI_GUARD_END
 
 ASSERT_JSON="$TMP/assert-json.mjs"
 cat > "$ASSERT_JSON" <<'EOF'

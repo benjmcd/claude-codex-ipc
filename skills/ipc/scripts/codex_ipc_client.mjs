@@ -7,7 +7,7 @@
 import net from "node:net";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
+import { realpathSync } from "node:fs";
 
 const DEFAULT_PIPE = "\\\\.\\pipe\\codex-ipc";
 const DEFAULT_TIMEOUT_MS = 6000;
@@ -480,6 +480,31 @@ async function main() {
   }
 }
 
-if (process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url) {
+function isMainModule() {
+  const entry = process.argv[1];
+  if (!entry || entry === "-") return false;
+  // Node keeps consumed eval code in execArgv, but excludes the script entry.
+  // A print flag followed by another option can still launch a file normally.
+  const args = process.execArgv;
+  if (args.some((arg, index) => {
+    if (arg === "-e" || arg === "-pe" || arg === "--eval" || arg.startsWith("--eval=")) return true;
+    const print = arg === "-p" || arg === "--print" || arg.startsWith("--print=");
+    const code = args[index + 1];
+    return print && typeof code === "string" && code.length > 0 && !code.startsWith("-");
+  })) return false;
+  const moduleUrl = new URL(import.meta.url);
+  if (moduleUrl.search || moduleUrl.hash) return false;
+  return path.toNamespacedPath(realpathSync.native(path.resolve(entry))) ===
+    path.toNamespacedPath(realpathSync.native(moduleUrl));
+}
+
+let runAsMain = false;
+try {
+  runAsMain = isMainModule();
+} catch {
+  console.error("ERROR: entrypoint-resolution-failed");
+  process.exitCode = 1;
+}
+if (runAsMain) {
   await main();
 }
