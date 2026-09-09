@@ -360,11 +360,16 @@ Exit-code-driven callers may add the opt-in `--status-exit-codes`, which maps th
 stay exit 1 with no token); the token remains the sole stdout line. Without the flag every
 determination exits 0.
 Compose handoffs with the completion contract in
-[references/handoff-template.md](references/handoff-template.md): self-verify BEFORE writing the
-reply; the reply is the last act of the turn.
+[references/handoff-template.md](references/handoff-template.md): finish and inspect the complete
+result, self-verify it BEFORE a separate single reply-write attempt (never combine result
+production and reply writing in one command); the reply is the last act of the turn; the
+dispatcher still checks the returned body against the task's done-criteria before accepting it.
 
 Producer denied-reply protocol (a denied reply write is EXPECTED, not an error): the generated
-payload instructs the follower to self-verify, then attempt the printed reply path exactly once. On
+payload instructs the follower to finish and inspect the complete result, self-verify it, then
+attempt the printed reply path exactly once as a separate final action. Only an error returned by
+that write supports a denial claim; a calculation, command-construction, or parse failure is
+reported as its actual failure, and empty output is never evidence of a denial. On
 a sandbox/permission denial the follower must NOT retry, debug, request escalation, or substitute
 another file — it states the denial in one line AND puts the full substantive result (not just the
 denial) in its final agent message, then completes. A one-line denial with no result is a contract
@@ -372,8 +377,11 @@ violation. On the dispatcher side, the opt-in `codex_ipc_wait.mjs --accept-rollo
 on a known-UUID `--ipc` dispatch certifies named-dispatch `done` with
 `replySource=rollout-fallback` but intentionally emits no body. Retrieve and render the full final
 message with the existing read-only dual-source `scripts/codex_ipc_replies.sh` viewer; flagless
-invocation stays file-primary and filedrop is not auto-recoverable. Dispatch never changes the
-target thread's model, reasoning, sandbox, or approval.
+invocation stays file-primary and filedrop is not auto-recoverable. The wrapper dispatch never
+changes the target thread's model, reasoning, sandbox, or approval: it omits every version-2
+override field. A direct client `--model`/`--effort` override is a thread-settings change, not a
+per-turn override (see the new-session-mode note below and `docs/COMPATIBILITY.md`); `/ipc` never
+passes them.
 
 ## New-session mode
 

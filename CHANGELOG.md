@@ -4,6 +4,26 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- The generated handoff payload and its committed example under `skills/ipc/examples/` now instruct
+  the receiver to finish and inspect the complete result before a separate, single reply-write
+  attempt, never to combine result production with the reply write in one command, and to claim a
+  denied write only from the literal error returned by that write: a calculation,
+  command-construction or parse failure is reported as its actual failure, and empty or missing
+  output is never evidence of a denial. `SKILL.md`'s completion-contract summary and its
+  thread-settings sentence now match `references/handoff-template.md` and the version-2 override
+  documentation. Prompted by the 2026-09-08 candidate check, in which a receiver that fused compute
+  and reply write into one malformed command returned an unsupported denial and no result.
+- Seven CLI entrypoints (`codex_ipc_client.mjs`, `codex_ipc_reply_harvest.mjs`,
+  `codex_ipc_rollout_observe.mjs`, `codex_ipc_wait.mjs`, `codex_ipc_write_proof.mjs`,
+  `tests/check_text_integrity.mjs`, `tests/check_docs_quality.mjs`) now decide whether they are the
+  main module by comparing native physical paths (`realpathSync.native`) instead of lexical path
+  spellings. Previously a launch through a directory-junction or symlink ancestor could skip the
+  command body and exit 0 with no output while imports stayed inert. The repaired predicate runs the
+  command from physical and aliased paths, keeps ordinary, eval and stdin imports inert, matches
+  only exact eval flags (so `-expose-gc` still runs), and turns a failed path resolution into an
+  explicit error exit. Latent rather than observed on the development host (no reparse points in
+  the measured topology); covered by a process matrix in `tests/test_router_contract.sh` and
+  regression blocks in the two checkers.
 - IPC send and recovery paths now normalize UUID inputs, classify client and inspector results from
   exact structured fields, and keep ambiguous post-attempt outcomes non-retryable. Negative bounded
   inspection is diagnostic only: it cannot prove non-admission or authorize a resend.
@@ -113,13 +133,19 @@ All notable changes to this project will be documented in this file.
   both members carrying them were replaced, with the facts unchanged within them.
   Read-only re-derivation on **`26.901.6511.0`** (`app.asar` SHA-256 `e75bae2b...d659e`),
   rebound to the installed and running build on 2026-09-08, preserves the examined wire behavior
-  but identifies a **changed conditional admission guard**. The examined optional pre-start
-  callback rejects when the effective model is `gpt-6-astra` or `gpt-6-astra-wm` and the effective
+  but identifies a **changed conditional admission guard**: the app's Daybreak pre-start guard
+  (user-facing message "Turn off Daybreak or choose another model to continue", preserved in the
+  fixture) rejects when the effective model is `gpt-6-astra` or `gpt-6-astra-wm` and the effective
   program is non-null and unequal to `standard`. Model selection uses prepared collaboration
   settings, then the prepared request model, then the conversation's latest model; the app's
   program resolver takes precedence over the request's `cyberAccessProgram`. Omission can inherit
   settings and does not force `standard`; `cyberAccessProgram` is distinct from `serviceTier`.
   A missing/null program does not trigger this particular guard, which does not prove admission.
+  Calibration datum: on 2026-09-07 a `gpt-6-astra` thread at `ultra` reasoning effort on this build
+  (bound by the rollout's CLI version and the install timeline, not by a dispatch-time package
+  read) admitted a wrapper dispatch from the pre-repair candidate (`8f78a413`) and ran to
+  `task_complete`, consistent with a null or `standard` program; whether a router-initiated
+  follower start-turn traverses this composer callback at all remains undetermined.
   The fixture preserves earlier build evidence and appends archive/member identities, byte
   anchors, the changed guard and its bounded static comparison. Client wire values and runtime
   behavior are unchanged by this qualification update; it supplies no new live-acceptance proof.
@@ -169,6 +195,16 @@ All notable changes to this project will be documented in this file.
 - Documentation and repository gates now enforce the UTF-8/LF text policy and documentation
   contracts. Intentional Unicode is retained. Primary dispatch behavior did not change, no fresh
   live proof was performed, and no release or installed propagation is implied.
+- **Subsequent candidate-only live evidence on 2026-09-08 UTC.** At exact source base
+  `1731a824850c1077fade0f58bdfff8d125007b53`, three wrapper invocations, each into an owner-named
+  target thread, on Codex Desktop `26.901.6511.0` reached `gpt-5.6-luna` threads at medium
+  reasoning. A was received and reached its terminal turn, but failed substantive-answer
+  acceptance; a planned B was not run because its prerequisite, A, had failed. C's separate reply
+  write returned actual `EPERM`, and the complete canonical result was recovered through the
+  rollout fallback. D wrote the exact 178-byte primary reply in a writable isolated transport
+  root. The wrapper does not emit successful raw router JSON, so none was captured. This is
+  candidate-wrapper evidence only: it is not normal installed `/ipc` acceptance or the merged-
+  primary Step 16b smoke, and it establishes neither repeatability nor model generalization.
 - Current recovery documentation supersedes older dated shorthand that described a blocked reply
   as recovered through `codex_ipc_wait --accept-rollout-fallback`. The waiter certifies
   named-dispatch completion and `replySource=rollout-fallback` but intentionally emits no body;

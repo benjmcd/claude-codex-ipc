@@ -14,12 +14,17 @@ When finished, write your reply/result to this per-dispatch reply file (create i
 Use that absolute path exactly. It is unique to this handoff, so your reply is
 correlated to this task with no ambiguity even if other handoffs are in flight.
 
-Reply-write policy (a denied write is EXPECTED, not an error): first self-verify your result, then
-attempt to write the printed reply path exactly once. If that write is denied by a sandbox or
+Reply-write policy (a denied write is EXPECTED, not an error): finish the substantive work and
+inspect the complete result first, and self-verify it; only then
+attempt to write the printed reply path exactly once, as a separate final action. Do not combine
+result production and reply writing into one command. If that write is denied by a sandbox or
 permission boundary, do NOT retry, debug, request escalation, or substitute another file. Instead,
 state the denial in one line AND put the full substantive result (not just the denial) in your final
-agent message, then complete the turn. A one-line denial with no result is a contract violation. The
-opt-in codex_ipc_wait.mjs --accept-rollout-fallback path certifies named-dispatch completion and
+agent message, then complete the turn. Only an error returned by that write attempt supports a
+permission/sandbox-denial claim: quote the literal error text. A calculation, command-construction,
+or parse failure must be reported as its actual failure, and empty or missing output is never
+evidence of a denial. A one-line denial with no result is a contract violation. The opt-in
+codex_ipc_wait.mjs --accept-rollout-fallback path certifies named-dispatch completion and
 replySource=rollout-fallback but intentionally emits no body. The dispatcher must retrieve and render
 the body with the existing read-only dual-source scripts/codex_ipc_replies.sh viewer. The viewer caps
 display at 4096 bytes by default; if it reports truncation, rerun it with a sufficient --max-bytes.

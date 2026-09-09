@@ -75,7 +75,13 @@ node skills/ipc/scripts/codex_ipc_wait.mjs --thread <conversation-id> --dispatch
 
 `codex_ipc_wait` prints exactly one of six tokens on stdout — `done`, `aborted`, `superseded`,
 `reply-missing`, `pending`, `unavailable`. `done` certifies that the **named dispatch's own turn**
-completed; it is never proof that the thread is idle now.
+completed; it is never proof that the thread is idle now or that the returned substantive result
+satisfies the task. Retrieve the selected reply body and inspect it against the task's
+done-criteria. The producer completes and checks the full result before a separate, single
+reply-write attempt.
+Only an error returned by that write supports a permission/sandbox-denial claim; a calculation or
+parse failure does not. If the write is actually denied, the final agent message retains the full
+substantive result for rollout fallback.
 Only a genuinely absent reply is eligible for waiter rollout fallback.
 A present-but-invalid reply returns `reply-missing` without consulting rollout fallback.
 An absent reply with no certifiable rollout body exhausts the eligible sources.
@@ -180,9 +186,10 @@ CI adds syntax checks and public-safety scans on ubuntu + windows:
 
 ## Limitations
 
-Live route is Windows-only and version-fragile by nature. GUI delivery cannot set a thread's
-model/reasoning (renderer-controlled). Envelope files trust the local machine (any same-user
-process can read and modify them).
+Live route is Windows-only and version-fragile by nature. An explicit version-2 client model/effort
+override can rewrite and persist a target thread's stored settings; the wrapper and write-proof
+harness preserve those settings by omitting the override fields. Envelope files trust the local
+machine (any same-user process can read and modify them).
 
 ## Status
 
