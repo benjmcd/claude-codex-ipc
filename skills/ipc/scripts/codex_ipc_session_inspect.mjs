@@ -10,8 +10,13 @@ import { existsSync, readdirSync, realpathSync, statSync } from "node:fs";
 import path from "node:path";
 import readline from "node:readline";
 import {
+  advanceRolloutHistoryScope,
+  advanceRolloutOwnerLineage,
   createTurnBoundaryAccumulator,
+  locateRollout,
   normalizeRolloutRecord,
+  parseRolloutBasename,
+  recordThreadIdentity,
   summarizeThreadActivity,
 } from "./codex_ipc_rollout_reader.mjs";
 
@@ -31,6 +36,9 @@ try {
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DEFAULT_TAIL_EVENTS = 20;
 const DEFAULT_MAX_TEXT_CHARS = 600;
+// Raw recentItems remain an inspection/display surface. Activity projections use this private,
+// non-serialized tail so copied fork history can never become child-local activity evidence.
+const ADMITTED_ACTIVITY_ITEMS = Symbol("admittedActivityItems");
 // --- `--summary` projection caps (O3) -------------------------------------------------------
 // These bound the ONLY two open-ended arrays the projection carries. They are projection-time
 // caps: they never reach parseArgs, inspectSession, parseRollout or inferActivitySignals, so
@@ -137,6 +145,7 @@ function parseArgs(argv) {
       throw new Error("--thread is required");
     }
     validateUuid(opts.threadId, "--thread");
+    opts.threadId = opts.threadId.toLowerCase();
   }
 
   return opts;
@@ -176,7 +185,7 @@ async function inspectSession(opts) {
   );
   const primaryRollout = rolloutSelection.primaryCandidate;
   const rolloutSummary = primaryRollout
-    ? await parseRollout(primaryRollout.path, opts.tailEvents, opts.maxTextChars)
+    ? await parseRollout(primaryRollout.path, opts.tailEvents, opts.maxTextChars, opts.threadId)
     : null;
 
   const ok = Boolean(dbThread.thread?.exists || rolloutSummary?.parsedOk);
@@ -198,6 +207,12 @@ async function inspectSession(opts) {
         path: primaryRollout?.path || null,
         candidateCount: rolloutSelection.candidates.length,
         aliasCount: rolloutSelection.aliasCount,
+        ...(rolloutSelection.reason === "candidate-set-unresolved"
+          ? {
+              rejectedCandidateCount: rolloutSelection.rejectedCandidateCount ?? 0,
+              scanIssueCount: rolloutSelection.scanIssueCount ?? 0,
+            }
+          : {}),
       },
     },
     activitySignals: inferActivitySignals(dbThread.thread, rolloutSummary, rolloutSelection.status),
@@ -205,9 +220,13 @@ async function inspectSession(opts) {
       "Read-only evidence only: no IPC connection, no Desktop message send, and no SQLite write were attempted.",
       "DB row and rollout presence do not prove the owning Desktop renderer is currently open.",
       "Activity signals are heuristic; read the rollout context before interrupting or adding a new turn.",
-      ...(rolloutSelection.status === "ambiguous"
+      ...(rolloutSelection.reason === "multiple-candidates"
         ? ["Multiple distinct rollout candidates have equal authority; no primary rollout was selected."]
-        : []),
+        : rolloutSelection.reason === "candidate-set-unresolved"
+          ? [
+              "Rollout discovery encountered rejected target candidates or unreadable scan state; no primary rollout was selected.",
+            ]
+          : []),
     ],
   };
 }
@@ -291,8 +310,10 @@ function summarizeThread(row) {
     // / `threads.sandbox_policy` columns (permission-profile-shaped: observed `disabled`/`managed`).
     // They are the stored thread row, NOT the effective next-turn `turn_context.sandbox_policy`, so
     // they may differ from the turn that actually runs and MUST NOT gate a dispatch or be read as a
-    // reply-writability prediction. A blocked reply write is a non-event recovered via
-    // `codex_ipc_wait --accept-rollout-fallback` (A1), never a policy gate. Completion-time
+    // reply-writability prediction. A blocked reply write is a non-event: the opt-in waiter
+    // certifies named-dispatch completion and `replySource=rollout-fallback` but intentionally emits
+    // no body; retrieval belongs to the read-only dual-source `codex_ipc_replies.sh` viewer, never a
+    // policy gate. Completion-time
     // re-stamping was observed evidence, not a stable timing contract.
     approvalMode: row.approval_mode || null,
     sandboxPolicy: parseJsonColumn(row.sandbox_policy),
@@ -317,15 +338,24 @@ function summarizeThread(row) {
 function findRolloutCandidates(sessionsRoot, threadId, dbRolloutPath) {
   const candidates = [];
   const candidatesByIdentity = new Map();
+  let rejectedDbCandidate = null;
+  const rejectedSessionsCandidates = [];
+  const scanIssues = [];
 
   function addCandidate(filePath, source) {
-    if (!filePath || !existsSync(filePath)) {
+    if (!filePath) {
+      return;
+    }
+    const validated = locateRollout({ threadId, rolloutPath: filePath });
+    if (validated.status !== "found") {
+      if (source === "db.rollout_path") {
+        rejectedDbCandidate = validated;
+      } else {
+        rejectedSessionsCandidates.push({ ...validated, path: filePath });
+      }
       return;
     }
     const stat = statSync(filePath);
-    if (!stat.isFile()) {
-      return;
-    }
     const canonical = canonicalPath(filePath);
     const identity = fileIdentity(filePath, canonical);
     const existing = candidatesByIdentity.get(identity);
@@ -353,10 +383,37 @@ function findRolloutCandidates(sessionsRoot, threadId, dbRolloutPath) {
 
   addCandidate(dbRolloutPath, "db.rollout_path");
 
+  // A present DB-designated path is authority, including when its identity is
+  // invalid. Never recover from an identity-invalid DB path by selecting a
+  // different sessions-root file.
+  if (rejectedDbCandidate) {
+    return {
+      candidates: [],
+      primaryCandidate: null,
+      ambiguousCandidates: [],
+      status: "unavailable",
+      reason: rejectedDbCandidate.reason || "identity-mismatch",
+      authority: "db.rollout_path",
+      aliasCount: 0,
+    };
+  }
+
   if (existsSync(sessionsRoot)) {
-    for (const filePath of walkFiles(sessionsRoot)) {
-      if (path.basename(filePath).includes(threadId) && filePath.endsWith(".jsonl")) {
+    for (const filePath of walkFiles(sessionsRoot, (issue) => scanIssues.push(issue))) {
+      const basename = path.basename(filePath);
+      const filename = parseRolloutBasename(basename);
+      if (filename?.rootThreadId === threadId.toLowerCase()) {
         addCandidate(filePath, "sessions-root-match");
+      } else if (
+        basename.toLowerCase().startsWith("rollout-") &&
+        basename.toLowerCase().includes(threadId.toLowerCase()) &&
+        !(filename?.paginated && filename.pageId === threadId.toLowerCase())
+      ) {
+        rejectedSessionsCandidates.push({
+          status: "unavailable",
+          reason: "rollout-name-unrecognized",
+          path: filePath,
+        });
       }
     }
   }
@@ -372,9 +429,11 @@ function findRolloutCandidates(sessionsRoot, threadId, dbRolloutPath) {
   });
 
   // Authority order: an existing DB-designated rollout wins over broad scanning;
-  // otherwise exactly one physical sessions-root match may be selected. Parse
-  // validity is reported by rollout.primary.parsedOk and never causes an implicit
-  // fallback to a different file than the DB named.
+  // otherwise exactly one physical sessions-root match may be selected only when
+  // discovery itself is complete. A rejected target-named sibling or scan failure
+  // makes the root-only candidate set unresolved rather than silently selecting an
+  // older valid file. DB-designated parse validity remains visible as parsedOk and
+  // never causes an implicit fallback to a different file than the DB named.
   const dbCandidate = candidates.find((candidate) => candidate.source === "db.rollout_path");
   const aliasCount = candidates.reduce((count, candidate) => count + candidate.aliases.length, 0);
   if (dbCandidate) {
@@ -386,6 +445,19 @@ function findRolloutCandidates(sessionsRoot, threadId, dbRolloutPath) {
       reason: "db-rollout-path",
       authority: "db.rollout_path",
       aliasCount,
+    };
+  }
+  if (rejectedSessionsCandidates.length > 0 || scanIssues.length > 0) {
+    return {
+      candidates,
+      primaryCandidate: null,
+      ambiguousCandidates: candidates,
+      status: "ambiguous",
+      reason: "candidate-set-unresolved",
+      authority: "sessions-root-match",
+      aliasCount,
+      rejectedCandidateCount: rejectedSessionsCandidates.length,
+      scanIssueCount: scanIssues.length,
     };
   }
   if (candidates.length === 1) {
@@ -451,38 +523,46 @@ function fileIdentity(filePath, canonical) {
   return canonical;
 }
 
-function* walkFiles(root) {
+function* walkFiles(root, onIssue = () => {}) {
   let entries;
   try {
     entries = readdirSync(root, { withFileTypes: true });
-  } catch {
+  } catch (error) {
+    onIssue({ reason: "directory-unreadable", path: root, message: error.message });
     return;
   }
   for (const entry of entries) {
     const fullPath = path.join(root, entry.name);
-    if (entry.isDirectory()) {
-      yield* walkFiles(fullPath);
-    } else if (entry.isFile()) {
+    if (entry.isDirectory() && !entry.isSymbolicLink()) {
+      yield* walkFiles(fullPath, onIssue);
+    } else if (entry.isFile() || entry.isSymbolicLink()) {
       yield fullPath;
     }
   }
 }
 
-async function parseRollout(filePath, tailEvents, maxTextChars) {
+async function parseRollout(filePath, tailEvents, maxTextChars, expectedThreadId) {
   const info = fileInfo(filePath);
   const recentItems = [];
+  const admittedActivityItems = [];
   const countsByEnvelopeType = {};
   const countsByPayloadType = {};
   const parseErrors = [];
   let lineCount = 0;
   let parsedCount = 0;
   let sessionMeta = null;
+  let rolloutThreadId = null;
+  let rolloutLineageIds = [];
+  let forkHistoryScope = null;
+  let forkHistoryConflict = false;
+  let sessionMetaSeen = false;
   // A4: feed the FULL parse stream (not the clipped display tail) into the ONE shared boundary
   // machine (createTurnBoundaryAccumulator). Its final emitted snapshot drives turnActivity via
   // the pure summarizeThreadActivity projection; the inspector keeps its own parse/count/display.
   const accumulator = createTurnBoundaryAccumulator();
   const boundarySnapshots = [];
   const boundaryDiagnostics = [];
+  const ownerIntegrityDiagnostics = [];
 
   const rl = readline.createInterface({
     input: createReadStream(filePath, { encoding: "utf8" }),
@@ -507,30 +587,161 @@ async function parseRollout(filePath, tailEvents, maxTextChars) {
     }
 
     parsedCount += 1;
-    const normalized = normalizeRolloutRecord(parsed, { line: lineCount });
-    boundarySnapshots.push(...accumulator.push(normalized).snapshots);
-    if (!normalized.knownPair) {
-      boundaryDiagnostics.push({ code: "schema-drift", line: lineCount });
+    const isSessionMeta = parsed?.type === "session_meta";
+    let ownerConflict = false;
+    const ownerLineage = advanceRolloutOwnerLineage(parsed, {
+      rolloutThreadId,
+      lineageIds: rolloutLineageIds,
+      expectedThreadId,
+    });
+    if (ownerLineage.status === "invalid" || ownerLineage.status === "mismatch") {
+      ownerConflict = true;
+      const item = {
+        code: "schema-drift",
+        line: lineCount,
+        reason:
+          ownerLineage.status === "invalid"
+            ? "rollout-thread-id-invalid"
+            : "rollout-thread-id-mismatch",
+      };
+      boundaryDiagnostics.push(item);
+      ownerIntegrityDiagnostics.push(item);
+    }
+    if (ownerLineage.status === "accepted") {
+      rolloutThreadId = ownerLineage.rolloutThreadId;
+      rolloutLineageIds = ownerLineage.lineageIds;
+    }
+    const declaredSessionId =
+      isSessionMeta && typeof parsed?.payload?.id === "string" && UUID_RE.test(parsed.payload.id)
+        ? parsed.payload.id.toLowerCase()
+        : null;
+    const isCurrentOwnerSessionMeta =
+      ownerLineage.status === "accepted" &&
+      declaredSessionId !== null &&
+      declaredSessionId === rolloutThreadId;
+    if (isCurrentOwnerSessionMeta) sessionMetaSeen = true;
+    const recordOwner = recordThreadIdentity(parsed);
+    let inheritedHistory = false;
+    let historyAdmitted = false;
+    if (!forkHistoryConflict) {
+      const historyScope = advanceRolloutHistoryScope(parsed, forkHistoryScope, {
+        isFirstRecord: parsedCount === 1,
+      });
+      if (historyScope.status === "missing" || historyScope.status === "invalid") {
+        forkHistoryConflict = true;
+        const item = {
+          code: "schema-drift",
+          line: lineCount,
+          reason: historyScope.reason,
+        };
+        boundaryDiagnostics.push(item);
+        ownerIntegrityDiagnostics.push(item);
+      } else {
+        forkHistoryScope = historyScope.state;
+        inheritedHistory = historyScope.status === "skip";
+        historyAdmitted = historyScope.status === "admit";
+      }
+    }
+    if (!ownerConflict && !forkHistoryConflict && !inheritedHistory && recordOwner.status !== "absent") {
+      const ownerReason =
+        recordOwner.status === "invalid"
+          ? "rollout-thread-id-invalid"
+          : "rollout-thread-id-mismatch";
+      const recordOwnerMismatch =
+        recordOwner.status === "conflict" ||
+        recordOwner.status === "invalid" ||
+        (recordOwner.status === "valid" &&
+          expectedThreadId &&
+          recordOwner.threadId !== expectedThreadId.toLowerCase()) ||
+        (recordOwner.status === "valid" &&
+          rolloutThreadId &&
+          recordOwner.threadId !== rolloutThreadId.toLowerCase());
+      if (recordOwnerMismatch) {
+        ownerConflict = true;
+        const item = {
+          code: "schema-drift",
+          line: lineCount,
+          reason: ownerReason,
+        };
+        boundaryDiagnostics.push(item);
+        ownerIntegrityDiagnostics.push(item);
+      }
+    }
+    if (!forkHistoryConflict && !inheritedHistory) {
+      const normalized = normalizeRolloutRecord(parsed, {
+        line: lineCount,
+        rolloutThreadId: rolloutThreadId || expectedThreadId,
+      });
+      const boundaryRecord = ownerConflict
+        ? { ...normalized, knownPair: false, text: "", phase: null, role: null }
+        : normalized;
+      boundarySnapshots.push(...accumulator.push(boundaryRecord).snapshots);
+      if (!normalized.knownPair) {
+        boundaryDiagnostics.push({ code: "schema-drift", line: lineCount });
+      }
     }
     const item = summarizeJsonlItem(parsed, lineCount, maxTextChars);
     increment(countsByEnvelopeType, item.envelopeType || "unknown");
     increment(countsByPayloadType, item.payloadType || "unknown");
-    if (item.payloadType === "session_meta") {
+    if (isCurrentOwnerSessionMeta && sessionMeta === null) {
       sessionMeta = item;
+    }
+    if (historyAdmitted && !ownerConflict) {
+      admittedActivityItems.push(item);
+      while (admittedActivityItems.length > tailEvents) {
+        admittedActivityItems.shift();
+      }
     }
     recentItems.push(item);
     while (recentItems.length > tailEvents) {
       recentItems.shift();
     }
   }
+  if (!sessionMetaSeen) {
+    const item = {
+      code: "schema-drift",
+      line: null,
+      reason: "rollout-thread-id-missing",
+    };
+    boundaryDiagnostics.push(item);
+    ownerIntegrityDiagnostics.push(item);
+  }
+  if (
+    forkHistoryScope?.mode === "producer-ordinal" &&
+    forkHistoryScope.boundarySeen !== true &&
+    !forkHistoryConflict
+  ) {
+    const item = {
+      code: "schema-drift",
+      line: lineCount,
+      reason: "fork-history-boundary-unseen",
+    };
+    boundaryDiagnostics.push(item);
+    ownerIntegrityDiagnostics.push(item);
+  }
   boundarySnapshots.push(...accumulator.finish(boundaryDiagnostics));
-  const boundarySnapshot = boundarySnapshots.reduce(
+  const latestBoundarySnapshot = boundarySnapshots.reduce(
     (latest, snap) => (latest === null || snap.sequence > latest.sequence ? snap : latest),
     null,
   );
+  const boundarySnapshot = ownerIntegrityDiagnostics.length > 0 && latestBoundarySnapshot
+    ? Object.freeze({
+        sequence: latestBoundarySnapshot?.sequence ?? 0,
+        turnId: latestBoundarySnapshot?.turnId ?? null,
+        boundaryMode: latestBoundarySnapshot?.boundaryMode ?? null,
+        activity: "ambiguous",
+        terminalType: latestBoundarySnapshot?.terminalType ?? null,
+        terminalLine: latestBoundarySnapshot?.terminalLine ?? null,
+        superseded: latestBoundarySnapshot?.superseded ?? false,
+        diagnostics: Object.freeze([
+          ...(latestBoundarySnapshot?.diagnostics || []),
+          ...ownerIntegrityDiagnostics,
+        ]),
+      })
+    : latestBoundarySnapshot;
 
   return {
-    parsedOk: parsedCount > 0,
+    parsedOk: parsedCount > 0 && parsedCount === lineCount,
     path: filePath,
     stat: info,
     lineCount,
@@ -541,6 +752,8 @@ async function parseRollout(filePath, tailEvents, maxTextChars) {
     countsByPayloadType,
     sessionMeta,
     recentItems,
+    [ADMITTED_ACTIVITY_ITEMS]:
+      ownerIntegrityDiagnostics.length === 0 ? admittedActivityItems : [],
     boundarySnapshot,
   };
 }
@@ -617,7 +830,7 @@ function collectText(value, found, depth) {
 }
 
 function inferActivitySignals(thread, rollout, rolloutStatus) {
-  const recent = rollout?.recentItems || [];
+  const recent = rollout?.[ADMITTED_ACTIVITY_ITEMS] || [];
   const lastItem = recent.at(-1) || null;
   const lastTaskComplete = lastOfType(recent, ["task_complete"]);
   const lastTurnAborted = lastOfType(recent, ["turn_aborted"]);
@@ -815,6 +1028,12 @@ function projectSummary(result) {
         path: selection.path,
         candidateCount: selection.candidateCount,
         aliasCount: selection.aliasCount,
+        ...(selection.reason === "candidate-set-unresolved"
+          ? {
+              rejectedCandidateCount: selection.rejectedCandidateCount,
+              scanIssueCount: selection.scanIssueCount,
+            }
+          : {}),
       },
     },
     activitySignals: {

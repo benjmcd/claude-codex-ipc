@@ -17,20 +17,31 @@ Per the `/ipc` workspace-scoping rule, place the FILLED handoff inside the assoc
   effort levels, and require both to be set EXPLICITLY on EVERY subagent spawn, never left to
   the app's global default (an omitted model silently inherits the operator's `config.toml`
   default, which may be outside the authorized roster — observed in production). The target
-  thread's own model, reasoning,
-  sandbox policy, and approval mode are never changed by dispatch — the turn runs under whatever
-  the thread is already set to. Narrowest-correct-change; no-delete/archive-instead; no
+  thread's own model and reasoning are preserved by the wrapper's omission policy; a direct
+  version-2 client model/effort override persists as a thread-settings change and requires explicit
+  operator intent. Sandbox policy and approval mode are never changed by the wrapper dispatch — the
+  turn runs under whatever the thread is already set to. Narrowest-correct-change;
+  no-delete/archive-instead; no
   co-author attribution; current phase (audit / plan / implement).
-- **Completion contract:** self-verification/self-validation is mandatory and runs BEFORE the
-  reply is written; the reply (file and/or final message) is the LAST act of the turn — no work,
-  amendment, or re-verification may follow it. **Denied reply write (EXPECTED, not an error):**
-  after self-verifying, attempt to write the printed reply path exactly once. If that write is
+- **Completion contract:** finish the substantive computation/analysis, inspect the complete result,
+  and self-verify/self-validate it BEFORE a separate reply-write attempt. Do not combine result
+  production and reply writing into one command. The reply (file and/or final message) is the LAST
+  act of the turn — no work, amendment, or re-verification may follow it. The dispatcher's waiter
+  can certify lifecycle completion; the dispatcher still inspects the returned body against the
+  lane's done-criteria before accepting the substantive result. **Denied reply write (EXPECTED,
+  not an error):** after self-verifying, attempt to write the printed reply path exactly once. Only
+  an error returned by that write supports a permission/sandbox-denial claim; a calculation,
+  command-construction, or parse failure must be reported as its actual failure. If the write is
   denied by a sandbox or permission boundary, do NOT retry, debug, request escalation, or substitute
   another file — state the denial in one line AND put the full substantive result (not just the
   denial) in your final agent message, then complete. A one-line denial with no result is a contract
-  violation. The dispatcher recovers that final message only via the opt-in `codex_ipc_wait.mjs
-  --accept-rollout-fallback` path (a known UUID `--ipc` dispatch); flagless and filedrop do not
-  recover it automatically. If a post-reply amendment ever becomes
+  violation. On a known UUID `--ipc` dispatch, the opt-in `codex_ipc_wait.mjs
+  --accept-rollout-fallback` waiter certifies named-dispatch completion and
+  `replySource=rollout-fallback` but intentionally emits no body. The dispatcher retrieves and
+  renders the body with the existing read-only dual-source `scripts/codex_ipc_replies.sh` viewer.
+  Its display is capped at 4096 bytes by default; if it reports truncation, rerun it with a
+  sufficient `--max-bytes`. Flagless and filedrop do not recover the denied-write fallback
+  automatically. If a post-reply amendment ever becomes
   unavoidable, supersede explicitly: state `REPLY-SUPERSEDED` as the FIRST LINE of a final
   message (the harvester's marker detection is first-line exact-token by design) and overwrite
   the same dispatch's reply file. KNOWN LIMITATION: reply viewing is file-primary by design, so

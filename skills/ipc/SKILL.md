@@ -129,20 +129,47 @@ Use the inspector output to identify: the target title, cwd/project, model, reas
 archived flag, and rollout path; the thread's stored `approvalMode`/`sandboxPolicy` (carried
 alongside `permissionProfileAdvisory`) — advisory context only: they are the stored thread row,
 may differ from the effective turn, and MUST NOT gate the dispatch or be read as a
-reply-writability prediction. A blocked reply write is expected, not an error, and is recovered
-via `codex_ipc_wait --accept-rollout-fallback` (a known-UUID `--ipc` dispatch), never a policy
-gate; the latest
+reply-writability prediction. A blocked reply write is expected, not an error. For a known-UUID
+`--ipc` dispatch, `codex_ipc_wait --accept-rollout-fallback` certifies named-dispatch completion
+and `replySource=rollout-fallback` but intentionally emits no body; retrieve and render the body
+with the existing read-only dual-source `scripts/codex_ipc_replies.sh` viewer. Display is capped at
+4096 bytes by default; if truncation is reported, rerun with a sufficient `--max-bytes`. This is
+never a policy gate. Identify the latest
 user/agent/task-complete signals; and `activitySignals.turnActivity` — the authoritative
 open/closed/ambiguous read of the latest turn boundary from the shared turn-boundary machine over
 the FULL rollout stream (`open` = a start/user turn with no matching terminal; `closed` = the
 latest turn reached its terminal; `ambiguous` = boundary/rollout ambiguity — fail closed). Prefer
 `turnActivity` over the historical `maybeMidTurn` tail heuristic; `terminalState` and a per-dispatch
-wait `done` both describe past turns and never prove current idleness. The pre-send write-proof gate
-requires `turnActivity==="closed"`; `--allow-mid-turn` overrides `open` only, never `ambiguous`. Also
-note whether the instruction is a handoff, oversight request, status check, continuation, review,
+wait `done` both describe past turns and never prove current idleness. Immediately before a live
+send, the write-proof harness recomputes `turnActivity` from an owner-bound,
+integrity-validated, complete-EOF baseline; that gate requires `turnActivity==="closed"`.
+`rollout.primary.recentItems` is a raw physical display tail and, for a fork, may include copied
+ancestor records. Treat it as provenance/display only, never as child-local activity; use the
+owner- and history-scoped `activitySignals` projection for that determination.
+After the fresh state snapshot and before invoking the client, it fully revalidates the same
+cursor: canonical path, physical identity, complete EOF, offset/size, and whole-prefix SHA-256 must
+still match. Growth, replacement, or a same-size historical rewrite therefore blocks with zero
+sends. `--allow-mid-turn` overrides `open` only, never `ambiguous`.
+After the one send attempt, a certifiable client result requires a successful client process,
+top-level `ok: true`, the exact canonical top-level `targetThreadId`,
+`response.resultType: "success"`, and exactly one follower occurrence whose `name`, `method`, and
+`conversationId` match the target. The matching follower proves send occurrence only; it does not
+prove router acceptance or task completion. If occurrence is confirmed but any certification
+field fails, the harness preserves it, performs zero rollout polls, and reports non-retryable
+`sent-but-unverified`; unparseable output leaves occurrence unknown as `send-outcome-unknown`.
+Only a certified result with one unconflicted response turn ID may start polling; missing or
+conflicting turn IDs likewise yield zero polls and `sent-but-unverified`. End-to-end success
+additionally requires the rollout proof to bind that turn and show the agent marker followed by
+completion, plus structured config/DB isolation proof. Null, malformed, contradictory, or bare-`ok`
+post-send proofs cannot certify. Inspection is necessary before considering any retry, but a
+negative bounded/recent-tail inspection cannot prove non-admission and is never sufficient retry
+authority. Retry only after an exact full-history outcome proves non-admission, or after an
+explicit owner decision that acknowledges the unresolved duplicate-send risk.
+Also note whether the instruction is a handoff, oversight request, status check, continuation, review,
 wait/watch request, or management request. If the inspector
 is ambiguous, read the referenced rollout JSONL directly with targeted grep/tail before asking the
-user. Ask one concise question only when sending would risk interrupting or misdirecting the wrong
+user. That bounded inspection is diagnostic only; it cannot authorize a retry after an attempted
+send. Ask one concise question only when sending would risk interrupting or misdirecting the wrong
 thread.
 
 `--summary` is the preflight projection: the same computed object under the same parsing
@@ -171,6 +198,26 @@ closed on any other stray flag.) It is accepted on the client because production
 a caller-supplied UUID, the router is conversation-scoped, and the script writes a file-drop
 fallback first. Keep the invariant: one explicit conversationId per send.
 
+The wrapper treats `no-client-found` as authority to consider auto-load only when the parsed client
+result is structurally exact: failed result for this target, the exact router error, and exactly
+one matching follower request. Nested or incidental text never qualifies. Before any deep link,
+the inspector must likewise report a successful read-only DB open and one thread row with the exact
+target ID and numeric active archive state (`0`); a matching rollout without that trusted row is not
+target authority. Missing, archived, malformed, or ambiguous state fails closed without navigation.
+Neither the initial renderer-owned path nor a post-autoload retry treats client exit 0 alone as
+delivery. Both require parsed `ok: true`, the exact `targetThreadId`,
+`response.resultType: "success"`, and exactly one follower occurrence whose `name`, `method`, and
+`conversationId` all match. Missing or conflicting structure after exit 0 is post-attempt
+ambiguous: it is not classified as delivered and is never automatically retried. Inspection is
+necessary before considering a manual retry, but negative bounded/recent-tail evidence cannot
+prove non-admission. Retry only after an exact full-history outcome proves non-admission, or after
+an explicit owner decision that acknowledges the unresolved duplicate-send risk.
+This recheck is defense-in-depth on the authoritative unowned branch only. The renderer-owned fast
+path deliberately does not repeat the inspector before its initial attempt; the separate agent
+preflight above remains mandatory. That preserves the fast path but leaves a disclosed
+preflight-to-send state-change window. Exact target binding prevents heuristic retargeting, while
+any ambiguous post-attempt outcome still requires inspection and forbids automatic retry.
+
 Every `--ipc` send reports exactly one machine-parseable result:
 `RESULT: gui-delivered|gui-unowned|failed-closed -- reason=<token> -- confirmation=<token>`.
 After router acceptance, confirmation is:
@@ -187,8 +234,10 @@ All three preserve `gui-delivered` and exit 0 after an accepted send. Observer f
 See [references/architecture.md](references/architecture.md) for the full taxonomy, the auto-load
 /focus-snapback behavior (experimental, Windows-only), and their disclosed residues. The file-drop
 **envelope** is preserved in every outcome; the **pickup line** is printed only when the failure is
-proven pre-send. After an ambiguous post-attempt result (`confirmation=unknown`) pickup is
-suppressed and resending is forbidden — the turn may already have been admitted.
+structurally proven not to have admitted a follower. `confirmation=not-attempted` names that
+non-admission state; an exact `no-client-found` router request may still have occurred. After an
+ambiguous post-attempt result (`confirmation=unknown`) pickup is suppressed and resending is
+forbidden — the turn may already have been admitted.
 
 When the target is unowned and Codex itself is the operator's foreground window, a **foreground
 policy** applies (default `defer` — never navigate the visible app). Canonical grammar:
@@ -225,16 +274,74 @@ without being superseded (no newer `task_started` opened before its terminal). A
 turn is provisional/unavailable for this dispatch — never borrow a later, unrelated turn's
 terminal to certify it. `turn_aborted` on the dispatch's own turn is terminal-failed regardless
 of whether a reply was written (stop waiting; surface any reply as unverified, not a hang).
+A distinct later `user_message` in that turn also invalidates the dispatch binding. Only repeated
+normalized user records with the same non-empty item identity are collapsed; equal text or a
+direct/wrapped representation alone is not proof of one delivery.
+Final bodies are deduplicated by exact text within that bound turn. If multiple distinct explicit
+`final_answer` bodies remain, only a nonempty `task_complete.last_agent_message` that exactly
+matches one body selects it; missing, empty, or nonmatching terminal evidence is unavailable.
 Read-only inspection only; parse event types, never substring-grep (which also matches inside
 tool output). One delegation produces one reply: app-driven turns after the reply (e.g. goal
 checks) are supersession territory, discovered by re-inspection, not by watching forever.
 The prose above remains the completion-contract definition; mechanically check it with
 `scripts/codex_ipc_wait.mjs`, which emits `done`, `aborted`, `superseded`, `reply-missing`,
 `pending`, or `unavailable` (single-shot by default; `--budget-ms` bounds an optional poll).
-Rollout identity precondition: an explicit `--rollout-path` must name a `<threadId>.jsonl`-suffixed
-file whose first record is a matching `session_meta` — the shared reader validates identity even
-for explicit paths, so a renamed or copied rollout yields `unavailable` with an identity-mismatch
-diagnostic rather than reading the wrong thread.
+The correlator keeps three questions separate. Historical lifecycle completion records that an
+exact dispatch occurrence completed and remains valid evidence for that occurrence.
+`latestOccurrence` describes the newest exact dispatch-marker occurrence, which may instead be
+noncomplete or uncertifiable. Global `freshness` is settled only when that newest occurrence is
+certifiably complete and no later malformed or unknown-schema record makes the post-boundary
+suffix opaque. A readable primary reply remains selected for viewing when historical completion is
+proven, but it may be stale: opaque post-occurrence schema keeps the waiter `unavailable`. Two
+distinct bound-turn exact marker occurrences are dispatch-ID reuse; because one reply path cannot identify
+which occurrence wrote it, the waiter returns `unavailable` even if one or both occurrences are
+complete. The viewer may still show a primary reply, but it marks supersession `unavailable`, emits
+a stale-body caution, and never supplies a rollout-fallback body or a positive/negative
+supersession conclusion for that reused ID. Same-item mirror records that collapse to one logical
+occurrence are not reuse. A distinct later user item in the same turn invalidates binding as
+`intervening-user-message`; identical text alone does not create a separately bound reuse
+occurrence. Absent reuse, rollout fallback and a negative claim that
+`REPLY-SUPERSEDED` was not seen require settled freshness; they never borrow the older completion.
+Conversely, an exact positive `REPLY-SUPERSEDED` completion remains positive when later
+non-occurrence freshness is unknown, with uncertainty disclosed.
+Rollout identity precondition: an explicit `--rollout-path`, including the exact path designated
+by the state DB, must use the legacy `...-<threadId>.jsonl` basename or the paginated
+`...-<threadId>_<pageUuid>.jsonl` basename. Its first record must be a matching
+`session_meta`. The paginated form additionally requires `payload.session_id` to match the root
+thread, `payload.history_mode` to equal `paginated`, and a valid
+`payload.history_base.thread_id`. Without an explicit authoritative path, discovery recognizes
+both forms, but returns ambiguous when more than one distinct physical page is valid; it never
+chooses a page by mtime. Even with one valid file, root-only discovery returns
+`candidate-set-unresolved` when the same scan finds a recognized exact-target candidate that fails
+validation, any `rollout-*` basename containing the target UUID that is not understood as a
+candidate for that root (including when a trailing second UUID makes the legacy parser attribute
+the name to another root), or an unreadable subtree. The token-collision exception is a recognized
+paginated basename whose page ID merely equals the target while its root is another session. The
+scan never discards unresolved diagnostics to select the valid file. Polling remains bound to the
+selected physical file, so automatic page rollover from N to N+1 is not certified or supported.
+A renamed or copied mismatch yields `unavailable` rather than reading the wrong thread. A
+target-thread ID that Desktop internally remaps to a differently owned physical rollout is likewise
+`unavailable`: no trusted alias authority exists, so rollout observation/fallback never follows the
+remap heuristically. File-primary replies and the preserved file-drop envelope are unaffected. The
+standalone observer, waiter, and harvester accept but do not derive the DB-designated path; pass
+their exact `--rollout-path` when it is known, or accept root-only discovery ambiguity. Cursor
+polling revalidates the canonical path, physical identity, complete first-record anchor, and a
+SHA-256 digest of every byte in the consumed prefix; every certifying locator-to-reader handoff
+also carries the expected owner and physical identity, so an in-place historical rewrite or path
+swap fails closed. Intermediate polls may use a metadata-only no-growth check when a complete
+cursor's canonical path, physical identity, and size are unchanged, but that check can only
+continue pending. Growth and change run the full certifying reader; so do
+final or budget-edge attempts that begin before the deadline. If the deadline elapses during
+sleep, the operation returns unverified/pending without a post-deadline read.
+The read deadline covers prefix hashing, final anchor revalidation, and path rebinding checks;
+expiry returns no certifying cursor or trusted partial projection. A forked/subagent rollout must
+declare a valid `forked_from_id`, a safe-integer `subagent_history_start_ordinal >= 1`, and contiguous
+top-level ordinals beginning at zero. Records before that producer boundary are parsed and hashed
+but never observed, correlated, or projected as child activity; the boundary record must be
+`event_msg/thread_settings_applied`. Missing, invalid, gapped, reordered, or not-yet-reached fork
+boundaries are unavailable, and UUID timestamps are never ownership authority. At and after a
+valid boundary, later inherited `session_meta` records remain provenance only: admitted lineage IDs
+never rebind the pinned owner, and record-level `thread_id` fields must still name the child.
 A bounded example (30-minute budget, opt-in rollout fallback):
 `node scripts/codex_ipc_wait.mjs --thread <uuid> --dispatch <dispatchId> --reply-path <path>
 --accept-rollout-fallback --budget-ms 1800000 --interval-ms 1000`. A `done` token is
@@ -253,18 +360,28 @@ Exit-code-driven callers may add the opt-in `--status-exit-codes`, which maps th
 stay exit 1 with no token); the token remains the sole stdout line. Without the flag every
 determination exits 0.
 Compose handoffs with the completion contract in
-[references/handoff-template.md](references/handoff-template.md): self-verify BEFORE writing the
-reply; the reply is the last act of the turn.
+[references/handoff-template.md](references/handoff-template.md): finish and inspect the complete
+result, self-verify it BEFORE a separate single reply-write attempt (never combine result
+production and reply writing in one command); the reply is the last act of the turn; the
+dispatcher still checks the returned body against the task's done-criteria before accepting it.
 
 Producer denied-reply protocol (a denied reply write is EXPECTED, not an error): the generated
-payload instructs the follower to self-verify, then attempt the printed reply path exactly once. On
+payload instructs the follower to finish and inspect the complete result, self-verify it, then
+attempt the printed reply path exactly once as a separate final action. Only an error returned by
+that write supports a denial claim; a calculation, command-construction, or parse failure is
+reported as its actual failure, and empty output is never evidence of a denial. On
 a sandbox/permission denial the follower must NOT retry, debug, request escalation, or substitute
 another file — it states the denial in one line AND puts the full substantive result (not just the
 denial) in its final agent message, then completes. A one-line denial with no result is a contract
-violation. On the dispatcher side, a full final message is recoverable only via the opt-in
-`codex_ipc_wait.mjs --accept-rollout-fallback` path on a known-UUID `--ipc` dispatch (it certifies
-`done` with `replySource=rollout-fallback`); flagless invocation stays file-primary and filedrop is not
-auto-recoverable. Dispatch never changes the target thread's model, reasoning, sandbox, or approval.
+violation. On the dispatcher side, the opt-in `codex_ipc_wait.mjs --accept-rollout-fallback` path
+on a known-UUID `--ipc` dispatch certifies named-dispatch `done` with
+`replySource=rollout-fallback` but intentionally emits no body. Retrieve and render the full final
+message with the existing read-only dual-source `scripts/codex_ipc_replies.sh` viewer; flagless
+invocation stays file-primary and filedrop is not auto-recoverable. The wrapper dispatch never
+changes the target thread's model, reasoning, sandbox, or approval: it omits every version-2
+override field. A direct client `--model`/`--effort` override is a thread-settings change, not a
+per-turn override (see the new-session-mode note below and `docs/COMPATIBILITY.md`); `/ipc` never
+passes them.
 
 ## New-session mode
 
@@ -294,15 +411,22 @@ back to the file-drop handoff and ask the user to select/create the Desktop thre
 pickup line or provide the session id.
 
 The target thread's own settings — model, reasoning effort, sandbox policy, and approval mode —
-are NEVER changed by `/ipc`: a delegated turn runs under whatever the thread is already set to
-(the router ignores `turnStartParams.model` overrides in any case — verified 2026-07-10). Do not
-attempt to override them through the delivery route, the client flags, or any other mechanism —
-never mutate. Consistent with the advisory rule above, do NOT treat a stored `sandboxPolicy` or
+are NEVER changed by `/ipc`: a delegated turn runs under whatever the thread is already set to.
+**This is enforced by omission, not by the protocol.** The 2026-07-10 observation that the router
+ignores a `turnStartParams.model` override described a payload the app no longer reads; under the
+version-2 `params.turnStart` payload the app does read `request.model` and `request.effort`, and
+writes them back as the thread's stored model and reasoning effort. The wrapper and the write-proof
+harness pass neither, and the client omits both unless an operator explicitly supplies
+`--model`/`--effort` — which is a thread-settings change, not a per-turn override. Do not attempt
+to override these through the delivery route, the client flags, or any other mechanism — never
+mutate. Consistent with the advisory rule above, do NOT treat a stored `sandboxPolicy` or
 `approvalMode` as a prediction that the reply write will fail: a stored `managed` sandbox is not a
 reason to pick a different thread. A blocked reply write is expected, not an error, and is
-recovered via `codex_ipc_wait --accept-rollout-fallback`. Reserve "choose another thread or ask the
-operator" for cases the inspector proves — missing, archived, or identity-mismatched targets — not
-for stored policy rows. Model/reasoning tier guidance in a task belongs to the thread's
+certified as named-dispatch completion with `replySource=rollout-fallback` by
+`codex_ipc_wait --accept-rollout-fallback`; the waiter intentionally emits no body, so retrieve and
+render it with the read-only dual-source `scripts/codex_ipc_replies.sh` viewer. Reserve "choose
+another thread or ask the operator" for cases the inspector proves — missing, archived, or
+identity-mismatched targets — not for stored policy rows. Model/reasoning tier guidance in a task belongs to the thread's
 SUBAGENT deployment instructions, not to the thread itself.
 
 ## Cross-session context
@@ -325,7 +449,8 @@ this branch`, `## Files changed vs <main>`, `## Uncommitted changes` — are **b
   8192 B), cuts at a whole-line boundary, and appends an in-section notice naming bytes kept,
   bytes total, lines omitted, and the **local** command that recovers the rest at the receiving
   workspace. Nothing is silently dropped: a bounded section never loses its heading.
-- `full` removes the caps and reproduces the pre-0.1.11 payload byte-for-byte. Use it when the
+- `full` removes the caps and restores only those three pre-0.1.11 unbounded git-context section
+  bodies byte-for-byte; all other payload guidance and framing remain current. Use it when the
   receiver cannot re-run git at the dispatch's workspace.
 - Any unrecognized value **soft-resolves** to `bounded` with one stderr note and an unchanged exit
   code. Unset and empty are not "unrecognized": both take the `bounded` default silently, with no

@@ -251,6 +251,7 @@ for entry in "${ENTRIES[@]}"; do
         continue
     fi
     reply_superseded=0
+    reply_supersession_status=""
     if [[ "$reply_readable" -eq 1 ]] && command -v node >/dev/null 2>&1 \
         && [[ -f "$HARVESTER" && "$thread" != "filedrop" && -f "$task_path" && ! -L "$task_path" ]]; then
         harvest_output=""
@@ -259,6 +260,12 @@ for entry in "${ENTRIES[@]}"; do
             if printf '%s\n' "$harvest_output" \
                 | grep -Eq $'^REPLY_SUPERSEDED_WARNING\t'; then
                 reply_superseded=1
+                reply_supersession_status="confirmed"
+            elif uncertainty_line="$(printf '%s\n' "$harvest_output" \
+                | grep -E $'^REPLY_SUPERSESSION_UNCERTAIN\t(pending|unavailable)\t' \
+                | sed -n '1p')" && [[ -n "$uncertainty_line" ]]; then
+                reply_supersession_status="${uncertainty_line#*$'\t'}"
+                reply_supersession_status="${reply_supersession_status%%$'\t'*}"
             fi
         fi
     fi
@@ -319,6 +326,8 @@ for entry in "${ENTRIES[@]}"; do
     echo "    \"$(to_win "$p")\""
     if [[ "$reply_superseded" -eq 1 ]]; then
         echo "    [WARNING: REPLY-SUPERSEDED] Primary reply may be superseded; inspect the dispatch thread before relying on it."
+    elif [[ "$reply_supersession_status" == "pending" || "$reply_supersession_status" == "unavailable" ]]; then
+        echo "    [CAUTION: REPLY-SUPERSESSION-${reply_supersession_status^^}] Selected primary may be stale; freshness and supersession could not be certified."
     fi
     if [[ "$bytes" -eq 0 ]]; then
         echo "    (empty — possibly mid-write or pending; re-run to refresh)"

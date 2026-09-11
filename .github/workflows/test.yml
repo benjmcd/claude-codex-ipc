@@ -125,8 +125,9 @@ jobs:
         # Builds an oversized dirty git fixture (mktemp; HOME and CODEX_IPC_ROOT both
         # redirected into it; never --ipc) and asserts the 0.1.11 default bound holds, that
         # the `## Uncommitted changes` heading and body survive it (the SIGPIPE-fallback
-        # class), that CODEX_IPC_GIT_CONTEXT=full still reproduces the pre-bounding payload,
-        # and that both new advisories stay on stderr with stdout byte-identical.
+        # class), that CODEX_IPC_GIT_CONTEXT=full restores only the three pre-bounding
+        # git-context bodies inside the current payload scaffold, and that both new advisories
+        # stay on stderr with stdout byte-identical.
         run: bash tests/test_git_context_bound.sh
 
       - name: Hermetic router-contract sentinel

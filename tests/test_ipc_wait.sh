@@ -36,6 +36,9 @@ const taskName = `${dispatch}.task.md`;
 
 const api = await import(pathToFileURL(waitPath));
 const { DEFAULT_WAIT_BUDGET_MS, DEFAULT_WAIT_INTERVAL_MS, waitForCompletion } = api;
+const { readRolloutFile } = await import(
+  pathToFileURL(path.join(path.dirname(waitPath), "codex_ipc_rollout_reader.mjs"))
+);
 
 let passed = 0;
 async function test(name, fn) {
@@ -69,6 +72,14 @@ function ownOpenRecords() {
     sessionMeta(),
     event("task_started", ownTurn),
     event("user_message", ownTurn, { message: `read C:/handoff/${taskName} and proceed` }),
+  ];
+}
+
+function ownCompletedRecords(body = "certified rollout body") {
+  return [
+    ...ownOpenRecords(),
+    event("agent_message", ownTurn, { phase: "final_answer", message: body }),
+    event("task_complete", ownTurn, { last_agent_message: body }),
   ];
 }
 
@@ -155,6 +166,86 @@ await test("done requires own task_complete plus a regular readable reply", asyn
   const reply = writeReply(path.join(root, `${dispatch}.reply.md`));
   const result = await waitForCompletion(directOptions(root, rollout, reply));
   assert.equal(result.token, "done");
+});
+
+await test("a reused dispatch id makes an older primary reply unavailable", async () => {
+  const root = caseDir("mixed-source-freshness");
+  const rollout = writeRollout(root, [
+    ...ownCompletedRecords("older certified body"),
+    event("task_started", otherTurn),
+    event("user_message", otherTurn, { message: `read C:/handoff/${taskName} and proceed` }),
+  ]);
+  const reply = writeReply(path.join(root, `${dispatch}.reply.md`));
+  const primary = await waitForCompletion(directOptions(root, rollout, reply));
+  assert.equal(primary.token, "unavailable");
+  assert.equal(primary.replySource, undefined);
+  assert.ok(primary.diagnostics.some((item) => item.code === "dispatch-id-reused"));
+  assert.ok(primary.diagnostics.some((item) => item.code === "reply-unverified"));
+
+  const fallback = await waitForCompletion(directOptions(
+    root,
+    rollout,
+    path.join(root, "missing.reply.md"),
+    { acceptRolloutFallback: true },
+  ));
+  assert.equal(fallback.token, "unavailable");
+  assert.equal(fallback.replySource, undefined);
+  assert.ok(fallback.diagnostics.some((item) => item.code === "dispatch-id-reused"));
+});
+
+await test("opaque post-completion tails caution primary and block rollout fallback", async () => {
+  for (const [name, tail] of [
+    ["schema", `${JSON.stringify(event("future_lifecycle_event", undefined))}\n`],
+    ["malformed", "{\"type\":\n"],
+  ]) {
+    const root = caseDir(`opaque-freshness-${name}`);
+    const rollout = writeRollout(root, ownCompletedRecords());
+    fs.appendFileSync(rollout, tail);
+    const reply = writeReply(path.join(root, `${dispatch}.reply.md`));
+    const primary = await waitForCompletion(directOptions(root, rollout, reply));
+    assert.equal(primary.token, "unavailable", name);
+    assert.equal(primary.replySource, undefined, name);
+    assert.ok(primary.diagnostics.some((item) => item.code === "dispatch-freshness-unsettled"), name);
+    assert.ok(primary.diagnostics.some((item) => item.code === "reply-unverified"), name);
+
+    const fallback = await waitForCompletion(directOptions(
+      root,
+      rollout,
+      path.join(root, "missing.reply.md"),
+      { acceptRolloutFallback: true },
+    ));
+    assert.equal(fallback.token, "unavailable", name);
+    assert.equal(fallback.replySource, undefined, name);
+    assert.ok(fallback.diagnostics.some((item) => item.code === "dispatch-freshness-unsettled"), name);
+  }
+});
+
+await test("a reused dispatch id stays unavailable after both occurrences settle", async () => {
+  const root = caseDir("mixed-fallback-complete");
+  const newBody = "new certified body";
+  const rollout = writeRollout(root, [
+    ...ownCompletedRecords("older certified body"),
+    event("task_started", otherTurn),
+    event("user_message", otherTurn, { message: `read C:/handoff/${taskName} and proceed` }),
+    event("agent_message", otherTurn, { phase: "final_answer", message: newBody }),
+    event("task_complete", otherTurn, { last_agent_message: newBody }),
+  ]);
+  let sleeps = 0;
+  const result = await waitForCompletion(directOptions(
+    root,
+    rollout,
+    path.join(root, "missing.reply.md"),
+    { acceptRolloutFallback: true, budgetMs: 30, intervalMs: 10 },
+  ), {
+    now: () => 0,
+    sleep: async () => {
+      sleeps += 1;
+    },
+  });
+  assert.equal(result.token, "unavailable");
+  assert.equal(result.replySource, undefined);
+  assert.ok(result.diagnostics.some((item) => item.code === "dispatch-id-reused"));
+  assert.equal(sleeps, 0);
 });
 
 await test("aborted wins even when a reply is present and marks it unverified", () => {
@@ -536,10 +627,170 @@ await test("bounded expiry returns pending without wall-clock sleep", async () =
   assert.equal(sleepCalls, 3);
 });
 
-await test("an operator message inside a turn-id'd own turn does not block completion", async () => {
-  // Regression: the intervening-user-message ambiguity belongs to the ordered-event fallback.
-  // With a turn_id the boundaries are unambiguous, so the operator typing into the thread while
-  // the lane works must not turn a completed dispatch into `unavailable`. (Observed live.)
+await test("wait skips unchanged full reads and revalidates at the budget edge", async () => {
+  const root = caseDir("no-growth-fast-path");
+  const rollout = writeRollout(root, ownOpenRecords());
+  let clock = 0;
+  let fullReads = 0;
+  let sleepCalls = 0;
+  const result = await waitForCompletion(
+    directOptions(root, rollout, path.join(root, "missing.md"), {
+      budgetMs: 25,
+      intervalMs: 10,
+    }),
+    {
+      now: () => clock,
+      sleep: async (ms) => {
+        clock += ms;
+        sleepCalls += 1;
+      },
+      readRolloutFile: (...args) => {
+        fullReads += 1;
+        return readRolloutFile(...args);
+      },
+    },
+  );
+  assert.equal(result.token, "pending");
+  assert.equal(sleepCalls, 3);
+  assert.equal(fullReads, 2, "initial and budget-edge certification reads only");
+});
+
+await test("sleep overshoot cannot combine stale rollout certification with a newly appeared reply", async () => {
+  const root = caseDir("sleep-overshoot-stale-certification");
+  const rollout = writeRollout(root, ownOpenRecords());
+  const reply = path.join(root, `${dispatch}.reply.md`);
+  let clock = 0;
+  let fullReads = 0;
+  const result = await waitForCompletion(
+    directOptions(root, rollout, reply, {
+      acceptRolloutFallback: true,
+      budgetMs: 20,
+      intervalMs: 10,
+    }),
+    {
+      now: () => clock,
+      sleep: async () => {
+        writeReply(reply);
+        clock = 100;
+      },
+      readRolloutFile: (...args) => {
+        fullReads += 1;
+        if (fullReads > 1) {
+          return { ok: false, reason: "same-size-rewrite-invalid", diagnostics: [] };
+        }
+        return readRolloutFile(...args);
+      },
+    },
+  );
+  assert.equal(fs.existsSync(reply), true);
+  assert.equal(clock, 100);
+  assert.equal(fullReads, 1);
+  assert.equal(result.token, "pending");
+});
+
+await test("wait growth re-enters full validation and can certify completion", async () => {
+  const root = caseDir("growth-fast-path");
+  const rollout = writeRollout(root, ownOpenRecords());
+  const reply = writeReply(path.join(root, `${dispatch}.reply.md`));
+  let clock = 0;
+  let fullReads = 0;
+  let sleepCalls = 0;
+  const result = await waitForCompletion(
+    directOptions(root, rollout, reply, { budgetMs: 30, intervalMs: 10 }),
+    {
+      now: () => clock,
+      sleep: async (ms) => {
+        clock += ms;
+        sleepCalls += 1;
+        if (sleepCalls === 1) {
+          fs.appendFileSync(rollout, `${JSON.stringify(event("task_complete", ownTurn))}\n`);
+        }
+      },
+      readRolloutFile: (...args) => {
+        fullReads += 1;
+        return readRolloutFile(...args);
+      },
+    },
+  );
+  assert.equal(result.token, "done");
+  assert.equal(result.replySource, "reply-file");
+  assert.equal(fullReads, 2, "growth must trigger a full delta read");
+});
+
+await test("wait fails closed when an unchanged path is physically replaced", async () => {
+  const root = caseDir("replacement-fast-path");
+  const records = ownOpenRecords();
+  const rollout = writeRollout(root, records);
+  let clock = 0;
+  let fullReads = 0;
+  let replaced = false;
+  const result = await waitForCompletion(
+    directOptions(root, rollout, path.join(root, "missing.md"), {
+      budgetMs: 30,
+      intervalMs: 10,
+    }),
+    {
+      now: () => clock,
+      sleep: async (ms) => {
+        clock += ms;
+        if (!replaced) {
+          fs.renameSync(rollout, `${rollout}.old`);
+          fs.writeFileSync(
+            rollout,
+            `${records.map((item) => JSON.stringify(item)).join("\n")}\n`,
+          );
+          replaced = true;
+        }
+      },
+      readRolloutFile: (...args) => {
+        fullReads += 1;
+        return readRolloutFile(...args);
+      },
+    },
+  );
+  assert.equal(replaced, true);
+  assert.equal(result.token, "unavailable");
+  assert.equal(fullReads, 2);
+});
+
+await test("wait detects same-size tampering during forced edge revalidation", async () => {
+  const root = caseDir("same-size-fast-path");
+  const records = ownOpenRecords();
+  const rollout = writeRollout(root, records);
+  const otherThread = "33333333-3333-4333-8333-333333333333";
+  const tampered = [sessionMeta(otherThread), ...records.slice(1)];
+  const originalText = `${records.map((item) => JSON.stringify(item)).join("\n")}\n`;
+  const tamperedText = `${tampered.map((item) => JSON.stringify(item)).join("\n")}\n`;
+  assert.equal(Buffer.byteLength(tamperedText), Buffer.byteLength(originalText));
+  let clock = 0;
+  let fullReads = 0;
+  let sleepCalls = 0;
+  const result = await waitForCompletion(
+    directOptions(root, rollout, path.join(root, "missing.md"), {
+      budgetMs: 25,
+      intervalMs: 10,
+    }),
+    {
+      now: () => clock,
+      sleep: async (ms) => {
+        clock += ms;
+        sleepCalls += 1;
+        if (sleepCalls === 1) fs.writeFileSync(rollout, tamperedText);
+      },
+      readRolloutFile: (...args) => {
+        fullReads += 1;
+        return readRolloutFile(...args);
+      },
+    },
+  );
+  assert.equal(result.token, "unavailable");
+  assert.equal(sleepCalls, 2, "one same-size observation must stay pending before the edge");
+  assert.equal(fullReads, 2, "the edge must perform a second full certification read");
+});
+
+await test("a distinct operator message inside a turn-id'd own turn blocks completion", async () => {
+  // A turn id binds lifecycle boundaries, not task ownership. A distinct later user instruction
+  // can change the task whose final body is being certified, so the named dispatch fails closed.
   const root = caseDir("intervening-user-with-turn-id");
   const rollout = writeRollout(root, [
     ...ownOpenRecords(),
@@ -549,7 +800,7 @@ await test("an operator message inside a turn-id'd own turn does not block compl
   const reply = path.join(root, "reply.md");
   fs.writeFileSync(reply, "body");
   const result = await waitForCompletion(directOptions(root, rollout, reply), { now: () => 0 });
-  assert.equal(result.token, "done");
+  assert.equal(result.token, "unavailable");
 });
 
 await test("an intervening user message without turn ids remains ambiguous", async () => {
@@ -588,6 +839,91 @@ await test("first read exhausting the budget yields pending, not unavailable", a
     },
   );
   assert.equal(result.token, "pending");
+});
+
+await test("a deadline-truncated prefix cannot certify completion before EOF", async () => {
+  const root = caseDir("deadline-complete-prefix");
+  const rollout = writeRollout(root, [
+    ...ownOpenRecords(),
+    event("agent_message", ownTurn, {
+      phase: "final_answer",
+      message: "must wait for EOF",
+    }),
+    event("task_complete", ownTurn, { last_agent_message: "must wait for EOF" }),
+  ]);
+  fs.appendFileSync(rollout, " ".repeat(300000));
+  const reply = writeReply(path.join(root, `${dispatch}.reply.md`));
+  let ticks = 0;
+  const result = await waitForCompletion(
+    directOptions(root, rollout, reply, { budgetMs: 4, intervalMs: 1 }),
+    { now: () => ++ticks, sleep: async () => {} },
+  );
+  assert.equal(result.token, "pending");
+});
+
+await test("a concurrently grown completed prefix cannot certify before stable EOF", async () => {
+  const root = caseDir("growth-complete-prefix");
+  const rollout = writeRollout(root, [
+    ...ownOpenRecords(),
+    event("agent_message", ownTurn, {
+      phase: "final_answer",
+      message: "must wait for stable EOF",
+    }),
+    event("task_complete", ownTurn, { last_agent_message: "must wait for stable EOF" }),
+  ]);
+  const reply = writeReply(path.join(root, `${dispatch}.reply.md`));
+  const originalFstat = fs.fstatSync;
+  let fstatCalls = 0;
+  fs.fstatSync = function injectedFstat(descriptor, ...args) {
+    fstatCalls += 1;
+    if (fstatCalls === 3) {
+      fs.appendFileSync(rollout, `${JSON.stringify(event("token_count", undefined, { info: { total: 1 } }))}\n`);
+    }
+    return originalFstat.call(fs, descriptor, ...args);
+  };
+  let result;
+  try {
+    result = await waitForCompletion(directOptions(root, rollout, reply), { now: () => 0 });
+  } finally {
+    fs.fstatSync = originalFstat;
+  }
+  assert.equal(result.token, "pending");
+  assert.ok(result.diagnostics.some((item) => item.code === "rollout-read-not-at-eof"));
+});
+
+await test("a concurrently grown completion certifies after a later stable EOF", async () => {
+  const root = caseDir("growth-complete-retry");
+  const rollout = writeRollout(root, [
+    ...ownOpenRecords(),
+    event("agent_message", ownTurn, {
+      phase: "final_answer",
+      message: "stable EOF body",
+    }),
+    event("task_complete", ownTurn, { last_agent_message: "stable EOF body" }),
+  ]);
+  const reply = writeReply(path.join(root, `${dispatch}.reply.md`));
+  const originalFstat = fs.fstatSync;
+  let fstatCalls = 0;
+  fs.fstatSync = function injectedFstat(descriptor, ...args) {
+    fstatCalls += 1;
+    if (fstatCalls === 3) {
+      fs.appendFileSync(rollout, `${JSON.stringify(event("token_count", undefined, { info: { total: 1 } }))}\n`);
+    }
+    return originalFstat.call(fs, descriptor, ...args);
+  };
+  let result;
+  let clock = 0;
+  try {
+    result = await waitForCompletion(
+      directOptions(root, rollout, reply, { budgetMs: 2, intervalMs: 1 }),
+      { now: () => clock, sleep: async (ms) => { clock += ms; } },
+    );
+  } finally {
+    fs.fstatSync = originalFstat;
+  }
+  assert.equal(result.token, "done");
+  assert.equal(result.replySource, "reply-file");
+  assert.ok(result.diagnostics.some((item) => item.code === "rollout-read-not-at-eof"));
 });
 
 await test("readable candidate plus later budget expiry yields pending, not unavailable", async () => {
@@ -843,6 +1179,65 @@ await test("single-shot wait validates one snapshot: no second locator/full-file
   }
   assert.equal(result.token, "done");
   assert.equal(rolloutOpens, 2);
+});
+
+await test("post-locator wait read remains bound to the requested rollout owner", async () => {
+  const ownerB = "33333333-3333-4333-8333-333333333333";
+  const root = caseDir("post-locator-owner-swap");
+  const rollout = writeRollout(root, [sessionMeta()]);
+  const rolloutResolved = path.resolve(rollout);
+  const replacement = [
+    sessionMeta(ownerB),
+    event("task_started", ownTurn),
+    event("user_message", ownTurn, { message: `read C:/handoff/${taskName} and proceed` }),
+    event("agent_message", ownTurn, { phase: "final_answer", message: "OWNER-B-MUST-NOT-COUNT" }),
+    event("task_complete", ownTurn, { last_agent_message: "OWNER-B-MUST-NOT-COUNT" }),
+  ];
+  const originalOpen = fs.openSync;
+  const originalClose = fs.closeSync;
+  const locatorDescriptors = new Set();
+  let armed = true;
+  let injected = false;
+  fs.openSync = (target, ...args) => {
+    const descriptor = originalOpen(target, ...args);
+    if (armed && typeof target === "string" && path.resolve(target) === rolloutResolved) {
+      locatorDescriptors.add(descriptor);
+    }
+    return descriptor;
+  };
+  fs.closeSync = (descriptor, ...args) => {
+    const isLocatorDescriptor = armed && locatorDescriptors.has(descriptor);
+    const result = originalClose(descriptor, ...args);
+    if (isLocatorDescriptor) {
+      armed = false;
+      fs.writeFileSync(
+        rollout,
+        `${replacement.map((item) => JSON.stringify(item)).join("\n")}\n`,
+      );
+      injected = true;
+    }
+    return result;
+  };
+  let result;
+  try {
+    result = await waitForCompletion(
+      directOptions(root, rollout, path.join(root, "missing.reply.md")),
+    );
+  } finally {
+    fs.openSync = originalOpen;
+    fs.closeSync = originalClose;
+  }
+  assert.equal(injected, true);
+  assert.equal(result.token, "unavailable");
+  const waitSource = fs.readFileSync(waitPath, "utf8");
+  assert.match(
+    waitSource,
+    /const readRollout = injected\.readRolloutFile \|\| readRolloutFile/,
+  );
+  assert.match(
+    waitSource,
+    /readRollout\(candidatePath,\s*\{[\s\S]*?rolloutThreadId:\s*options\.threadId/,
+  );
 });
 
 console.log(`RESULT: ${passed} passed, 0 failed`);

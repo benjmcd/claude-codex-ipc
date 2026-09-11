@@ -31,6 +31,9 @@ import { pathToFileURL } from "node:url";
 
 const { harvestDispatch } = await import(pathToFileURL(process.env.HARVESTER));
 const { DEFAULT_OBSERVE_BUDGET_MS, observeRollout } = await import(pathToFileURL(process.env.OBSERVER));
+const { inspectRolloutNoGrowth, readRolloutFile } = await import(
+  new URL("./codex_ipc_rollout_reader.mjs", pathToFileURL(process.env.OBSERVER)),
+);
 let passed = 0;
 async function test(name, fn) {
   try {
@@ -49,6 +52,130 @@ const basic = path.join(
 );
 const tmp = process.env.TMPDIR_TEST;
 const dispatch = "1000000000-1-abcdef0123456789";
+const cleanBasic = path.join(
+  tmp,
+  "rollout-clean-11111111-1111-4111-8111-111111111111.jsonl",
+);
+const basicRecords = fs.readFileSync(basic, "utf8").trimEnd().split(/\r?\n/);
+fs.writeFileSync(cleanBasic, `${basicRecords.slice(0, -1).join("\n")}\n`);
+const uniqueBasic = path.join(
+  tmp,
+  "rollout-unique-11111111-1111-4111-8111-111111111111.jsonl",
+);
+const mirroredBasic = path.join(
+  tmp,
+  "rollout-mirrored-11111111-1111-4111-8111-111111111111.jsonl",
+);
+const uniqueTurn = "33333333-3333-4333-8333-333333333333";
+const uniqueMarker = `read C:/synthetic/${dispatch}.task.md and proceed`;
+fs.writeFileSync(uniqueBasic, `${[
+  { type: "session_meta", payload: { id: "11111111-1111-4111-8111-111111111111" } },
+  { type: "event_msg", payload: { type: "task_started", turn_id: uniqueTurn } },
+  { type: "event_msg", payload: { type: "user_message", turn_id: uniqueTurn, message: uniqueMarker } },
+  { type: "event_msg", payload: { type: "agent_message", turn_id: uniqueTurn, phase: "final_answer", message: "latest final" } },
+  { type: "event_msg", payload: { type: "task_complete", turn_id: uniqueTurn, last_agent_message: "latest final" } },
+].map((item) => JSON.stringify(item)).join("\n")}\n`);
+const mirroredUser = {
+  type: "event_msg",
+  payload: {
+    type: "item_completed",
+    turn_id: uniqueTurn,
+    thread_id: "11111111-1111-4111-8111-111111111111",
+    item: {
+      id: "stable-user-delivery",
+      type: "UserMessage",
+      content: [{ type: "input_text", text: uniqueMarker }],
+    },
+  },
+};
+fs.writeFileSync(mirroredBasic, `${[
+  { type: "session_meta", payload: { id: "11111111-1111-4111-8111-111111111111" } },
+  { type: "event_msg", payload: { type: "task_started", turn_id: uniqueTurn } },
+  mirroredUser,
+  mirroredUser,
+  { type: "event_msg", payload: { type: "agent_message", turn_id: uniqueTurn, phase: "final_answer", message: "mirrored final" } },
+  {
+    type: "event_msg",
+    payload: {
+      type: "item_completed",
+      turn_id: uniqueTurn,
+      thread_id: "11111111-1111-4111-8111-111111111111",
+      item: {
+        id: "stable-agent-delivery",
+        type: "AgentMessage",
+        phase: "final_answer",
+        content: [{ type: "output_text", text: "mirrored final" }],
+      },
+    },
+  },
+  { type: "event_msg", payload: { type: "task_complete", turn_id: uniqueTurn, last_agent_message: "mirrored final" } },
+].map((item) => JSON.stringify(item)).join("\n")}\n`);
+
+async function swapAfterLocatorValidation(target, replacementRecords, action) {
+  const originalOpen = fs.openSync;
+  const originalClose = fs.closeSync;
+  const targetPath = path.resolve(target);
+  const locatorDescriptors = new Set();
+  let armed = true;
+  let injected = false;
+  fs.openSync = function injectedOpen(filePath, ...args) {
+    const descriptor = originalOpen.call(fs, filePath, ...args);
+    if (armed && path.resolve(String(filePath)) === targetPath) {
+      locatorDescriptors.add(descriptor);
+    }
+    return descriptor;
+  };
+  fs.closeSync = function injectedClose(descriptor, ...args) {
+    const isLocatorDescriptor = armed && locatorDescriptors.has(descriptor);
+    const result = originalClose.call(fs, descriptor, ...args);
+    if (isLocatorDescriptor) {
+      armed = false;
+      locatorDescriptors.delete(descriptor);
+      fs.writeFileSync(
+        target,
+        `${replacementRecords.map((item) => JSON.stringify(item)).join("\n")}\n`,
+      );
+      injected = true;
+    }
+    return result;
+  };
+  try {
+    return { result: await action(), injected };
+  } finally {
+    fs.openSync = originalOpen;
+    fs.closeSync = originalClose;
+  }
+}
+
+function rolloutReadBindings(sourcePath) {
+  const source = fs.readFileSync(sourcePath, "utf8");
+  return [...source.matchAll(/\breadRolloutFile(?:Impl)?\s*\(/g)].map((match) => {
+    const start = source.indexOf("(", match.index);
+    let depth = 0;
+    let quote = null;
+    let escaped = false;
+    for (let index = start; index < source.length; index += 1) {
+      const character = source[index];
+      if (quote !== null) {
+        if (escaped) escaped = false;
+        else if (character === "\\") escaped = true;
+        else if (character === quote) quote = null;
+        continue;
+      }
+      if (character === '"' || character === "'" || character === "`") {
+        quote = character;
+      } else if (character === "(") {
+        depth += 1;
+      } else if (character === ")") {
+        depth -= 1;
+        if (depth === 0) {
+          return /\brolloutThreadId\s*:/.test(source.slice(start, index + 1));
+        }
+      }
+    }
+    return false;
+  });
+}
 
 await test("observe budget default reflects measured pickup p90", () => {
   assert.equal(DEFAULT_OBSERVE_BUDGET_MS, 20000);
@@ -68,6 +195,23 @@ await test("regular reply file is primary without rollout access", () => {
   assert.equal(result.sourceBytes, 7);
   assert.equal(result.returnedBytes, 4);
   assert.equal(result.bodyBase64, null);
+});
+
+await test("invalid thread identity cautions while preserving the primary reply", () => {
+  const reply = path.join(tmp, "invalid-thread-primary.reply.md");
+  fs.writeFileSync(reply, "PRIMARY");
+  const result = harvestDispatch({
+    dispatchId: dispatch,
+    replyPath: reply,
+    threadId: "not-a-uuid",
+    sessionsRoot: path.join(tmp, "does-not-exist"),
+  });
+  assert.equal(result.source, "reply-file");
+  assert.equal(result.replySuperseded, false);
+  assert.equal(result.replySupersessionStatus, "unavailable");
+  assert.equal(result.replySupersessionCaution, true);
+  assert.ok(result.diagnostics.some((item) => item.code === "rollout-authority-unavailable"));
+  assert.ok(result.diagnostics.some((item) => item.code === "reply-supersession-unavailable"));
 });
 
 await test("standalone supersession marker warns without replacing the primary reply", () => {
@@ -96,6 +240,7 @@ await test("standalone supersession marker warns without replacing the primary r
   assert.equal(result.bodyBase64, null);
   assert.equal(fs.readFileSync(reply, "utf8"), "PRIMARY-MUST-STAY");
   assert.equal(result.replySuperseded, true);
+  assert.equal(result.replySupersessionStatus, "confirmed");
 });
 
 await test("discussion of supersession marker does not warn", () => {
@@ -121,6 +266,163 @@ await test("discussion of supersession marker does not warn", () => {
   });
   assert.equal(result.source, "reply-file");
   assert.equal(result.replySuperseded, false);
+  assert.equal(result.replySupersessionStatus, "not-seen");
+  assert.deepEqual(result.diagnostics, []);
+});
+
+await test("dispatch-ID reuse makes primary supersession unavailable and suppresses fallback", () => {
+  const threadId = "22222222-2222-4222-8222-222222222222";
+  const firstTurn = "11111111-1111-4111-8111-111111111111";
+  const secondTurn = "33333333-3333-4333-8333-333333333333";
+  const dispatchId = "8550000000-8-abcdef0123456789";
+  const reply = path.join(tmp, `${dispatchId}.reply.md`);
+  const rollout = path.join(tmp, `rollout-mixed-supersession-${threadId}.jsonl`);
+  const marker = `read C:/x/${dispatchId}.task.md and proceed`;
+  const supersession = "REPLY-SUPERSEDED\nOlder completed occurrence.";
+  fs.writeFileSync(rollout, `${[
+    { type: "session_meta", payload: { id: threadId } },
+    { type: "event_msg", payload: { type: "task_started", turn_id: firstTurn } },
+    { type: "event_msg", payload: { type: "user_message", turn_id: firstTurn, message: marker } },
+    { type: "event_msg", payload: { type: "agent_message", turn_id: firstTurn, phase: "final_answer", message: supersession } },
+    { type: "event_msg", payload: { type: "task_complete", turn_id: firstTurn, last_agent_message: supersession } },
+    { type: "event_msg", payload: { type: "task_started", turn_id: secondTurn } },
+    { type: "event_msg", payload: { type: "user_message", turn_id: secondTurn, message: marker } },
+  ].map((item) => JSON.stringify(item)).join("\n")}\n`);
+
+  fs.writeFileSync(reply, "PRIMARY-REMAINS-PRESENT");
+  const primary = harvestDispatch({ threadId, dispatchId, replyPath: reply, rolloutPath: rollout });
+  assert.equal(primary.source, "reply-file");
+  assert.equal(primary.replySuperseded, false);
+  assert.equal(primary.replySupersessionStatus, "unavailable");
+  assert.equal(primary.replySupersessionCaution, true);
+  assert.ok(primary.diagnostics.some((item) => item.code === "dispatch-id-reused"));
+  assert.equal(fs.readFileSync(reply, "utf8"), "PRIMARY-REMAINS-PRESENT");
+
+  const absentReply = path.join(tmp, `${dispatchId}-absent.reply.md`);
+  const fallback = harvestDispatch({ threadId, dispatchId, replyPath: absentReply, rolloutPath: rollout });
+  assert.equal(fallback.source, "none");
+  assert.equal(fallback.reason, "unavailable");
+  assert.equal(fallback.bodyBase64, "");
+  assert.equal(fallback.duplicateCount, 2);
+  assert.ok(fallback.diagnostics.some((item) => item.code === "dispatch-id-reused"));
+});
+
+await test("dispatch-ID reuse and opaque-tail uncertainty suppress fallback conservatively", () => {
+  const threadId = "22222222-2222-4222-8222-222222222222";
+  const firstTurn = "11111111-1111-4111-8111-111111111111";
+  const secondTurn = "33333333-3333-4333-8333-333333333333";
+  const dispatchId = "8560000000-8-abcdef0123456789";
+  const marker = `read C:/x/${dispatchId}.task.md and proceed`;
+  const supersession = "REPLY-SUPERSEDED\nOlder completed occurrence.";
+  const completedPrefix = [
+    { type: "session_meta", payload: { id: threadId } },
+    { type: "event_msg", payload: { type: "task_started", turn_id: firstTurn } },
+    { type: "event_msg", payload: { type: "user_message", turn_id: firstTurn, message: marker } },
+    { type: "event_msg", payload: { type: "agent_message", turn_id: firstTurn, phase: "final_answer", message: supersession } },
+    { type: "event_msg", payload: { type: "task_complete", turn_id: firstTurn, last_agent_message: supersession } },
+  ];
+  const cases = [
+    [
+      "conflict",
+      [
+        { type: "event_msg", payload: { type: "task_started", turn_id: secondTurn } },
+        { type: "event_msg", payload: { type: "user_message", turn_id: secondTurn, message: marker } },
+        { type: "event_msg", payload: { type: "agent_message", turn_id: secondTurn, phase: "final_answer", message: "candidate A" } },
+        { type: "event_msg", payload: { type: "agent_message", turn_id: secondTurn, phase: "final_answer", message: "candidate B" } },
+        { type: "event_msg", payload: { type: "task_complete", turn_id: secondTurn, last_agent_message: "candidate A" } },
+      ],
+      false,
+      "dispatch-mixed-state",
+      true,
+    ],
+    [
+      "orphan-marker",
+      [{ type: "event_msg", payload: { type: "user_message", turn_id: secondTurn, message: marker } }],
+      false,
+      "dispatch-mixed-state",
+      true,
+    ],
+    [
+      "schema",
+      [{ type: "event_msg", payload: { type: "future_lifecycle_event", turn_id: secondTurn } }],
+      false,
+      "dispatch-freshness-unsettled",
+      false,
+    ],
+    ["malformed", [], true, "dispatch-freshness-unsettled", false],
+  ];
+  for (const [name, suffix, addMalformed, diagnosticCode, reused] of cases) {
+    const reply = path.join(tmp, `${dispatchId}-${name}.reply.md`);
+    const absentReply = path.join(tmp, `${dispatchId}-${name}-absent.reply.md`);
+    const rollout = path.join(tmp, `rollout-mixed-${name}-${threadId}.jsonl`);
+    const completeText = [...completedPrefix, ...suffix]
+      .map((item) => JSON.stringify(item))
+      .join("\n");
+    fs.writeFileSync(rollout, `${completeText}\n${addMalformed ? "{\"type\":\n" : ""}`);
+    fs.writeFileSync(reply, `PRIMARY-${name}`);
+
+    const primary = harvestDispatch({ threadId, dispatchId, replyPath: reply, rolloutPath: rollout });
+    assert.equal(primary.source, "reply-file", name);
+    assert.equal(primary.replySuperseded, !reused, name);
+    assert.equal(primary.replySupersessionStatus, reused ? "unavailable" : "confirmed", name);
+    assert.equal(primary.replySupersessionCaution, true, name);
+    assert.ok(primary.diagnostics.some(
+      (item) => item.code === (reused ? "dispatch-id-reused" : diagnosticCode),
+    ), name);
+
+    const fallback = harvestDispatch({
+      threadId,
+      dispatchId,
+      replyPath: absentReply,
+      rolloutPath: rollout,
+    });
+    assert.equal(fallback.source, "none", name);
+    assert.equal(fallback.reason, "unavailable", name);
+    assert.equal(fallback.bodyBase64, "", name);
+    assert.ok(fallback.diagnostics.some(
+      (item) => item.code === (reused ? "dispatch-id-reused" : diagnosticCode),
+    ), name);
+  }
+});
+
+await test("opaque tails make negative supersession and rollout fallback unavailable", () => {
+  const threadId = "22222222-2222-4222-8222-222222222222";
+  const turnId = "11111111-1111-4111-8111-111111111111";
+  const dispatchId = "8570000000-8-abcdef0123456789";
+  const marker = `read C:/x/${dispatchId}.task.md and proceed`;
+  const body = "ordinary completed body";
+  const prefix = [
+    { type: "session_meta", payload: { id: threadId } },
+    { type: "event_msg", payload: { type: "task_started", turn_id: turnId } },
+    { type: "event_msg", payload: { type: "user_message", turn_id: turnId, message: marker } },
+    { type: "event_msg", payload: { type: "agent_message", turn_id: turnId, phase: "final_answer", message: body } },
+    { type: "event_msg", payload: { type: "task_complete", turn_id: turnId, last_agent_message: body } },
+  ];
+  for (const [name, tail] of [
+    ["schema", `${JSON.stringify({ type: "event_msg", payload: { type: "future_lifecycle_event" } })}\n`],
+    ["malformed", "{\"type\":\n"],
+  ]) {
+    const rollout = path.join(tmp, `rollout-negative-${name}-${threadId}.jsonl`);
+    const reply = path.join(tmp, `${dispatchId}-${name}.reply.md`);
+    fs.writeFileSync(rollout, `${prefix.map((item) => JSON.stringify(item)).join("\n")}\n${tail}`);
+    fs.writeFileSync(reply, `PRIMARY-${name}`);
+    const primary = harvestDispatch({ threadId, dispatchId, replyPath: reply, rolloutPath: rollout });
+    assert.equal(primary.replySuperseded, false, name);
+    assert.equal(primary.replySupersessionStatus, "unavailable", name);
+    assert.equal(primary.replySupersessionCaution, true, name);
+    assert.ok(primary.diagnostics.some((item) => item.code === "reply-supersession-schema-unknown"), name);
+
+    const fallback = harvestDispatch({
+      threadId,
+      dispatchId,
+      replyPath: `${reply}.absent`,
+      rolloutPath: rollout,
+    });
+    assert.equal(fallback.source, "none", name);
+    assert.equal(fallback.reason, "unavailable", name);
+    assert.equal(fallback.bodyBase64, "", name);
+    assert.ok(fallback.diagnostics.some((item) => item.code === "dispatch-freshness-unsettled"), name);
+  }
 });
 
 await test("marker in an unterminated superseded turn does not warn", () => {
@@ -139,19 +441,439 @@ await test("marker in an unterminated superseded turn does not warn", () => {
   const result = harvestDispatch({ threadId, dispatchId, replyPath: reply, rolloutPath: rollout });
   assert.equal(result.source, "reply-file");
   assert.equal(result.replySuperseded, false);
+  assert.equal(result.replySupersessionStatus, "unavailable");
+  assert.ok(result.diagnostics.some((item) => item.code === "reply-supersession-unavailable"));
 });
 
-await test("completed rollout is selected only when primary is unavailable", () => {
+await test("partial-tail supersession evidence stays pending and diagnostic", () => {
+  const threadId = "33333333-3333-4333-8333-333333333333";
+  const turnId = "00000000-0000-4000-8000-00000000c0de";
+  const dispatchId = "5050000000-5-abcdef0123456789";
+  const reply = path.join(tmp, `${dispatchId}.reply.md`);
+  const rollout = path.join(tmp, `rollout-partial-supersession-${threadId}.jsonl`);
+  const finalMessage = "REPLY-SUPERSEDED\nThis marker is followed by an incomplete tail.";
+  fs.writeFileSync(reply, "PRIMARY-REMAINS-AUTHORITATIVE");
+  const completePrefix = [
+    { type: "session_meta", payload: { id: threadId } },
+    { type: "event_msg", payload: { type: "task_started", turn_id: turnId } },
+    { type: "event_msg", payload: { type: "user_message", turn_id: turnId, message: `read C:/x/${dispatchId}.task.md and proceed` } },
+    { type: "event_msg", payload: { type: "agent_message", turn_id: turnId, phase: "final_answer", message: finalMessage } },
+    { type: "event_msg", payload: { type: "task_complete", turn_id: turnId, last_agent_message: finalMessage } },
+  ].map((item) => JSON.stringify(item)).join("\n");
+  fs.writeFileSync(rollout, `${completePrefix}\n{\"type\":`);
+  const result = harvestDispatch({ threadId, dispatchId, replyPath: reply, rolloutPath: rollout });
+  assert.equal(result.source, "reply-file");
+  assert.equal(result.replySuperseded, false);
+  assert.equal(result.replySupersessionStatus, "pending");
+  assert.ok(result.diagnostics.some((item) => item.code === "rollout-read-not-at-eof"));
+});
+
+await test("unavailable rollout authority is explicit while primary remains authoritative", () => {
+  const threadId = "33333333-3333-4333-8333-333333333333";
+  const dispatchId = "5060000000-5-abcdef0123456789";
+  const reply = path.join(tmp, `${dispatchId}.reply.md`);
+  fs.writeFileSync(reply, "PRIMARY-ONLY");
+  const result = harvestDispatch({
+    threadId,
+    dispatchId,
+    replyPath: reply,
+    sessionsRoot: path.join(tmp, "missing-supersession-root"),
+  });
+  assert.equal(result.source, "reply-file");
+  assert.equal(result.replySuperseded, false);
+  assert.equal(result.replySupersessionStatus, "unavailable");
+  assert.equal(result.replySupersessionCaution, false);
+  assert.ok(result.diagnostics.length > 0);
+});
+
+await test("non-benign discovery failure cautions while primary remains authoritative", () => {
+  const threadId = "33333333-3333-4333-8333-333333333333";
+  const dispatchId = "5065000000-5-abcdef0123456789";
+  const reply = path.join(tmp, `${dispatchId}.reply.md`);
+  const unreadableRoot = path.join(tmp, "sessions-root-is-a-file");
+  fs.writeFileSync(reply, "PRIMARY-ONLY");
+  fs.writeFileSync(unreadableRoot, "not a directory");
+  const result = harvestDispatch({ threadId, dispatchId, replyPath: reply, sessionsRoot: unreadableRoot });
+  assert.equal(result.source, "reply-file");
+  assert.equal(result.replySuperseded, false);
+  assert.equal(result.replySupersessionStatus, "unavailable");
+  assert.equal(result.replySupersessionCaution, true);
+  assert.ok(result.diagnostics.some((item) => item.code === "directory-unreadable"));
+  assert.ok(result.diagnostics.some((item) => item.code === "reply-supersession-unavailable"));
+});
+
+await test("unrecognized target rollout filename cautions without becoming a candidate", () => {
+  const threadId = "33333333-3333-4333-8333-333333333333";
+  const dispatchId = "5066000000-5-abcdef0123456789";
+  const reply = path.join(tmp, `${dispatchId}.reply.md`);
+  const sessionsRoot = path.join(tmp, "sessions-name-drift");
+  fs.mkdirSync(sessionsRoot, { recursive: true });
+  fs.writeFileSync(reply, "PRIMARY-ONLY");
+  fs.writeFileSync(
+    path.join(sessionsRoot, `rollout-future-${threadId}_unsupported-suffix.jsonl`),
+    `${JSON.stringify({ type: "session_meta", payload: { id: threadId } })}\n`,
+  );
+  const result = harvestDispatch({ threadId, dispatchId, replyPath: reply, sessionsRoot });
+  assert.equal(result.source, "reply-file");
+  assert.equal(result.replySupersessionStatus, "unavailable");
+  assert.equal(result.replySupersessionCaution, true);
+  assert.ok(result.diagnostics.some((item) => item.code === "rollout-name-unrecognized"));
+});
+
+await test("unresolved discovery set cannot serve an older rollout fallback", () => {
+  const threadId = "11111111-1111-4111-8111-111111111111";
+  const dispatchId = dispatch;
+  const sessionsRoot = path.join(tmp, "sessions-unresolved-fallback");
+  fs.mkdirSync(sessionsRoot, { recursive: true });
+  fs.copyFileSync(cleanBasic, path.join(sessionsRoot, path.basename(cleanBasic)));
+  fs.writeFileSync(
+    path.join(sessionsRoot, `rollout-future-${threadId}_unsupported-suffix.jsonl`),
+    `${JSON.stringify({ type: "session_meta", payload: { id: threadId } })}\n`,
+  );
+  const result = harvestDispatch({
+    threadId,
+    dispatchId,
+    replyPath: path.join(tmp, "absent-unresolved.reply.md"),
+    sessionsRoot,
+  });
+  assert.equal(result.source, "none");
+  assert.equal(result.reason, "ambiguous");
+  assert.ok(result.diagnostics.some((item) => item.code === "candidate-set-unresolved"));
+});
+
+await test("ambiguous rollout discovery cautions while primary remains authoritative", () => {
+  const threadId = "00000000-0000-4000-8000-00000000c0de";
+  const dispatchId = "5070000000-5-abcdef0123456789";
+  const reply = path.join(tmp, `${dispatchId}.reply.md`);
+  const sessionsRoot = path.join(tmp, "ambiguous-supersession-root");
+  fs.mkdirSync(path.join(sessionsRoot, "a"), { recursive: true });
+  fs.mkdirSync(path.join(sessionsRoot, "b"), { recursive: true });
+  fs.writeFileSync(reply, "PRIMARY-AMBIGUOUS");
+  const metadata = `${JSON.stringify({ type: "session_meta", payload: { id: threadId } })}\n`;
+  fs.writeFileSync(path.join(sessionsRoot, "a", `rollout-a-${threadId}.jsonl`), metadata);
+  fs.writeFileSync(path.join(sessionsRoot, "b", `rollout-b-${threadId}.jsonl`), metadata);
+  const result = harvestDispatch({ threadId, dispatchId, replyPath: reply, sessionsRoot });
+  assert.equal(result.source, "reply-file");
+  assert.equal(result.replySuperseded, false);
+  assert.equal(result.replySupersessionStatus, "unavailable");
+  assert.equal(result.replySupersessionCaution, true);
+  assert.ok(result.diagnostics.some((item) => item.code === "multiple-candidates"));
+  assert.ok(result.diagnostics.some((item) => item.code === "reply-supersession-unavailable"));
+});
+
+await test("dispatch-ID reuse never supplies a rollout fallback body", () => {
   const result = harvestDispatch({
     dispatchId: dispatch,
     replyPath: path.join(tmp, "absent.reply.md"),
     threadId: "11111111-1111-4111-8111-111111111111",
-    rolloutPath: basic,
+    rolloutPath: cleanBasic,
     maxBytes: 4096,
+  });
+  assert.equal(result.source, "none");
+  assert.equal(result.reason, "unavailable");
+  assert.equal(result.bodyBase64, "");
+  assert.equal(result.duplicateCount, 2);
+  assert.ok(result.diagnostics.some((item) => item.code === "dispatch-id-reused"));
+});
+
+await test("dispatch-ID reuse keeps a primary viewable but supersession uncertifiable", () => {
+  const replyPath = path.join(tmp, "duplicate-primary.reply.md");
+  fs.writeFileSync(replyPath, "PRIMARY-STAYS-VIEWABLE");
+  const result = harvestDispatch({
+    dispatchId: dispatch,
+    replyPath,
+    threadId: "11111111-1111-4111-8111-111111111111",
+    rolloutPath: cleanBasic,
+  });
+  assert.equal(result.source, "reply-file");
+  assert.equal(result.replyPath, replyPath);
+  assert.equal(result.bodyBase64, null);
+  assert.equal(fs.readFileSync(replyPath, "utf8"), "PRIMARY-STAYS-VIEWABLE");
+  assert.equal(result.replySuperseded, false);
+  assert.equal(result.replySupersessionStatus, "unavailable");
+  assert.equal(result.replySupersessionCaution, true);
+  assert.ok(result.diagnostics.some((item) => item.code === "dispatch-id-reused"));
+});
+
+await test("a unique completed rollout is selected only when primary is unavailable", () => {
+  const result = harvestDispatch({
+    dispatchId: dispatch,
+    replyPath: path.join(tmp, "unique-absent.reply.md"),
+    threadId: "11111111-1111-4111-8111-111111111111",
+    rolloutPath: uniqueBasic,
   });
   assert.equal(result.source, "rollout-fallback");
   assert.equal(Buffer.from(result.bodyBase64, "base64").toString("utf8"), "latest final");
-  assert.equal(result.duplicateCount, 2);
+  assert.equal(result.duplicateCount, 1);
+});
+
+await test("identity-backed mirrored records preserve one safe fallback occurrence", () => {
+  const result = harvestDispatch({
+    dispatchId: dispatch,
+    replyPath: path.join(tmp, "mirrored-absent.reply.md"),
+    threadId: "11111111-1111-4111-8111-111111111111",
+    rolloutPath: mirroredBasic,
+  });
+  assert.equal(result.source, "rollout-fallback");
+  assert.equal(Buffer.from(result.bodyBase64, "base64").toString("utf8"), "mirrored final");
+  assert.equal(result.duplicateCount, 1);
+});
+
+await test("terminal binding selects one body while unbound conflicts and schema drift fail closed", () => {
+  const threadId = "11111111-1111-4111-8111-111111111111";
+  const turnId = "22222222-2222-4222-8222-222222222222";
+  const dispatchId = "8600000000-8-abcdef0123456789";
+  const prefix = [
+    { type: "session_meta", payload: { id: threadId } },
+    { type: "event_msg", payload: { type: "task_started", turn_id: turnId } },
+    { type: "event_msg", payload: { type: "user_message", turn_id: turnId, message: `read C:/x/${dispatchId}.task.md and proceed` } },
+  ];
+  const selectedPath = path.join(tmp, `rollout-body-terminal-selected-${threadId}.jsonl`);
+  fs.writeFileSync(selectedPath, `${[
+    ...prefix,
+    { type: "event_msg", payload: { type: "agent_message", phase: "final_answer", message: "SAFE" } },
+    { type: "event_msg", payload: { type: "agent_message", phase: "final_answer", message: "OTHER" } },
+    { type: "event_msg", payload: { type: "task_complete", turn_id: turnId, last_agent_message: "SAFE" } },
+  ].map((item) => JSON.stringify(item)).join("\n")}\n`);
+  const selected = harvestDispatch({
+    dispatchId,
+    threadId,
+    replyPath: path.join(tmp, "selected-absent.reply.md"),
+    rolloutPath: selectedPath,
+  });
+  assert.equal(selected.source, "rollout-fallback");
+  assert.equal(selected.reason, null);
+  assert.equal(Buffer.from(selected.bodyBase64, "base64").toString("utf8"), "SAFE");
+  // Owner ruling D-34 / OD-11 (2026-09-03): a fallback served after the terminal copy chose among
+  // distinct finals must disclose that it did so, and must not report the count as one.
+  const disclosure = (selected.diagnostics || []).filter(
+    (item) => item.code === "terminal-copy-disambiguated",
+  );
+  assert.equal(disclosure.length, 1);
+  assert.equal(disclosure[0].count, 2);
+  assert.equal(
+    JSON.stringify(selected.diagnostics || []).includes("OTHER"),
+    false,
+    "the disclosure must not carry the rejected body",
+  );
+
+  const unboundPath = path.join(tmp, `rollout-body-unbound-${threadId}.jsonl`);
+  fs.writeFileSync(unboundPath, `${[
+    ...prefix,
+    { type: "event_msg", payload: { type: "agent_message", phase: "final_answer", message: "SAFE" } },
+    { type: "event_msg", payload: { type: "agent_message", phase: "final_answer", message: "OTHER" } },
+    { type: "event_msg", payload: { type: "task_complete", turn_id: turnId, last_agent_message: "NEITHER" } },
+  ].map((item) => JSON.stringify(item)).join("\n")}\n`);
+  const unbound = harvestDispatch({
+    dispatchId,
+    threadId,
+    replyPath: path.join(tmp, "unbound-absent.reply.md"),
+    rolloutPath: unboundPath,
+  });
+  assert.equal(unbound.source, "none");
+  assert.equal(unbound.reason, "unavailable");
+  assert.equal(unbound.bodyBase64, "");
+
+  const driftPath = path.join(tmp, `rollout-body-drift-${threadId}.jsonl`);
+  fs.writeFileSync(driftPath, `${[
+    ...prefix,
+    { type: "event_msg", payload: { type: "future_lifecycle_event", turn_id: turnId } },
+    { type: "event_msg", payload: { type: "agent_message", phase: "final_answer", message: "MUST-NOT-SERVE" } },
+    { type: "event_msg", payload: { type: "task_complete", turn_id: turnId, last_agent_message: "MUST-NOT-SERVE" } },
+  ].map((item) => JSON.stringify(item)).join("\n")}\n`);
+  const drift = harvestDispatch({
+    dispatchId,
+    threadId,
+    replyPath: path.join(tmp, "drift-absent.reply.md"),
+    rolloutPath: driftPath,
+  });
+  assert.equal(drift.source, "none");
+  assert.equal(drift.reason, "unparseable");
+  assert.equal(drift.bodyBase64, "");
+});
+
+await test("file-global rollout owner conflict cannot escape through fallback", () => {
+  const threadId = "11111111-1111-4111-8111-111111111111";
+  const conflictingThreadId = "22222222-2222-4222-8222-222222222222";
+  const turnId = "33333333-3333-4333-8333-333333333333";
+  const dispatchId = "8650000000-8-abcdef0123456789";
+  const rolloutPath = path.join(tmp, `rollout-owner-global-${threadId}.jsonl`);
+  fs.writeFileSync(rolloutPath, `${[
+    { type: "session_meta", payload: { id: threadId } },
+    { type: "session_meta", payload: { id: conflictingThreadId } },
+    { type: "event_msg", payload: { type: "task_started", turn_id: turnId } },
+    { type: "event_msg", payload: { type: "user_message", turn_id: turnId, message: `read C:/x/${dispatchId}.task.md and proceed` } },
+    { type: "event_msg", payload: { type: "agent_message", phase: "final_answer", message: "MUST-NOT-SERVE" } },
+    { type: "event_msg", payload: { type: "task_complete", turn_id: turnId, last_agent_message: "MUST-NOT-SERVE" } },
+  ].map((item) => JSON.stringify(item)).join("\n")}\n`);
+  const result = harvestDispatch({
+    dispatchId,
+    threadId,
+    replyPath: path.join(tmp, "owner-global-absent.reply.md"),
+    rolloutPath,
+  });
+  assert.equal(result.source, "none");
+  assert.equal(result.bodyBase64, "");
+  assert.equal(result.reason, "unparseable");
+});
+
+await test("post-locator reads remain bound to the requested rollout owner", async () => {
+  const ownerA = "11111111-1111-4111-8111-111111111111";
+  const ownerB = "22222222-2222-4222-8222-222222222222";
+  const turnId = "33333333-3333-4333-8333-333333333333";
+  const dispatchId = "8660000000-8-abcdef0123456789";
+  const makeInitial = (name) => {
+    const target = path.join(tmp, `rollout-${name}-${ownerA}.jsonl`);
+    fs.writeFileSync(
+      target,
+      `${JSON.stringify({ type: "session_meta", payload: { id: ownerA } })}\n`,
+    );
+    return target;
+  };
+  const ownerBRecords = (finalMessage) => [
+    { type: "session_meta", payload: { id: ownerB } },
+    { type: "event_msg", payload: { type: "task_started", turn_id: turnId } },
+    {
+      type: "event_msg",
+      payload: {
+        type: "user_message",
+        turn_id: turnId,
+        message: `read C:/sanitized/${dispatchId}.task.md and proceed`,
+      },
+    },
+    {
+      type: "event_msg",
+      payload: { type: "agent_message", turn_id: turnId, phase: "final_answer", message: finalMessage },
+    },
+    {
+      type: "event_msg",
+      payload: { type: "task_complete", turn_id: turnId, last_agent_message: finalMessage },
+    },
+  ];
+
+  const fallbackPath = makeInitial("owner-swap-fallback");
+  const fallback = await swapAfterLocatorValidation(
+    fallbackPath,
+    ownerBRecords("OWNER-B-MUST-NOT-SERVE"),
+    () => harvestDispatch({
+      dispatchId,
+      threadId: ownerA,
+      replyPath: path.join(tmp, "owner-swap-absent.reply.md"),
+      rolloutPath: fallbackPath,
+    }),
+  );
+
+  const supersessionPath = makeInitial("owner-swap-supersession");
+  const replyPath = path.join(tmp, "owner-swap-primary.reply.md");
+  fs.writeFileSync(replyPath, "PRIMARY-STAYS-AUTHORITATIVE");
+  const supersession = await swapAfterLocatorValidation(
+    supersessionPath,
+    ownerBRecords("REPLY-SUPERSEDED\nOWNER-B-MUST-NOT-ANNOTATE"),
+    () => harvestDispatch({
+      dispatchId,
+      threadId: ownerA,
+      replyPath,
+      rolloutPath: supersessionPath,
+    }),
+  );
+
+  const observerPath = makeInitial("owner-swap-observer");
+  let clock = 0;
+  const observer = await swapAfterLocatorValidation(
+    observerPath,
+    ownerBRecords("OWNER-B-ADMISSION-MUST-NOT-COUNT"),
+    () => observeRollout({
+      threadId: ownerA,
+      dispatchId,
+      rolloutPath: observerPath,
+      budgetMs: 2,
+      intervalMs: 1,
+    }, { now: () => clock, sleep: async (ms) => { clock += ms; } }),
+  );
+
+  assert.deepEqual(
+    {
+      fallbackInjected: fallback.injected,
+      fallbackSource: fallback.result.source,
+      fallbackBody: fallback.result.bodyBase64,
+      supersessionInjected: supersession.injected,
+      replySuperseded: supersession.result.replySuperseded,
+      replySupersessionStatus: supersession.result.replySupersessionStatus,
+      supersessionDiagnostic: supersession.result.diagnostics.some(
+        (item) => item.code === "reply-supersession-unavailable",
+      ),
+      observerInjected: observer.injected,
+      observerToken: observer.result.token,
+      harvesterReadBindings: rolloutReadBindings(process.env.HARVESTER),
+      observerReadBindings: rolloutReadBindings(process.env.OBSERVER),
+    },
+    {
+      fallbackInjected: true,
+      fallbackSource: "none",
+      fallbackBody: "",
+      supersessionInjected: true,
+      replySuperseded: false,
+      replySupersessionStatus: "unavailable",
+      supersessionDiagnostic: true,
+      observerInjected: true,
+      observerToken: "rollout-unavailable",
+      harvesterReadBindings: [true, true],
+      observerReadBindings: [true],
+    },
+  );
+});
+
+await test("a terminal-selected supersession annotates without replacing the primary reply", () => {
+  const threadId = "11111111-1111-4111-8111-111111111111";
+  const turnId = "22222222-2222-4222-8222-222222222222";
+  const dispatchId = "8700000000-8-abcdef0123456789";
+  const reply = path.join(tmp, `${dispatchId}.reply.md`);
+  const rollout = path.join(tmp, `rollout-supersession-conflict-${threadId}.jsonl`);
+  const supersession = "REPLY-SUPERSEDED\nThis candidate conflicts with another final.";
+  fs.writeFileSync(reply, "PRIMARY-UNCHANGED");
+  fs.writeFileSync(rollout, `${[
+    { type: "session_meta", payload: { id: threadId } },
+    { type: "event_msg", payload: { type: "task_started", turn_id: turnId } },
+    { type: "event_msg", payload: { type: "user_message", turn_id: turnId, message: `read C:/x/${dispatchId}.task.md and proceed` } },
+    { type: "event_msg", payload: { type: "agent_message", phase: "final_answer", message: supersession } },
+    { type: "event_msg", payload: { type: "agent_message", phase: "final_answer", message: "OTHER" } },
+    { type: "event_msg", payload: { type: "task_complete", turn_id: turnId, last_agent_message: supersession } },
+  ].map((item) => JSON.stringify(item)).join("\n")}\n`);
+  const result = harvestDispatch({ threadId, dispatchId, replyPath: reply, rolloutPath: rollout });
+  assert.equal(result.source, "reply-file");
+  assert.equal(result.replySuperseded, true);
+  assert.equal(result.replySupersessionStatus, "confirmed");
+  assert.equal(result.replySupersessionCaution, false);
+  assert.ok(!result.diagnostics.some((item) => item.code === "reply-supersession-unavailable"));
+  // Owner ruling D-34 / OD-11 (2026-09-03): a supersession confirmed off a disambiguated final
+  // discloses the disambiguation on the same path that confirms it.
+  assert.ok(result.diagnostics.some((item) => item.code === "terminal-copy-disambiguated"));
+  assert.equal(fs.readFileSync(reply, "utf8"), "PRIMARY-UNCHANGED");
+});
+
+await test("an unbound supersession body cannot annotate a primary reply", () => {
+  const threadId = "11111111-1111-4111-8111-111111111111";
+  const turnId = "22222222-2222-4222-8222-222222222222";
+  const dispatchId = "8710000000-8-abcdef0123456789";
+  const reply = path.join(tmp, `${dispatchId}.reply.md`);
+  const rollout = path.join(tmp, `rollout-supersession-unbound-${threadId}.jsonl`);
+  const supersession = "REPLY-SUPERSEDED\nThis candidate conflicts with another final.";
+  fs.writeFileSync(reply, "PRIMARY-UNCHANGED");
+  fs.writeFileSync(rollout, `${[
+    { type: "session_meta", payload: { id: threadId } },
+    { type: "event_msg", payload: { type: "task_started", turn_id: turnId } },
+    { type: "event_msg", payload: { type: "user_message", turn_id: turnId, message: `read C:/x/${dispatchId}.task.md and proceed` } },
+    { type: "event_msg", payload: { type: "agent_message", phase: "final_answer", message: supersession } },
+    { type: "event_msg", payload: { type: "agent_message", phase: "final_answer", message: "OTHER" } },
+    { type: "event_msg", payload: { type: "task_complete", turn_id: turnId, last_agent_message: "NEITHER" } },
+  ].map((item) => JSON.stringify(item)).join("\n")}\n`);
+  const result = harvestDispatch({ threadId, dispatchId, replyPath: reply, rolloutPath: rollout });
+  assert.equal(result.source, "reply-file");
+  assert.equal(result.replySuperseded, false);
+  assert.equal(result.replySupersessionStatus, "unavailable");
+  assert.equal(result.replySupersessionCaution, true);
+  assert.ok(result.diagnostics.some((item) => item.code === "reply-supersession-unavailable"));
+  assert.equal(fs.readFileSync(reply, "utf8"), "PRIMARY-UNCHANGED");
 });
 
 await test("directory or symlink-like non-regular primary does not block fallback", () => {
@@ -161,7 +883,7 @@ await test("directory or symlink-like non-regular primary does not block fallbac
     dispatchId: dispatch,
     replyPath: notRegular,
     threadId: "11111111-1111-4111-8111-111111111111",
-    rolloutPath: basic,
+    rolloutPath: uniqueBasic,
   });
   assert.equal(result.source, "rollout-fallback");
 });
@@ -269,7 +991,193 @@ await test("observer reports admission hit without requiring completion", async 
   assert.equal(sleeps, 1);
 });
 
-await test("observer preserves a hit parsed before hard-deadline expiry", async () => {
+await test("repair RED: current response compaction is inert during admission observation", async () => {
+  const target = path.join(
+    tmp,
+    "rollout-observer-compaction-11111111-1111-4111-8111-111111111111.jsonl",
+  );
+  fs.writeFileSync(target, `${[
+    { type: "session_meta", payload: { id: "11111111-1111-4111-8111-111111111111" } },
+    {
+      type: "response_item",
+      payload: {
+        type: "compaction",
+        id: "sanitized-compaction",
+        encrypted_content: "sanitized",
+        internal_chat_message_metadata_passthrough: null,
+      },
+    },
+    {
+      type: "event_msg",
+      payload: {
+        type: "user_message",
+        message: `read C:/x/${dispatch}.task.md and proceed`,
+      },
+    },
+  ].map((item) => JSON.stringify(item)).join("\n")}\n`);
+  let clock = 0;
+  const result = await observeRollout({
+    threadId: "11111111-1111-4111-8111-111111111111",
+    dispatchId: dispatch,
+    rolloutPath: target,
+    budgetMs: 1,
+    intervalMs: 1,
+  }, { now: () => clock, sleep: async (ms) => { clock += ms; } });
+  assert.equal(result.token, "rollout-hit", JSON.stringify(result));
+  assert.equal(result.diagnostics.some((item) => item.code === "schema-drift"), false);
+});
+
+await test("observer admits an exact known-form user marker despite unrelated schema drift", async () => {
+  const target = path.join(
+    tmp,
+    "rollout-observer-schema-hit-11111111-1111-4111-8111-111111111111.jsonl",
+  );
+  fs.writeFileSync(target, `${[
+    { type: "session_meta", payload: { id: "11111111-1111-4111-8111-111111111111" } },
+    { type: "event_msg", payload: { type: "future_lifecycle_event" } },
+    {
+      type: "event_msg",
+      payload: {
+        type: "user_message",
+        message: `read C:/x/${dispatch}.task.md and proceed`,
+      },
+    },
+  ].map((item) => JSON.stringify(item)).join("\n")}\n`);
+  let clock = 0;
+  const result = await observeRollout({
+    threadId: "11111111-1111-4111-8111-111111111111",
+    dispatchId: dispatch,
+    rolloutPath: target,
+    budgetMs: 1,
+    intervalMs: 1,
+  }, { now: () => clock, sleep: async (ms) => { clock += ms; } });
+  assert.equal(result.token, "rollout-hit", JSON.stringify(result));
+  assert.ok(result.diagnostics.some((item) => item.code === "schema-drift"));
+});
+
+await test("observer retains an exact admission across growth despite unrelated schema drift", async () => {
+  const target = path.join(
+    tmp,
+    "rollout-observer-schema-retry-11111111-1111-4111-8111-111111111111.jsonl",
+  );
+  fs.writeFileSync(target, `${[
+    { type: "session_meta", payload: { id: "11111111-1111-4111-8111-111111111111" } },
+    { type: "event_msg", payload: { type: "future_lifecycle_event" } },
+    {
+      type: "event_msg",
+      payload: {
+        type: "user_message",
+        message: `read C:/x/${dispatch}.task.md and proceed`,
+      },
+    },
+  ].map((item) => JSON.stringify(item)).join("\n")}\n`);
+  const originalFstat = fs.fstatSync;
+  let fstatCalls = 0;
+  fs.fstatSync = function injectedFstat(descriptor, ...args) {
+    fstatCalls += 1;
+    if (fstatCalls === 3) {
+      fs.appendFileSync(
+        target,
+        `${JSON.stringify({ type: "event_msg", payload: { type: "token_count", info: { total: 1 } } })}\n`,
+      );
+    }
+    return originalFstat.call(fs, descriptor, ...args);
+  };
+  let result;
+  let clock = 0;
+  let sleeps = 0;
+  try {
+    result = await observeRollout({
+      threadId: "11111111-1111-4111-8111-111111111111",
+      dispatchId: dispatch,
+      rolloutPath: target,
+      budgetMs: 2,
+      intervalMs: 1,
+    }, { now: () => clock, sleep: async (ms) => { sleeps += 1; clock += ms; } });
+  } finally {
+    fs.fstatSync = originalFstat;
+  }
+  assert.equal(result.token, "rollout-hit", JSON.stringify(result));
+  assert.ok(sleeps >= 1);
+  assert.ok(result.diagnostics.some((item) => item.code === "schema-drift"));
+  assert.ok(result.diagnostics.some((item) => item.code === "rollout-read-not-at-eof"));
+});
+
+await test("observer rejects drifted and malformed would-be admissions", async () => {
+  const threadId = "22222222-2222-4222-8222-222222222222";
+  const driftedPath = path.join(tmp, `rollout-observer-drifted-admission-${threadId}.jsonl`);
+  fs.writeFileSync(driftedPath, `${[
+    { type: "session_meta", payload: { id: threadId } },
+    {
+      type: "future_event",
+      payload: {
+        type: "user_message",
+        message: `read C:/x/${dispatch}.task.md and proceed`,
+      },
+    },
+  ].map((item) => JSON.stringify(item)).join("\n")}\n`);
+  const malformedPath = path.join(tmp, `rollout-observer-malformed-admission-${threadId}.jsonl`);
+  fs.writeFileSync(
+    malformedPath,
+    `${JSON.stringify({ type: "session_meta", payload: { id: threadId } })}\n` +
+      `{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"read C:/x/${dispatch}.task.md and proceed\"}\n`,
+  );
+  let clock = 0;
+  const deps = { now: () => clock, sleep: async (ms) => { clock += ms; } };
+  const drifted = await observeRollout({
+    threadId,
+    dispatchId: dispatch,
+    rolloutPath: driftedPath,
+    budgetMs: 1,
+    intervalMs: 1,
+  }, deps);
+  clock = 0;
+  const malformed = await observeRollout({
+    threadId,
+    dispatchId: dispatch,
+    rolloutPath: malformedPath,
+    budgetMs: 1,
+    intervalMs: 1,
+  }, deps);
+  assert.equal(drifted.token, "rollout-unavailable", JSON.stringify(drifted));
+  assert.ok(drifted.diagnostics.some((item) => item.code === "schema-drift"));
+  assert.equal(malformed.token, "rollout-unavailable", JSON.stringify(malformed));
+  assert.ok(malformed.diagnostics.some((item) => item.code === "malformed-json"));
+});
+
+await test("unrelated malformed records before or after an exact admission veto a hit", async () => {
+  const threadId = "22222222-2222-4222-8222-222222222222";
+  const owner = JSON.stringify({ type: "session_meta", payload: { id: threadId } });
+  const admission = JSON.stringify({
+    type: "event_msg",
+    payload: {
+      type: "user_message",
+      message: `read C:/x/${dispatch}.task.md and proceed`,
+    },
+  });
+  for (const placement of ["before", "after"]) {
+    const target = path.join(tmp, `rollout-observer-malformed-${placement}-${threadId}.jsonl`);
+    const body = placement === "before"
+      ? [owner, "{unrelated malformed json}", admission]
+      : [owner, admission, "{unrelated malformed json}"];
+    fs.writeFileSync(target, `${body.join("\n")}\n`);
+    let clock = 0;
+    const result = await observeRollout({
+      threadId,
+      dispatchId: dispatch,
+      rolloutPath: target,
+      budgetMs: 1,
+      intervalMs: 1,
+    }, { now: () => clock, sleep: async (ms) => { clock += ms; } });
+    assert.equal(result.token, "rollout-unavailable", `${placement}: ${JSON.stringify(result)}`);
+    assert.ok(
+      result.diagnostics.some((item) => item.code === "malformed-json"),
+      placement,
+    );
+  }
+});
+
+await test("observer does not certify a hit before a complete EOF read", async () => {
   const target = path.join(tmp, "rollout-deadline-hit-11111111-1111-4111-8111-111111111111.jsonl");
   const prefix = [
     { type: "session_meta", payload: { id: "11111111-1111-4111-8111-111111111111" } },
@@ -284,7 +1192,170 @@ await test("observer preserves a hit parsed before hard-deadline expiry", async 
     budgetMs: 4,
     intervalMs: 1,
   }, { now: () => ++ticks, sleep: async () => {} });
+  assert.equal(result.token, "rollout-pending", JSON.stringify(result));
+});
+
+await test("harvester does not serve a completed prefix before stable EOF", () => {
+  const target = path.join(tmp, "rollout-harvest-growth-11111111-1111-4111-8111-111111111111.jsonl");
+  fs.copyFileSync(basic, target);
+  const originalFstat = fs.fstatSync;
+  let fstatCalls = 0;
+  fs.fstatSync = function injectedFstat(descriptor, ...args) {
+    fstatCalls += 1;
+    if (fstatCalls === 3) {
+      fs.appendFileSync(target, `${JSON.stringify({ type: "event_msg", payload: { type: "token_count", info: { total: 1 } } })}\n`);
+    }
+    return originalFstat.call(fs, descriptor, ...args);
+  };
+  let result;
+  try {
+    result = harvestDispatch({
+      threadId: "11111111-1111-4111-8111-111111111111",
+      dispatchId: dispatch,
+      replyPath: path.join(tmp, "missing-growth.reply.md"),
+      rolloutPath: target,
+      maxBytes: 4096,
+    });
+  } finally {
+    fs.fstatSync = originalFstat;
+  }
+  assert.equal(result.source, "none");
+  assert.equal(result.reason, "pending");
+  assert.ok(result.diagnostics.some((item) => item.code === "rollout-read-not-at-eof"));
+});
+
+await test("observer retains provisional admission but waits for stable EOF", async () => {
+  const target = path.join(tmp, "rollout-observer-growth-11111111-1111-4111-8111-111111111111.jsonl");
+  fs.writeFileSync(target, `${[
+    { type: "session_meta", payload: { id: "11111111-1111-4111-8111-111111111111" } },
+    { type: "event_msg", payload: { type: "user_message", message: `read C:/x/${dispatch}.task.md and proceed` } },
+  ].map((item) => JSON.stringify(item)).join("\n")}\n`);
+  const originalFstat = fs.fstatSync;
+  let fstatCalls = 0;
+  fs.fstatSync = function injectedFstat(descriptor, ...args) {
+    fstatCalls += 1;
+    if (fstatCalls === 3) {
+      fs.appendFileSync(target, `${JSON.stringify({ type: "event_msg", payload: { type: "token_count", info: { total: 1 } } })}\n`);
+    }
+    return originalFstat.call(fs, descriptor, ...args);
+  };
+  let result;
+  let clock = 0;
+  try {
+    result = await observeRollout({
+      threadId: "11111111-1111-4111-8111-111111111111",
+      dispatchId: dispatch,
+      rolloutPath: target,
+      budgetMs: 1,
+      intervalMs: 1,
+    }, { now: () => clock, sleep: async (ms) => { clock += ms; } });
+  } finally {
+    fs.fstatSync = originalFstat;
+  }
+  assert.equal(result.token, "rollout-pending", JSON.stringify(result));
+  assert.ok(result.diagnostics.some((item) => item.code === "rollout-read-not-at-eof"));
+});
+
+await test("observer certifies provisional admission after a later stable EOF", async () => {
+  const target = path.join(tmp, "rollout-observer-growth-retry-11111111-1111-4111-8111-111111111111.jsonl");
+  fs.writeFileSync(target, `${[
+    { type: "session_meta", payload: { id: "11111111-1111-4111-8111-111111111111" } },
+    { type: "event_msg", payload: { type: "user_message", message: `read C:/x/${dispatch}.task.md and proceed` } },
+  ].map((item) => JSON.stringify(item)).join("\n")}\n`);
+  const originalFstat = fs.fstatSync;
+  let fstatCalls = 0;
+  fs.fstatSync = function injectedFstat(descriptor, ...args) {
+    fstatCalls += 1;
+    if (fstatCalls === 3) {
+      fs.appendFileSync(target, `${JSON.stringify({ type: "event_msg", payload: { type: "token_count", info: { total: 1 } } })}\n`);
+    }
+    return originalFstat.call(fs, descriptor, ...args);
+  };
+  let result;
+  let clock = 0;
+  try {
+    result = await observeRollout({
+      threadId: "11111111-1111-4111-8111-111111111111",
+      dispatchId: dispatch,
+      rolloutPath: target,
+      budgetMs: 2,
+      intervalMs: 1,
+    }, { now: () => clock, sleep: async (ms) => { clock += ms; } });
+  } finally {
+    fs.fstatSync = originalFstat;
+  }
   assert.equal(result.token, "rollout-hit");
+  assert.ok(result.diagnostics.some((item) => item.code === "rollout-read-not-at-eof"));
+});
+
+await test("observer skips unchanged intermediate polls but forces a final full read", async () => {
+  const threadId = "11111111-1111-4111-8111-111111111111";
+  const target = path.join(tmp, `rollout-observer-no-growth-${threadId}.jsonl`);
+  fs.writeFileSync(target, `${JSON.stringify({ type: "session_meta", payload: { id: threadId } })}\n`);
+  let clock = 0;
+  let fullReads = 0;
+  let noGrowthChecks = 0;
+  const result = await observeRollout({
+    threadId,
+    dispatchId: dispatch,
+    rolloutPath: target,
+    budgetMs: 3,
+    intervalMs: 1,
+  }, {
+    now: () => clock,
+    sleep: async (ms) => { clock += ms; },
+    readRolloutFile: (...args) => {
+      fullReads += 1;
+      return readRolloutFile(...args);
+    },
+    inspectRolloutNoGrowth: (...args) => {
+      noGrowthChecks += 1;
+      return inspectRolloutNoGrowth(...args);
+    },
+  });
+  assert.equal(result.token, "rollout-pending", JSON.stringify(result));
+  assert.equal(noGrowthChecks, 1);
+  assert.equal(fullReads, 2);
+});
+
+await test("observer final full read catches a same-size rewrite hidden from no-growth metadata", async () => {
+  const threadId = "11111111-1111-4111-8111-111111111111";
+  const rewrittenThreadId = "22222222-2222-4222-8222-222222222222";
+  const target = path.join(tmp, `rollout-observer-same-size-rewrite-${threadId}.jsonl`);
+  const initial = `${JSON.stringify({ type: "session_meta", payload: { id: threadId } })}\n`;
+  const replacement = `${JSON.stringify({ type: "session_meta", payload: { id: rewrittenThreadId } })}\n`;
+  assert.equal(Buffer.byteLength(initial), Buffer.byteLength(replacement));
+  fs.writeFileSync(target, initial);
+  let clock = 0;
+  let sleeps = 0;
+  let fullReads = 0;
+  let noGrowthChecks = 0;
+  const result = await observeRollout({
+    threadId,
+    dispatchId: dispatch,
+    rolloutPath: target,
+    budgetMs: 3,
+    intervalMs: 1,
+  }, {
+    now: () => clock,
+    sleep: async (ms) => {
+      sleeps += 1;
+      clock += ms;
+      if (sleeps === 1) fs.writeFileSync(target, replacement);
+    },
+    readRolloutFile: (...args) => {
+      fullReads += 1;
+      return readRolloutFile(...args);
+    },
+    inspectRolloutNoGrowth: (...args) => {
+      noGrowthChecks += 1;
+      return inspectRolloutNoGrowth(...args);
+    },
+  });
+  assert.equal(result.token, "rollout-unavailable", JSON.stringify(result));
+  assert.equal(noGrowthChecks, 1);
+  assert.equal(fullReads, 2);
+  assert.ok(result.diagnostics.some((item) => item.code === "consumed-prefix-changed"));
 });
 
 await test("observer rejects admission from an integrity-failed read", async () => {
@@ -317,6 +1388,47 @@ await test("observer rejects admission from an integrity-failed read", async () 
   assert.equal(result.token, "rollout-unavailable");
 });
 
+await test("observer never carries admission forward from a rejected read", async () => {
+  const target = path.join(tmp, "rollout-observer-rejected-marker-11111111-1111-4111-8111-111111111111.jsonl");
+  const sessionOnly = `${JSON.stringify({
+    type: "session_meta",
+    payload: { id: "11111111-1111-4111-8111-111111111111" },
+  })}\n`;
+  fs.writeFileSync(target, `${sessionOnly}${JSON.stringify({
+    type: "event_msg",
+    payload: {
+      type: "user_message",
+      message: `read C:/x/${dispatch}.task.md and proceed`,
+    },
+  })}\n`);
+  const originalRead = fs.readSync;
+  let injected = false;
+  fs.readSync = function injectedRead(descriptor, ...args) {
+    const bytesRead = originalRead.call(fs, descriptor, ...args);
+    if (!injected && bytesRead > 0 && args[2] > 4096) {
+      injected = true;
+      fs.writeFileSync(target, sessionOnly);
+    }
+    return bytesRead;
+  };
+  let result;
+  let clock = 0;
+  try {
+    result = await observeRollout({
+      threadId: "11111111-1111-4111-8111-111111111111",
+      dispatchId: dispatch,
+      rolloutPath: target,
+      budgetMs: 2,
+      intervalMs: 1,
+    }, { now: () => clock, sleep: async (ms) => { clock += ms; } });
+  } finally {
+    fs.readSync = originalRead;
+  }
+  assert.equal(injected, true);
+  assert.equal(result.token, "rollout-unavailable");
+  assert.ok(result.diagnostics.some((item) => item.code === "file-truncated"));
+});
+
 await test("observer distinguishes pending from unavailable with fake time", async () => {
   let now = 0;
   const deps = {
@@ -325,11 +1437,19 @@ await test("observer distinguishes pending from unavailable with fake time", asy
       now += ms;
     },
   };
+  const pendingPath = path.join(
+    tmp,
+    "rollout-observer-pending-11111111-1111-4111-8111-111111111111.jsonl",
+  );
+  fs.writeFileSync(
+    pendingPath,
+    `${JSON.stringify({ type: "session_meta", payload: { id: "11111111-1111-4111-8111-111111111111" } })}\n`,
+  );
   const pending = await observeRollout(
     {
       threadId: "11111111-1111-4111-8111-111111111111",
       dispatchId: "8888888888-8-abcdef0123456789",
-      rolloutPath: basic,
+      rolloutPath: pendingPath,
       budgetMs: 5,
       intervalMs: 2,
     },
@@ -352,10 +1472,31 @@ await test("observer distinguishes pending from unavailable with fake time", asy
 await test("observer rejects agent-only, substring, ambiguous, and malformed evidence", async () => {
   let now = 0;
   const deps = { now: () => now, sleep: async (ms) => { now += ms; } };
+  const safeNonHitPath = path.join(
+    tmp,
+    "rollout-observer-nonhit-11111111-1111-4111-8111-111111111111.jsonl",
+  );
+  fs.writeFileSync(safeNonHitPath, `${[
+    { type: "session_meta", payload: { id: "11111111-1111-4111-8111-111111111111" } },
+    {
+      type: "response_item",
+      payload: {
+        type: "agent_message",
+        content: "read C:/synthetic/9999999999-9-ffffffffffffffff.task.md and proceed",
+      },
+    },
+    {
+      type: "event_msg",
+      payload: {
+        type: "user_message",
+        message: "read C:/synthetic/1000000000-1-abcdef0123456789.task.md and proceed",
+      },
+    },
+  ].map((item) => JSON.stringify(item)).join("\n")}\n`);
   const agentOnly = await observeRollout({
     threadId: "11111111-1111-4111-8111-111111111111",
     dispatchId: "9999999999-9-ffffffffffffffff",
-    rolloutPath: basic,
+    rolloutPath: safeNonHitPath,
     budgetMs: 2,
     intervalMs: 1,
   }, deps);
@@ -363,7 +1504,7 @@ await test("observer rejects agent-only, substring, ambiguous, and malformed evi
   const substring = await observeRollout({
     threadId: "11111111-1111-4111-8111-111111111111",
     dispatchId: "1000000000-1-abcdef012345678",
-    rolloutPath: basic,
+    rolloutPath: safeNonHitPath,
     budgetMs: 2,
     intervalMs: 1,
   }, deps);
@@ -450,11 +1591,16 @@ WRONG_B64="$(printf 'WRONG-TURN-FINAL' | base64 | tr -d '\n=')"
   || no "harvester served a wrong-turn final (rc=$MM_RC out=$(printf '%s' "$MM_OUT" | cut -c1-80))"
 
 echo "== Observer CLI contract =="
-BASIC="$FIXTURES/rollout-basic-11111111-1111-4111-8111-111111111111.jsonl"
+BASIC="$TMP/rollout-unique-11111111-1111-4111-8111-111111111111.jsonl"
+OBS_HIT="$TMP/rollout-observer-cli-hit-11111111-1111-4111-8111-111111111111.jsonl"
+cat >"$OBS_HIT" <<'JSONL'
+{"type":"session_meta","payload":{"id":"11111111-1111-4111-8111-111111111111"}}
+{"type":"event_msg","payload":{"type":"user_message","message":"read C:/x/1000000000-1-abcdef0123456789.task.md and proceed"}}
+JSONL
 ERR="$TMP/observer.err"
 OUT="$(CODEX_IPC_OBSERVE_INTERVAL_MS=0 node "$OBSERVER" \
   --thread 11111111-1111-4111-8111-111111111111 \
-  --dispatch 1000000000-1-abcdef0123456789 --rollout-path "$BASIC" 2>"$ERR")"; RC=$?
+  --dispatch 1000000000-1-abcdef0123456789 --rollout-path "$OBS_HIT" 2>"$ERR")"; RC=$?
 [[ $RC -eq 0 && "$OUT" == "rollout-hit" && "$(wc -l < <(printf '%s\n' "$OUT"))" -eq 1 ]] \
   && grep -qi 'warning.*interval' "$ERR" && ok "exact one-line hit token; invalid env warns on stderr" \
   || no "observer hit/stdout/warning contract (rc=$RC out=$OUT)"
@@ -462,7 +1608,7 @@ OUT="$(node "$OBSERVER" --thread bad --dispatch x 2>"$ERR")"; RC=$?
 [[ $RC -ne 0 && -z "$OUT" ]] && ok "usage error is nonzero with no outcome token" || no "usage error contract (rc=$RC out=$OUT)"
 OUT="$(CODEX_IPC_ROLLOUT_MAX_RECORD_BYTES=1 node "$OBSERVER" \
   --thread 11111111-1111-4111-8111-111111111111 --dispatch 8888888888-8-abcdef0123456789 \
-  --rollout-path "$BASIC" --budget-ms 50 --interval-ms 10 2>"$ERR")"; RC=$?
+  --rollout-path "$OBS_HIT" --budget-ms 50 --interval-ms 10 2>"$ERR")"; RC=$?
 [[ $RC -eq 0 && "$OUT" == "rollout-unavailable" ]] \
   && ok "schema/record-cap failure maps to unavailable with exit 0" || no "observer cap mapping (rc=$RC out=$OUT)"
 
@@ -479,17 +1625,17 @@ NODE
 HARVEST_ERR="$TMP/harvest-diagnostic.err"
 OUT="$(node "$HARVESTER" --thread 22222222-2222-4222-8222-222222222222 \
   --dispatch 8300000000-8-abcdef0123456789 --rollout-path "$DIAGNOSTIC_ROLLOUT" 2>"$HARVEST_ERR")"; RC=$?
-[[ $RC -eq 0 && "$OUT" == $'none\tpending\t0\t0\t0\t-\t' && "$OUT" != *$'\n'* ]] \
+[[ $RC -eq 0 && "$OUT" == $'none\tunparseable\t0\t0\t0\t-\t' && "$OUT" != *$'\n'* ]] \
   && diagnostics_are_control_safe "$HARVEST_ERR" \
-  && ok "harvester diagnostics escape C0 and C1 without changing stdout shape" \
+  && ok "harvester diagnostics fail closed and escape C0/C1 without changing stdout shape" \
   || no "harvester diagnostic byte hygiene (rc=$RC out=$OUT)"
 OBSERVE_ERR="$TMP/observe-diagnostic.err"
 OUT="$(node "$OBSERVER" --thread 22222222-2222-4222-8222-222222222222 \
   --dispatch 8300000000-8-abcdef0123456789 --rollout-path "$DIAGNOSTIC_ROLLOUT" \
   --budget-ms 50 --interval-ms 10 2>"$OBSERVE_ERR")"; RC=$?
-[[ $RC -eq 0 && "$OUT" == "rollout-pending" && "$OUT" != *$'\n'* ]] \
+[[ $RC -eq 0 && "$OUT" == "rollout-unavailable" && "$OUT" != *$'\n'* ]] \
   && diagnostics_are_control_safe "$OBSERVE_ERR" \
-  && ok "observer diagnostics escape C0 and C1 without changing its token" \
+  && ok "observer diagnostics fail closed and escape C0/C1 without changing its token" \
   || no "observer diagnostic byte hygiene (rc=$RC out=$OUT)"
 
 SUPERSEDED_DISPATCH=8400000000-8-abcdef0123456789
@@ -506,6 +1652,38 @@ after_hash="$(sha256sum "$SUPERSEDED_REPLY")"
   && grep -Fxq $'REPLY_SUPERSEDED_WARNING\tprimary reply may be superseded; inspect the dispatch thread before relying on it.' "$SUPERSEDED_ERR" \
   && ok "harvester warns on stderr while primary stdout and file stay unchanged" \
   || no "harvester superseded warning contract (rc=$RC out=$OUT)"
+
+NOT_SEEN_DISPATCH=8500000000-8-abcdef0123456789
+NOT_SEEN_ERR="$TMP/not-seen.err"
+OUT="$(node "$HARVESTER" --thread 22222222-2222-4222-8222-222222222222 \
+  --dispatch "$NOT_SEEN_DISPATCH" --reply-path "$TMP/$NOT_SEEN_DISPATCH.reply.md" \
+  --rollout-path "$TMP/rollout-discussion-22222222-2222-4222-8222-222222222222.jsonl" \
+  2>"$NOT_SEEN_ERR")"; RC=$?
+[[ $RC -eq 0 && "$OUT" == reply-file$'\t'* && ! -s "$NOT_SEEN_ERR" ]] \
+  && ok "complete non-marker supersession check stays quiet" \
+  || no "harvester non-marker quiet contract (rc=$RC out=$OUT err=$(tr '\n' ' ' < "$NOT_SEEN_ERR"))"
+
+PARTIAL_DISPATCH=5050000000-5-abcdef0123456789
+PARTIAL_ERR="$TMP/partial-supersession.err"
+OUT="$(node "$HARVESTER" --thread 33333333-3333-4333-8333-333333333333 \
+  --dispatch "$PARTIAL_DISPATCH" --reply-path "$TMP/$PARTIAL_DISPATCH.reply.md" \
+  --rollout-path "$TMP/rollout-partial-supersession-33333333-3333-4333-8333-333333333333.jsonl" \
+  2>"$PARTIAL_ERR")"; RC=$?
+[[ $RC -eq 0 && "$OUT" == reply-file$'\t'* ]] \
+  && grep -Fxq $'REPLY_SUPERSESSION_UNCERTAIN\tpending\tselected primary may be stale; freshness and supersession could not be certified.' "$PARTIAL_ERR" \
+  && grep -q '"code":"rollout-read-not-at-eof"' "$PARTIAL_ERR" \
+  && ok "partial-tail supersession check emits a distinct pending caution" \
+  || no "harvester partial supersession caution (rc=$RC out=$OUT)"
+
+NO_CANDIDATE_CLI_DISPATCH=5060000000-5-abcdef0123456789
+NO_CANDIDATE_CLI_ERR="$TMP/no-candidate-cli.err"
+OUT="$(CODEX_IPC_SESSIONS_ROOT="$TMP/missing-cli-sessions" node "$HARVESTER" \
+  --thread 33333333-3333-4333-8333-333333333333 --dispatch "$NO_CANDIDATE_CLI_DISPATCH" \
+  --reply-path "$TMP/$NO_CANDIDATE_CLI_DISPATCH.reply.md" 2>"$NO_CANDIDATE_CLI_ERR")"; RC=$?
+[[ $RC -eq 0 && "$OUT" == reply-file$'\t'* ]] \
+  && ! grep -q $'^REPLY_SUPERSESSION_UNCERTAIN\t' "$NO_CANDIDATE_CLI_ERR" \
+  && ok "ordinary CLI no-candidate status emits diagnostics without a caution" \
+  || no "harvester no-candidate warning noise (rc=$RC out=$OUT)"
 
 echo "== Viewer dual-source integration =="
 IPCROOT="$TMP/ipc"; SESSIONS="$TMP/sessions"; SID=s1; THREAD=11111111-1111-4111-8111-111111111111
@@ -602,6 +1780,61 @@ OUT="$(CODEX_IPC_ROOT="$IPCROOT" CODEX_IPC_SESSIONS_ROOT="$SESSIONS" \
   && "$OUT" != *"REPLY-SUPERSEDED"* ]] \
   && ok "Node absence leaves superseded primary rendering unaffected" \
   || no "viewer supersession no-Node contract (rc=$RC)"
+
+NO_CANDIDATE_THREAD=22222222-2222-4222-8222-222222222222
+NO_CANDIDATE_DISPATCH=8800000000-8-abcdef0123456789
+mkdir -p "$IPCROOT/$SID/$NO_CANDIDATE_THREAD"
+printf 'task' > "$IPCROOT/$SID/$NO_CANDIDATE_THREAD/$NO_CANDIDATE_DISPATCH.task.md"
+printf 'PRIMARY-WITHOUT-ROLLOUT' > "$IPCROOT/$SID/$NO_CANDIDATE_THREAD/$NO_CANDIDATE_DISPATCH.reply.md"
+OUT="$(CODEX_IPC_ROOT="$IPCROOT" CODEX_IPC_SESSIONS_ROOT="$SESSIONS" \
+  CLAUDE_CODE_SESSION_ID="$SID" bash "$VIEWER" -c "$NO_CANDIDATE_THREAD" 2>&1)"; RC=$?
+[[ $RC -eq 0 && "$OUT" == *"source=reply-file"* && "$OUT" == *"PRIMARY-WITHOUT-ROLLOUT"* \
+  && "$OUT" != *"REPLY-SUPERSESSION-UNAVAILABLE"* && "$OUT" != *"REPLY-SUPERSESSION-PENDING"* ]] \
+  && ok "viewer keeps ordinary no-candidate supersession status quiet" \
+  || no "viewer no-candidate supersession noise contract (rc=$RC)"
+
+UNREADABLE_SESSIONS_ROOT="$TMP/sessions-root-is-a-file"
+printf 'not a directory' > "$UNREADABLE_SESSIONS_ROOT"
+OUT="$(CODEX_IPC_ROOT="$IPCROOT" CODEX_IPC_SESSIONS_ROOT="$UNREADABLE_SESSIONS_ROOT" \
+  CLAUDE_CODE_SESSION_ID="$SID" bash "$VIEWER" -c "$NO_CANDIDATE_THREAD" 2>&1)"; RC=$?
+[[ $RC -eq 0 && "$OUT" == *"source=reply-file"* && "$OUT" == *"PRIMARY-WITHOUT-ROLLOUT"* \
+  && "$OUT" == *"[CAUTION: REPLY-SUPERSESSION-UNAVAILABLE] Selected primary may be stale; freshness and supersession could not be certified."* ]] \
+  && ok "viewer surfaces non-benign supersession discovery failure" \
+  || no "viewer non-benign supersession discovery caution (rc=$RC)"
+
+AMBIGUOUS_THREAD=00000000-0000-4000-8000-00000000c0de
+AMBIGUOUS_DISPATCH=8850000000-8-abcdef0123456789
+mkdir -p "$IPCROOT/$SID/$AMBIGUOUS_THREAD" "$SESSIONS/2026/07/09/a" "$SESSIONS/2026/07/09/b"
+printf 'task' > "$IPCROOT/$SID/$AMBIGUOUS_THREAD/$AMBIGUOUS_DISPATCH.task.md"
+printf 'PRIMARY-WITH-AMBIGUOUS-ROLLOUT' > "$IPCROOT/$SID/$AMBIGUOUS_THREAD/$AMBIGUOUS_DISPATCH.reply.md"
+printf '{"type":"session_meta","payload":{"id":"%s"}}\n' "$AMBIGUOUS_THREAD" \
+  > "$SESSIONS/2026/07/09/a/rollout-a-$AMBIGUOUS_THREAD.jsonl"
+printf '{"type":"session_meta","payload":{"id":"%s"}}\n' "$AMBIGUOUS_THREAD" \
+  > "$SESSIONS/2026/07/09/b/rollout-b-$AMBIGUOUS_THREAD.jsonl"
+OUT="$(CODEX_IPC_ROOT="$IPCROOT" CODEX_IPC_SESSIONS_ROOT="$SESSIONS" \
+  CLAUDE_CODE_SESSION_ID="$SID" bash "$VIEWER" -c "$AMBIGUOUS_THREAD" 2>&1)"; RC=$?
+[[ $RC -eq 0 && "$OUT" == *"source=reply-file"* && "$OUT" == *"PRIMARY-WITH-AMBIGUOUS-ROLLOUT"* \
+  && "$OUT" == *"[CAUTION: REPLY-SUPERSESSION-UNAVAILABLE] Selected primary may be stale; freshness and supersession could not be certified."* \
+  && "$OUT" != *"[WARNING: REPLY-SUPERSEDED]"* ]] \
+  && ok "viewer surfaces ambiguous supersession discovery without adding no-candidate noise" \
+  || no "viewer ambiguous supersession caution contract (rc=$RC)"
+
+UNCERTAIN_THREAD=33333333-3333-4333-8333-333333333333
+UNCERTAIN_DISPATCH=8900000000-8-abcdef0123456789
+mkdir -p "$IPCROOT/$SID/$UNCERTAIN_THREAD"
+printf 'task' > "$IPCROOT/$SID/$UNCERTAIN_THREAD/$UNCERTAIN_DISPATCH.task.md"
+printf 'PRIMARY-WITH-UNCERTIFIABLE-ROLLOUT' > "$IPCROOT/$SID/$UNCERTAIN_THREAD/$UNCERTAIN_DISPATCH.reply.md"
+cat > "$SESSIONS/2026/07/09/rollout-uncertifiable-$UNCERTAIN_THREAD.jsonl" <<JSONL
+{"type":"session_meta","payload":{"id":"$UNCERTAIN_THREAD"}}
+{unrelated malformed json}
+JSONL
+OUT="$(CODEX_IPC_ROOT="$IPCROOT" CODEX_IPC_SESSIONS_ROOT="$SESSIONS" \
+  CLAUDE_CODE_SESSION_ID="$SID" bash "$VIEWER" -c "$UNCERTAIN_THREAD" 2>&1)"; RC=$?
+[[ $RC -eq 0 && "$OUT" == *"source=reply-file"* && "$OUT" == *"PRIMARY-WITH-UNCERTIFIABLE-ROLLOUT"* \
+  && "$OUT" == *"[CAUTION: REPLY-SUPERSESSION-UNAVAILABLE] Selected primary may be stale; freshness and supersession could not be certified."* \
+  && "$OUT" != *"[WARNING: REPLY-SUPERSEDED]"* ]] \
+  && ok "viewer exposes supersession uncertainty without weakening primary authority" \
+  || no "viewer supersession uncertainty contract (rc=$RC)"
 
 echo "== Fallback renderer, retention boundary, and deterministic output =="
 THREAD2=22222222-2222-4222-8222-222222222222; DISPATCH2=8200000000-8-abcdef0123456789

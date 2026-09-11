@@ -33,17 +33,20 @@ On an accepted send the wrapper emits one bounded confirmation token: `rollout-h
 dispatch pickup was observed in a rollout user message — admission only, not completion),
 `rollout-pending` (authoritative candidate readable but no pickup observed within budget — do not
 infer non-delivery), or `rollout-unavailable` (observation could not determine a result). None
-triggers an automatic resend; re-inspect the thread tail when certainty matters.
+triggers an automatic resend. Thread-tail inspection can inform diagnosis, but negative bounded
+evidence cannot prove non-admission or authorize a resend.
 
-1. `RESULT: gui-delivered` — done. If the task still does not appear and the target may have been
-   mid-turn, re-inspect and confirm the task text is in the thread tail (the router can report
-   success for a mid-turn send that never materializes).
+1. `RESULT: gui-delivered` — the router accepted exactly one target follower; this is not task
+   completion or reply-file success. Read the rollout confirmation and use the printed
+   `codex_ipc_wait.mjs` command. If the task still does not appear and the target may have been
+   mid-turn, re-inspect the authoritative rollout before taking any recovery action.
 2. `RESULT: gui-unowned` — no renderer owns the thread and auto-load did not complete. Open
    `codex://threads/<conversationId>` in the app, then rerun `/ipc`; or paste the printed
    file-drop pickup line.
-3. `RESULT: failed-closed` with `confirmation=not-attempted` — the failure is proven pre-send
-   (target missing/archived, invalid arguments, refused policy). No turn was admitted, so the
-   printed file-drop pickup line is safe to paste.
+3. `RESULT: failed-closed` with `confirmation=not-attempted` — structured evidence proves that no
+   follower was admitted (target missing/archived, invalid arguments, refused policy, or exact
+   `no-client-found` followed by a later refusal). A router request may have occurred, but no turn
+   was admitted, so the printed file-drop pickup line is safe to paste.
 4. `RESULT: failed-closed` with `confirmation=unknown` — router/pipe failure *after* a send was
    attempted (app closed, timeout, protocol drift). **The envelope is preserved but no pickup line
    is printed, and you must not paste one or resend** — the turn may already have been admitted,
@@ -67,9 +70,12 @@ explicit conversationId and compares before/after isolation evidence.
 
 Expected, not an error. The injected follower turn can run under a sandbox that blocks the
 per-dispatch `.reply.md` write. The producer states the denial in one line and puts the full
-substantive result in its final agent message; recover it with
-`codex_ipc_wait --accept-rollout-fallback` on a known-UUID `--ipc` dispatch (flagless and filedrop
-do not auto-recover). The inspector's stored `sandboxPolicy`/`approvalMode` are advisory only
+substantive result in its final agent message. On a known-UUID `--ipc` dispatch,
+`codex_ipc_wait --accept-rollout-fallback` certifies named-dispatch completion and
+`replySource=rollout-fallback` but intentionally emits no body; retrieve and render the body with
+the existing read-only dual-source `scripts/codex_ipc_replies.sh` viewer. Display is capped at 4096
+bytes by default; if truncation is reported, rerun with a sufficient `--max-bytes`. Flagless and
+filedrop do not auto-recover. The inspector's stored `sandboxPolicy`/`approvalMode` are advisory only
 (`permissionProfileAdvisory`): they may differ from the effective turn and never predict
 reply-writability.
 

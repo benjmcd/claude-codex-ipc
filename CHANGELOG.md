@@ -4,9 +4,216 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- The generated handoff payload and its committed example under `skills/ipc/examples/` now instruct
+  the receiver to finish and inspect the complete result before a separate, single reply-write
+  attempt, never to combine result production with the reply write in one command, and to claim a
+  denied write only from the literal error returned by that write: a calculation,
+  command-construction or parse failure is reported as its actual failure, and empty or missing
+  output is never evidence of a denial. `SKILL.md`'s completion-contract summary and its
+  thread-settings sentence now match `references/handoff-template.md` and the version-2 override
+  documentation. Prompted by the 2026-09-08 candidate check, in which a receiver that fused compute
+  and reply write into one malformed command returned an unsupported denial and no result.
+- Seven CLI entrypoints (`codex_ipc_client.mjs`, `codex_ipc_reply_harvest.mjs`,
+  `codex_ipc_rollout_observe.mjs`, `codex_ipc_wait.mjs`, `codex_ipc_write_proof.mjs`,
+  `tests/check_text_integrity.mjs`, `tests/check_docs_quality.mjs`) now decide whether they are the
+  main module by comparing native physical paths (`realpathSync.native`) instead of lexical path
+  spellings. Previously a launch through a directory-junction or symlink ancestor could skip the
+  command body and exit 0 with no output while imports stayed inert. The repaired predicate runs the
+  command from physical and aliased paths, keeps ordinary, eval and stdin imports inert, matches
+  only exact eval flags (so `-expose-gc` still runs), and turns a failed path resolution into an
+  explicit error exit. Latent rather than observed on the development host (no reparse points in
+  the measured topology); covered by a process matrix in `tests/test_router_contract.sh` and
+  regression blocks in the two checkers.
+- IPC send and recovery paths now normalize UUID inputs, classify client and inspector results from
+  exact structured fields, and keep ambiguous post-attempt outcomes non-retryable. Negative bounded
+  inspection is diagnostic only: it cannot prove non-admission or authorize a resend.
+- Rollout-derived observation and completion now bind physical owner/path identity, fork scope,
+  consumed cursor bytes/state, semantic roles, dispatch marker, turn, terminal body, and schema
+  integrity. Duplicate dispatch IDs, stale or conflicting reply evidence, untrusted target-to-rollout
+  remaps, and unsupported pagination/alias ambiguity fail visibly instead of borrowing completion.
+  Multiple distinct final records certify only when one nonempty terminal body copy matches exactly
+  one final; missing or nonmatching terminal evidence remains unavailable.
+- Unknown `item_completed` item classes are now inert but logged instead of poisoning their turn.
+  A class outside the named set is never promoted, never exposes text/phase/role, is never retained
+  for correlation, and emits an `unknown-item-class` diagnostic naming the class. Four conditions
+  still fail the record closed as `schema-drift`, which now names the class in `itemType`: the item
+  carries a body- or role-bearing field (`content`, `text`, `phase`, `role`); the record's outer
+  identity is invalid; the item names no class at all, or names one that is not a string; or the
+  class is only a case or separator variant of a named class, such as `agent_message` or
+  `agentmessage` for `AgentMessage`, which is a producer mis-spelling rather than a new class.
+  `FunctionCallOutput` - written whenever a thread uses the app's own thread-delegation tool - and
+  `Plan` are named explicitly in the inert set. The named set is pinned to a dated corpus census
+  re-derived at each release cut: 6,145 retained rollout files carrying 88,498 `item_completed`
+  records in exactly thirteen classes, measured 2026-09-03T02:42:28Z. Previously any unnamed class
+  made its whole turn ambiguous, so an ordinary working thread that had delegated could not be
+  observed, waited on, harvested, or dispatched to, despite a real `task_complete` carrying a
+  non-empty final body.
+- `token_usage_record` is now a named inert envelope, and an unknown typeless envelope no longer
+  poisons its turn. The producer writes `token_usage_record` as a top-level envelope with no
+  `payload.type` at all, carrying per-turn and per-thread token accounting and no body; both the
+  shipped and the previous candidate reader treated it as an unknown envelope/payload pair, so an
+  ordinary completed turn read `ambiguous` on the producer version now in use. Generalising the
+  same shape, a top-level record whose envelope type is outside the named set and which declares
+  no `payload.type` is now inert but logged, emitting an `unknown-envelope-type` diagnostic naming
+  the type once per occurrence. Six conditions still fail such a record closed as `schema-drift`:
+  the record names no envelope type or names one that is not a string; its payload is present but
+  is not a plain object; the payload declares a `type` key, which makes the record an unknown
+  *pair* rather than an unknown envelope; the payload carries an `item`; the payload carries
+  `content`, `text`, `message`, `last_agent_message`, `phase` or `role`; or the record's owner
+  identity is invalid. The last two body keys are the ones the reader itself would read - a body
+  under `message` through `textFromAllowedFields`, a terminal body under `last_agent_message`
+  through the projection every normalized record carries - so an admitted envelope exposes no
+  text, role, phase or final body by construction rather than by a downstream guard. The
+  named envelope set is pinned to a dated corpus census re-derived at each release cut: 6,176 of
+  6,188 retained rollout files (the twelve above 150 MB excluded) and 17,150,905,722 bytes,
+  6,479,880 records in exactly eight envelope types, measured 2026-09-03T22:08:25Z.
+  `token_usage_record` was the only unnamed typeless envelope in that census - 1,368 records
+  across 42 files, first written by Codex CLI `0.147.0-alpha.6.6` on 2026-08-13 and again by
+  `0.148.0-alpha.9` on 2026-08-19, then absent from every `0.149`-`0.152` rollout, and written
+  again by `0.153.0-alpha.5` and `0.153.0` - so naming it and adding the forward rule changes no
+  other retained rollout's verdict.
+- The fork ordinal contract now applies only where the producer declares it. A rollout whose first
+  record carries `forked_from_id` with neither `subagent_history_start_ordinal` nor a top-level
+  `ordinal` declares no ordinal stream, so it is admitted and read as an unforked rollout. Every
+  declared-contract check is unchanged, and a first record declaring an `ordinal` while omitting
+  the boundary field still fails closed. **Forked threads were affected, and this is not a
+  historical class:** nine such rollouts were written on 2026-09-01 by the Codex CLI then in use
+  (`0.151.0-alpha.7.2`), a tenth on 2026-09-03 by its successor (`0.153.0-alpha.5`), and 1,200
+  rollouts regress under the previous behaviour - 1,200 of the 1,390 retained rollout files whose
+  first record is a fork, out of 6,145 retained rollout files in all, measured
+  2026-09-03T02:42:28Z. One observation under the successor is existence, not a rate: no claim is
+  made about how often it writes the shape. For those threads the observer reported
+  `rollout-unavailable`, the
+  waiter returned `unavailable` before it could reach an existing reply file, harvest returned
+  `unavailable`, and the write-proof preflight returned a non-overridable `ambiguous`.
+  **Fixing the gate does not empty the class.** What still refuses a subagent fork of a
+  legacy-history thread is a second, independent cause the gate used to mask by tripping first:
+  `schema-drift` with reason `rollout-thread-id-mismatch`, raised on records inside the inherited
+  prefix whose `thread_id` is the **parent's**. Seventeen retained rollouts read worse under this
+  release than under the previously shipped reader for exactly that reason, measured
+  2026-09-03T21:14Z - eight written 2026-04 through 2026-08, and nine written on 2026-09-01 by
+  `0.151.0-alpha.7.2`. This is a current-producer class, not a historical one: it recurs whenever a
+  legacy-history thread spawns a subagent, so the seventeen are a count at an instant and not a
+  closed set. Record-owner integrity is deliberately not relaxed here; that would be a separate
+  decision with its own evidence.
+- A turn the boundary machine did not close can no longer be projected complete or certifiable. The
+  dispatch projection now applies the marker proof's own predicate: a snapshot carrying a terminal
+  but not `closed` returns unavailable with the snapshot's diagnostics. Previously a malformed line
+  arriving while no turn was open opened a turn whose integrity window was too narrow to see that
+  parse error, so a turn-less `task_complete` could serve a body as certified while the activity
+  projection of the same parse reported `ambiguous`.
+- When the terminal body copy resolves several distinct final bodies to one, the resolution is now
+  disclosed instead of erased: `finalMessageCount` reports the true number of distinct logical
+  finals, and the certifying path emits a `terminal-copy-disambiguated` diagnostic carrying the
+  terminal line, the turn id and that count, and no body text. `multiple-final-message-bodies`
+  stays reserved for turns that refuse. Selection itself is unchanged.
+- The wrapper's live-failure branches now print the router's own response in full instead of the
+  first twenty lines of the client document. The client pretty-prints `response` after the echoed
+  request, so the previous clip ended inside the request echo and never showed why a send failed.
+  The echoed request, which carries the dispatch transport path and task text, is deliberately not
+  printed.
+- `codex_ipc_write_proof.mjs` now projects the router's structured follower-response error token
+  as `send.responseError` (`null` when absent) beside `send.responseType` in the live proof
+  receipt. Previously only the harness's 500-character clipped command summary reached the
+  receipt, so a router error such as `no-client-found` could be unrecoverable after the fact.
+  Diagnostic projection only: send, certification, polling, and no-resend behavior are unchanged.
+- The Codex Desktop follower wire contract is repaired. `thread-follower-start-turn` is now sent at
+  protocol version 2 with `params.turnStart = {request:{threadId,turnTrigger,input}}` - previously
+  version 1 with `params.turnStartParams` - carrying no frame-level `hostId` key and no
+  `turnStart.context`. `request.threadId` repeats `params.conversationId`, which the app requires.
+  The shape was derived read-only from the installed Desktop bundle at build `26.901.1978.0`
+  (`app.asar` SHA-256 `09c7ef96...95183d`), never guessed, and **re-verified unchanged against its
+  successor build `26.901.2854.0`** (`app.asar` SHA-256 `a09cab16...34f66f`) at
+  2026-09-03T22:18:50.443Z, after the Desktop updated some six hours later: the method-version
+  table is identical entry for entry, the payload key, the thread-identity check and the `hostId`
+  version rule are all unchanged, and the main bundle member carrying the table is byte-identical
+  across the update. It was **re-verified unchanged again against the next build
+  `26.901.4073.0`** (`app.asar` SHA-256 `689a59ec...90b23e`) at 2026-09-05T02:33:11.490Z, read from
+  the archive of the build then both installed and running: the same four facts hold, and this time
+  both members carrying them were replaced, with the facts unchanged within them.
+  Read-only re-derivation on **`26.901.6511.0`** (`app.asar` SHA-256 `e75bae2b...d659e`),
+  rebound to the installed and running build on 2026-09-08, preserves the examined wire behavior
+  but identifies a **changed conditional admission guard**: the app's Daybreak pre-start guard
+  (user-facing message "Turn off Daybreak or choose another model to continue", preserved in the
+  fixture) rejects when the effective model is `gpt-6-astra` or `gpt-6-astra-wm` and the effective
+  program is non-null and unequal to `standard`. Model selection uses prepared collaboration
+  settings, then the prepared request model, then the conversation's latest model; the app's
+  program resolver takes precedence over the request's `cyberAccessProgram`. Omission can inherit
+  settings and does not force `standard`; `cyberAccessProgram` is distinct from `serviceTier`.
+  A missing/null program does not trigger this particular guard, which does not prove admission.
+  Calibration datum: on 2026-09-07 a `gpt-6-astra` thread at `ultra` reasoning effort on this build
+  (bound by the rollout's CLI version and the install timeline, not by a dispatch-time package
+  read) admitted a wrapper dispatch from the pre-repair candidate (`8f78a413`) and ran to
+  `task_complete`, consistent with a null or `standard` program; whether a router-initiated
+  follower start-turn traverses this composer callback at all remains undetermined.
+  The fixture preserves earlier build evidence and appends archive/member identities, byte
+  anchors, the changed guard and its bounded static comparison. Client wire values and runtime
+  behavior are unchanged by this qualification update; it supplies no new live-acceptance proof.
+  The method-version table it came from is
+  checked in under `tests/fixtures/` with the archive and member digests, and
+  `tests/test_router_contract.sh` now derives its expectation from that table and fails when the
+  table drifts, instead of pinning the constants. The previous shape was rejected at discovery,
+  before ownership was evaluated, and the router masks that and eight other distinct causes behind
+  the single token `no-client-found`. Under the new payload the app actually reads
+  `request.model`/`request.effort`/`request.cwd`, and model and effort rewrite the target thread's
+  stored settings, so the client still omits all three unless the operator passes them; a
+  `--turn-trigger` flag selects the provenance label, defaulting to the app's own literal for a
+  tool delivering a message into an existing thread. **Live status. The contract above is a static
+  derivation qualified by hermetic tests; historical live evidence on `26.901.4073.0` exists as four facts
+  that are not interchangeable. (1) The version-2 frame was accepted live by `26.901.4073.0` on
+  2026-09-05: a direct write-proof run from a working tree of this branch started a real turn, and
+  the reader bound the proof to that turn id from the target thread's own rollout. (2) The `--ipc`
+  wrapper, run the same day from the same working tree, delivered into a thread the renderer already
+  owned, so the autoload, foreground-switch and deep-link paths are still unexercised at version 2.
+  (3) The pre-tag delivery smoke from the merged primary checkout has NOT been run; it is ordered
+  before the tag and before propagation. (4) Acceptance through the normal installed route has NOT
+  been achieved: the installed clients sent version 1 on that date; the installed-wrapper attempt
+  returned `RESULT: gui-unowned -- reason=autoload-incomplete -- confirmation=not-attempted`, with
+  the sampled target rollout byte-identical. Those observations alone do not prove non-admission
+  or authorize target reuse. Merging this branch does not update installed clients — only
+  propagation does. Nothing here certifies the installed route or live acceptance on 6511.**
+- `codex_ipc_owner_probe.mjs` is retired and inert. It sent a version-1 follower start-turn at a
+  synthetic sentinel thread and read `no-client-found` as evidence that the follower route is
+  reachable from an external client. That inference never held and cannot hold now: the router
+  matches the per-method protocol version exactly during client discovery, before ownership is
+  evaluated, so the probe's own frame was refused on the way in, and the same token stands for at
+  least nine distinct causes. Its safety also rested on the sentinel thread being unowned, which is
+  a property of the host rather than of the tool. The file stays in place - the required-file
+  contracts in the contract audit and the revalidator depend on it - and now explains its own
+  retirement and names the read-only tools that answer real questions. It opens no pipe and sends
+  nothing on any argument.
+- The skill no longer claims that the router ignores a model override. That 2026-07-10 observation
+  described the `turnStartParams` payload the app has stopped reading; under the version-2
+  `params.turnStart` payload the app reads `request.model` and `request.effort` and writes them
+  back as the thread's stored model and reasoning effort. The rule is unchanged - a dispatch never
+  alters the target thread's model, reasoning, sandbox or approval settings - but it is now stated
+  as what it is: enforced by omission rather than by the protocol. Neither the wrapper nor the
+  write-proof harness passes those flags, and the client omits them unless an operator supplies
+  them.
+- These changes are covered by sanitized hermetic tests and offline gates only. No fresh live IPC
+  proof, installed-root propagation, release, or deployment is claimed.
 - Documentation and repository gates now enforce the UTF-8/LF text policy and documentation
   contracts. Intentional Unicode is retained. Primary dispatch behavior did not change, no fresh
   live proof was performed, and no release or installed propagation is implied.
+- **Subsequent candidate-only live evidence on 2026-09-08 UTC.** At exact source base
+  `1731a824850c1077fade0f58bdfff8d125007b53`, three wrapper invocations, each into an owner-named
+  target thread, on Codex Desktop `26.901.6511.0` reached `gpt-5.6-luna` threads at medium
+  reasoning. A was received and reached its terminal turn, but failed substantive-answer
+  acceptance; a planned B was not run because its prerequisite, A, had failed. C's separate reply
+  write returned actual `EPERM`, and the complete canonical result was recovered through the
+  rollout fallback. D wrote the exact 178-byte primary reply in a writable isolated transport
+  root. The wrapper does not emit successful raw router JSON, so none was captured. This is
+  candidate-wrapper evidence only: it is not normal installed `/ipc` acceptance or the merged-
+  primary Step 16b smoke, and it establishes neither repeatability nor model generalization.
+- Current recovery documentation supersedes older dated shorthand that described a blocked reply
+  as recovered through `codex_ipc_wait --accept-rollout-fallback`. The waiter certifies
+  named-dispatch completion and `replySource=rollout-fallback` but intentionally emits no body;
+  the existing read-only dual-source `scripts/codex_ipc_replies.sh` viewer retrieves and renders
+  it. Display is capped at 4096 bytes by default; if truncation is reported, rerun with a
+  sufficient `--max-bytes`. The one-attempt, no-substitute, no-resend producer protocol,
+  delivery/refusal behavior, and waiter/viewer recovery-tool control flow are unchanged;
+  generated payload guidance bytes intentionally change, and older release entries remain as
+  historical context.
 - Public-readiness hardening makes the repository safety scan fail closed, documents private
   vulnerability reporting, and runs CI with read-only permissions and commit-pinned official
   actions.

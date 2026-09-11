@@ -1,0 +1,325 @@
+{
+  "$comment": "Derived read-only from Codex Desktop build 26.901.1978.0, with retained re-verifications on 26.901.2854.0 and 26.901.4073.0. Build 26.901.6511.0 retains the examined wire behavior but changes a conditional admission guard. See the reverification block and then the reverifications list, whose LAST element is the newest build reading. Do not hand-edit: re-derive at each release cut and after every Desktop update.",
+  "build": "26.901.1978.0",
+  "package": "OpenAI.Codex_26.901.1978.0_x64__2p2nqsd0c76g0",
+  "derivedAtUtc": "2026-09-03T10:36:50Z",
+  "reverifiedAtUtc": "2026-09-08T03:19:31.5295830Z",
+  "asar": {
+    "size": 298996178,
+    "mtimeUtc": "2026-09-02T21:05:48.620Z",
+    "sha256": "09c7ef96b5d524fef9b76270de216cf6d661ffad4727680a9b9631d18795183d"
+  },
+  "members": [
+    {
+      "path": ".vite/build/src-BXVxNf6C.js",
+      "size": 1587207,
+      "offset": 3746719,
+      "sha256": "4c68eec5cc8a1bd1a8bbe70fc7ff325999df5e47b2ed795198af85779be9fe7f"
+    },
+    {
+      "path": "webview/assets/app-initial-bca8cba1737e.js",
+      "size": 10285987,
+      "offset": 23176050,
+      "sha256": "6b27d8af43d4436f6577d75c069681409589b9e98dbfce440ca5010da9b38bd0"
+    }
+  ],
+  "reverification": {
+    "$comment": "Owner decision OD-S4 (2026-09-03). The Desktop build moved off the derivation build about six hours after the derivation. Every fact this table asserts was re-derived first-hand from the successor archive, read-only, and each is unchanged. The derivation block above still describes 26.901.1978.0 and is NOT overwritten: that build is gone from the host and can never be re-measured, so its digests are evidence, not a current reading.",
+    "build": "26.901.2854.0",
+    "package": "OpenAI.Codex_26.901.2854.0_x64__2p2nqsd0c76g0",
+    "reverifiedAtUtc": "2026-09-03T22:18:50.443Z",
+    "asar": {
+      "size": 299067987,
+      "mtimeUtc": "2026-09-03T19:23:51.790Z",
+      "sha256": "a09cab163cee6527bb11e860ed5b51e17d12de23ad00b338b46cd3f09534f66f"
+    },
+    "members": [
+      {
+        "path": ".vite/build/src-BXVxNf6C.js",
+        "size": 1587207,
+        "offset": 3747032,
+        "sha256": "4c68eec5cc8a1bd1a8bbe70fc7ff325999df5e47b2ed795198af85779be9fe7f",
+        "note": "byte-identical to the derivation build; only its archive offset moved"
+      },
+      {
+        "path": "webview/assets/app-initial-14e7352db43a.js",
+        "size": 10293627,
+        "offset": 22253630,
+        "sha256": "bf0c9bca95bc45b3a2ff76714cde7647f7999f9df170e29dff865a37a4103402",
+        "note": "replaced across the update; the derivation build carried webview/assets/app-initial-bca8cba1737e.js (10285987 B)"
+      },
+      {
+        "path": ".vite/build/src-KMpTO78a.js",
+        "size": 10987,
+        "offset": 5334239,
+        "sha256": "09f47f71abbd6e00a3cb93967bc04f9dc2565e88d164d6b0c3901cefb0ce405f",
+        "note": "third scanned member; carries none of the facts below, and is recorded so turnStartParamsInScannedMembers is reproducible at the scope this block states"
+      }
+    ],
+    "unchanged": {
+      "$comment": "Every *Offset below is an ABSOLUTE BYTE offset into this build's app.asar, so it can be checked by reading bytes at that position with no archive tooling: open the file, seek to the offset, and compare against the matching `bytes` string in offsetsVerifyBy. Member offsets in `members` above are asar-INTERNAL instead - absolute member start = asarDataStart + member.offset - which is why asarDataStart is recorded here. An earlier stamp of this block recorded UTF-16 code-unit indices within the member added to that base; those values did not address bytes and are superseded.",
+      "asarDataStart": 2430400,
+      "offsetsRestampedAtUtc": "2026-09-03T23:10:35.216Z",
+      "offsetsRestampNote": "Independent second read of the same archive: size, mtime, SHA-256 and all three member digests were unchanged from the reverification above, the 22-entry table still matched entry for entry, each offset below was proved by re-reading its bytes at that position, and the literal turnStartParams still had zero occurrences.",
+      "methodVersions": "identical, all 22 entries in the same order and with the same values",
+      "methodVersionsOffset": 6544668,
+      "followerStartTurnVersion": 2,
+      "payloadKeyOffset": 27432559,
+      "threadIdIdentityThrowOffset": 27629626,
+      "hostIdPlusOneResolverOffset": 6545575,
+      "turnStartParamsInScannedMembers": 0,
+      "offsetsVerifyBy": [
+        {
+          "field": "methodVersionsOffset",
+          "member": ".vite/build/src-BXVxNf6C.js",
+          "bytes": "{\"thread-stream-state-changed\":11"
+        },
+        {
+          "field": "hostIdPlusOneResolverOffset",
+          "member": ".vite/build/src-BXVxNf6C.js",
+          "bytes": "startsWith(`thread-follower-`))return(Ev[e]??0)+1"
+        },
+        {
+          "field": "payloadKeyOffset",
+          "member": "webview/assets/app-initial-14e7352db43a.js",
+          "bytes": "startTurn(t.params.conversationId,t.params.turnStart)"
+        },
+        {
+          "field": "threadIdIdentityThrowOffset",
+          "member": "webview/assets/app-initial-14e7352db43a.js",
+          "bytes": "if(p.threadId!==t)throw Error(`Turn request thread does not match the conversation`)"
+        }
+      ]
+    },
+    "scope": "Read-only byte scan of the three IPC-relevant archive members named above. The archive was not extracted, diffed in full, or executed; whether any OTHER follower method moved is undetermined. turnStartParamsInScannedMembers counts every byte occurrence of the literal turnStartParams in those three members and no others."
+  },
+  "reverifications": [
+    {
+      "$comment": "Append-only list of re-verifications AFTER the 26.901.2854.0 one recorded in the singular `reverification` key above; newest last. That singular key and the primary block above are left byte-for-byte unchanged, so every existing citation of reverification.unchanged.* keeps resolving and 26.901.1978.0 remains retained evidence rather than a current reading. A consumer wanting the newest first-hand reading takes the LAST element of this array, else `reverification`, else the primary block. Do not hand-edit: append one element per Desktop update, each re-derived read-only from the archive of the build then installed AND running.",
+      "build": "26.901.4073.0",
+      "package": "OpenAI.Codex_26.901.4073.0_x64__2p2nqsd0c76g0",
+      "reverifiedAtUtc": "2026-09-05T02:33:11.490Z",
+      "hostBinding": "The archive re-verified here belongs to the build that was BOTH installed and running: Get-AppxPackage -Name '*Codex*' returned OpenAI.Codex 26.901.4073.0 (PackageFullName OpenAI.Codex_26.901.4073.0_x64__2p2nqsd0c76g0), and all ten live ChatGPT.exe processes resolve to the image C:/Program Files/WindowsApps/OpenAI.Codex_26.901.4073.0_x64__2p2nqsd0c76g0/app/ChatGPT.exe (path written with forward slashes so this record carries no escape characters). Timing, stated to sub-second precision: the archive mtime is 2026-09-04T18:23:16.867027Z; the ChatGPT.exe process this lane sampled has StartTime 2026-09-04T18:23:28.038Z, 11.171 s after that mtime; the EARLIEST of the ten has StartTime 2026-09-04T18:23:22.0385906Z, 5.172 s after it. Both readings are recorded, each attributed to its own measurement; the archive predates all ten processes, which is the fact this field exists to establish.",
+      "asar": {
+        "size": 299073250,
+        "mtimeUtc": "2026-09-04T18:23:16.867Z",
+        "sha256": "689a59eccd6b4d38f3ddaf202dac05b7cf5ca9cba93b2703f7aa8a44be90b23e"
+      },
+      "members": [
+        {
+          "path": ".vite/build/src-VqXTPopo.js",
+          "size": 1587549,
+          "offset": 3758019,
+          "sha256": "8d056524ea3f5714e5e0a254afd88f018d58465bc6ea026adee3c80ff7799e29",
+          "note": "successor to .vite/build/src-BXVxNf6C.js (1587207 B, 4c68eec5...9fe7f), which was byte-identical across 1978.0 and 2854.0 and is ABSENT from this build. Identified by token hit, never by name: these names are content-hashed. The member's bytes changed; the two facts it carries did not."
+        },
+        {
+          "path": "webview/assets/app-initial-d2e74794629d.js",
+          "size": 10296789,
+          "offset": 23071648,
+          "sha256": "06091fcbb8bb045acb081d0efb9aae67864c4e6313685b04ee30ed231cf0fd35",
+          "note": "successor to webview/assets/app-initial-14e7352db43a.js (10293627 B, bf0c9bca...103402). The member's bytes changed; the two facts it carries did not."
+        },
+        {
+          "path": ".vite/build/src-KMpTO78a.js",
+          "size": 10987,
+          "offset": 3747032,
+          "sha256": "09f47f71abbd6e00a3cb93967bc04f9dc2565e88d164d6b0c3901cefb0ce405f",
+          "note": "byte-identical to the 26.901.2854.0 third scanned member (same size, same digest); only its archive offset moved, 5334239 -> 3747032, because it and the main bundle swapped places in the layout. It carries none of the facts below and zero occurrences of every scan token, here as in 2854.0; it is re-scanned and recorded so turnStartParamsInScannedMembers keeps the same three-member scope."
+        }
+      ],
+      "unchanged": {
+        "$comment": "Every *Offset below is an ABSOLUTE BYTE offset into THIS build's app.asar, proved by seeking to it and reading the bytes back and comparing to the matching `bytes` string in offsetsVerifyBy; absolute member start = asarDataStart + member.offset. Offsets are per-archive and do NOT carry across builds: applied to THIS archive, the 26.901.2854.0 methodVersionsOffset 6544668 reads the unrelated bytes \"n a.cache=i.set(r,o)||i,o};return\" and its payloadKeyOffset 27432559 reads 53 bytes of unrelated localization text, neither of which is the pattern that block names.",
+        "asarDataStart": 2430400,
+        "offsetsVerifiedAtUtc": "2026-09-05T02:45:00.719Z",
+        "methodVersions": "identical, all 22 entries in the same order and with the same values",
+        "methodVersionsOffset": 6555729,
+        "followerStartTurnVersion": 2,
+        "payloadKeyOffset": 28250830,
+        "threadIdIdentityThrowOffset": 28447933,
+        "hostIdPlusOneResolverOffset": 6556636,
+        "turnStartParamsInScannedMembers": 0,
+        "offsetsVerifyBy": [
+          {
+            "field": "methodVersionsOffset",
+            "member": ".vite/build/src-VqXTPopo.js",
+            "bytes": "{\"thread-stream-state-changed\":11"
+          },
+          {
+            "field": "hostIdPlusOneResolverOffset",
+            "member": ".vite/build/src-VqXTPopo.js",
+            "bytes": "startsWith(`thread-follower-`))return(Ev[e]??0)+1"
+          },
+          {
+            "field": "payloadKeyOffset",
+            "member": "webview/assets/app-initial-d2e74794629d.js",
+            "bytes": "startTurn(t.params.conversationId,t.params.turnStart)"
+          },
+          {
+            "field": "threadIdIdentityThrowOffset",
+            "member": "webview/assets/app-initial-d2e74794629d.js",
+            "bytes": "if(p.threadId!==t)throw Error(`Turn request thread does not match the conversation`)"
+          }
+        ]
+      },
+      "scope": "Read-only byte scan of the three IPC-relevant archive members named above. The archive was not extracted in full, diffed in full, or executed; whether any OTHER follower method moved is undetermined. turnStartParamsInScannedMembers counts every byte occurrence of the literal turnStartParams in those three members and no others - and it is 0. DISCLOSED, and new relative to the blocks above: the literal DOES occur twice elsewhere in this archive, both inside .vite/build/main-B6oTeDcE.js (3075436 B), at absolute offsets 3242045 and 3242402, as a local parameter name in an automation heartbeat path that calls the app-server's own startTurn - not on the follower IPC wire. That member matches no scan token and has never been in any block's scanned set, so this count is unchanged in scope and in value; the disclosure exists so the 0 is not read as 'the literal is absent from the application'."
+    },
+    {
+      "$comment": "Core follower wire behavior remains equivalent to the retained 4073 evidence, but a conditional renderer admission guard changed. The unchanged block describes only its named wire facts. The top-level frame describes this client's emission policy, including omission of hostId; absent and null hostId follow the same branch in the examined app version resolver.",
+      "build": "26.901.6511.0",
+      "package": "OpenAI.Codex_26.901.6511.0_x64__2p2nqsd0c76g0",
+      "reverifiedAtUtc": "2026-09-08T03:19:31.5295830Z",
+      "hostBinding": "Installed package and every observed running ChatGPT.exe image resolved to this package at 2026-09-08T03:19:31.5295830Z. The complete archive hash was verified at 2026-09-08T03:19:26.817849Z, with size and mtime stable across that read. The bounded wire-anchor and admission-guard readings below address that same archive identity.",
+      "asar": {
+        "size": 299109787,
+        "mtimeUtc": "2026-09-06T23:47:18.4619767Z",
+        "sha256": "e75bae2b8a02f174c7ceeed6d631aaff355e44f8af5c798fa3628089f11d659e"
+      },
+      "members": [
+        {
+          "path": ".vite/build/src-VqXTPopo.js",
+          "size": 1587549,
+          "offset": 3758089,
+          "sha256": "8d056524ea3f5714e5e0a254afd88f018d58465bc6ea026adee3c80ff7799e29",
+          "note": "Byte-identical to the hash-verified retained 4073 member."
+        },
+        {
+          "path": "webview/assets/app-initial-f87238153a19.js",
+          "size": 10300166,
+          "offset": 23078027,
+          "sha256": "44ceeb9cadac569f6217e288c0e09fceeca712d749862887ea36baf6019ea966",
+          "note": "Successor to app-initial-d2e74794629d.js. Inspected wire regions retain equivalent structure with minified identifier renames. A conditional admission predicate changed."
+        },
+        {
+          "path": ".vite/build/src-KMpTO78a.js",
+          "size": 10987,
+          "offset": 3747102,
+          "sha256": "09f47f71abbd6e00a3cb93967bc04f9dc2565e88d164d6b0c3901cefb0ce405f",
+          "note": "Byte-identical to the hash-verified retained 4073 member."
+        }
+      ],
+      "unchanged": {
+        "$comment": "Offsets are absolute BYTE offsets in this archive. This block does not assert unchanged admission behavior.",
+        "asarDataStart": 2430400,
+        "offsetsVerifiedAtUtc": "2026-09-08T03:11:47.580359Z",
+        "methodVersions": "Identical, all 22 entries in the same order and with the same values.",
+        "methodVersionsOffset": 6555799,
+        "followerStartTurnVersion": 2,
+        "payloadKeyOffset": 28257291,
+        "threadIdIdentityThrowOffset": 28454369,
+        "hostIdPlusOneResolverOffset": 6556706,
+        "turnStartParamsInScannedMembers": 0,
+        "offsetsVerifyBy": [
+          {
+            "field": "methodVersionsOffset",
+            "member": ".vite/build/src-VqXTPopo.js",
+            "bytes": "{\"thread-stream-state-changed\":11"
+          },
+          {
+            "field": "hostIdPlusOneResolverOffset",
+            "member": ".vite/build/src-VqXTPopo.js",
+            "bytes": "startsWith(`thread-follower-`))return(Ev[e]??0)+1"
+          },
+          {
+            "field": "payloadKeyOffset",
+            "member": "webview/assets/app-initial-f87238153a19.js",
+            "bytes": "startTurn(t.params.conversationId,t.params.turnStart)"
+          },
+          {
+            "field": "threadIdIdentityThrowOffset",
+            "member": "webview/assets/app-initial-f87238153a19.js",
+            "bytes": "if(p.threadId!==t)throw Error(`Turn request thread does not match the conversation`)"
+          }
+        ]
+      },
+      "acceptanceGuard": {
+        "verdict": "changed",
+        "regionsVerifiedAtUtc": "2026-09-08T03:12:32.253143Z",
+        "before": {
+          "build": "26.901.4073.0",
+          "provenance": "Retained member whose complete hash matches the prior fixture; not a current installation read.",
+          "member": "webview/assets/app-initial-d2e74794629d.js",
+          "memberByteOffset": 4213069,
+          "absoluteOffset": 29715117,
+          "size": 27,
+          "sha256": "55ef0150e12dd941f5428354864641d4a4695f095ae9e9753177192ec1541201",
+          "bytes": "function Ygr(e,t){return!1}"
+        },
+        "after": {
+          "member": "webview/assets/app-initial-f87238153a19.js",
+          "memberByteOffset": 4215327,
+          "absoluteOffset": 29723754,
+          "size": 48,
+          "sha256": "e85b37869a8dfbd02ecbaa7fe23eb4c38ac6363cef3c7da36fa73d0bf3d48869",
+          "bytes": "function Ggr(e,t){return t!==`standard`&&Kgr(e)}"
+        },
+        "modelPredicate": {
+          "member": "webview/assets/app-initial-f87238153a19.js",
+          "memberByteOffset": 4215375,
+          "absoluteOffset": 29723802,
+          "size": 63,
+          "sha256": "8136c86894a9662dffc5f611a65c400efcd09971406b6b2b156d46d8a6fe3195",
+          "bytes": "function Kgr(e){return e===`gpt-6-astra`||e===`gpt-6-astra-wm`}"
+        },
+        "callbackBefore": {
+          "member": "webview/assets/app-initial-d2e74794629d.js",
+          "memberByteOffset": 4221150,
+          "absoluteOffset": 29723198,
+          "size": 467,
+          "sha256": "7bd6b4fdf657650867784aca1c316013166b8a774a94be7e75b66cbec61f18e8"
+        },
+        "callbackAfter": {
+          "member": "webview/assets/app-initial-f87238153a19.js",
+          "memberByteOffset": 4223492,
+          "absoluteOffset": 29731919,
+          "size": 467,
+          "sha256": "c82b56453a68acb27e0b2d05264a4fcafdea81520bca58adfeb60e24bb481d0b",
+          "comparison": "Same token structure apart from identifier renames; its referenced admission predicate changed.",
+          "error": "Turn off Daybreak or choose another model to continue"
+        },
+        "resolution": {
+          "model": "preparedRequest.collaborationMode?.settings.model ?? preparedRequest.model ?? conversation.latestModel",
+          "program": "runtimeProgramResolver(scope, manager, threadId, effectiveModel) ?? preparedRequest.cyberAccessProgram",
+          "inheritance": "With context omitted, inheritThreadSettings defaults to true. Request preparation can inherit the thread model and collaboration settings.",
+          "programMeaning": "cyberAccessProgram is resolved independently of serviceTier. Its runtime resolver depends on eligibility, capabilities, account-bound preference and runtime results; omission does not guarantee standard.",
+          "rejection": "The examined optional pre-start callback rejects before turn/start when effective model and program are non-null, the program is not standard, and the model predicate is true. A null or missing program does not trigger this guard; that is not proof of admission."
+        }
+      },
+      "scope": "Read-only static comparison completed at 2026-09-08T00:49:57.295919Z, followed by package/hash rebinding and bounded byte seeks at the times above. The complete 22-entry method table, byte-identical broker member, 49 complete named renderer function pairs, four class methods and the runtime preparation callback were compared. Inspected wire framing, discovery/version checks, request topology/default construction, context restrictions and response handling remain equivalent; the followed admission predicate changed. This is not whole-renderer or whole-application equivalence, certification of other follower methods, or proof of any target's effective model/program, live admission or delivery. The three-member turnStartParams count excludes its two automation-only occurrences elsewhere in the archive."
+    }
+  ],
+  "frame": {
+    "payloadKey": "turnStart",
+    "requestRequiredFields": [
+      "threadId",
+      "input"
+    ],
+    "hostIdMustBeAbsent": true,
+    "hostIdNonNullRaisesFollowerVersionBy": 1,
+    "contextOmitted": true
+  },
+  "methodVersions": {
+    "thread-stream-state-changed": 11,
+    "thread-stream-following-changed": 1,
+    "thread-stream-following-status-requested": 1,
+    "ipc-connection-reset": 1,
+    "thread-read-state-changed": 2,
+    "thread-archived": 2,
+    "thread-unarchived": 1,
+    "thread-owner-discovery": 1,
+    "thread-follower-start-turn": 2,
+    "thread-follower-load-complete-history": 1,
+    "thread-follower-compact-thread": 1,
+    "thread-follower-steer-turn": 1,
+    "thread-follower-interrupt-turn": 4,
+    "thread-follower-update-thread-settings": 1,
+    "thread-follower-edit-last-user-turn": 2,
+    "thread-follower-command-approval-decision": 1,
+    "thread-follower-file-approval-decision": 1,
+    "thread-follower-permissions-request-approval-response": 1,
+    "thread-follower-submit-user-input": 1,
+    "thread-follower-submit-mcp-server-elicitation-response": 1,
+    "thread-follower-set-queued-follow-ups-state": 1,
+    "thread-queued-followups-changed": 1
+  }
+}

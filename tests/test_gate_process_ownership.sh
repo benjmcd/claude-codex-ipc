@@ -102,16 +102,20 @@ mkdir -p "$SHIM_SAFE" "$SHIM_BROKEN" "$SHIM_FLAGGED"
 
 if is_windows; then
   ENUM_BIN="powershell.exe"
-  REAL_ENUM="$(command -v powershell.exe)"
+  REAL_ENUM="$(command -v powershell.exe 2>/dev/null || true)"
   printf '#!/bin/sh\nexit 0\n' > "$SHIM_SAFE/taskkill"
   chmod +x "$SHIM_SAFE/taskkill"
   cp "$SHIM_SAFE/taskkill" "$SHIM_BROKEN/taskkill"
   cp "$SHIM_SAFE/taskkill" "$SHIM_FLAGGED/taskkill"
 else
   ENUM_BIN="ps"
-  REAL_ENUM="$(command -v ps)"
+  REAL_ENUM="$(command -v ps 2>/dev/null || true)"
   # POSIX kill is a shell builtin and cannot be PATH-shimmed; T2/T3/T4 node processes are
   # short-lived and fixture-owned, so a mis-scoping kill can only hit fixture sleepers.
+fi
+if [ -z "$REAL_ENUM" ] || [ ! -x "$REAL_ENUM" ]; then
+  echo "FAIL: process enumeration prerequisite unavailable: $ENUM_BIN did not resolve to an executable via command -v"
+  exit 1
 fi
 
 printf '#!/bin/sh\necho "shim: enumeration disabled by fixture" >&2\nexit 1\n' > "$SHIM_BROKEN/$ENUM_BIN"
@@ -181,17 +185,26 @@ rm -f "$T4FLAG"
 : > "$T4OUT"
 PATH="$SHIM_FLAGGED:$PATH" SHIM_FAIL_FLAG="$T4FLAG" "$BASH" "$RUNNER" --no-safety "$WORK/sentinel_idle8.sh" >"$T4OUT" 2>&1 &
 T4PID=$!
+T4_READY=0
+T4_INJECTED=0
 if wait_for_pattern "$T4OUT" "== running" 90; then
+  T4_READY=1
   sleep 1
-  : > "$T4FLAG"
+  if : > "$T4FLAG"; then
+    T4_INJECTED=1
+  else
+    echo "  (warn) failed to create T4 outage flag; readiness=$T4_READY injected=$T4_INJECTED; T4 will fail on its assertions"
+  fi
 else
   echo "  (warn) runner never reached '== running'; T4 will fail on its assertions"
 fi
 wait "$T4PID"; T4RC=$?
-if [ "$T4RC" -ne 0 ] && grep -q "GATE ERROR" "$T4OUT" && grep -qi "enumerat" "$T4OUT"; then
+if [ "$T4_READY" -eq 1 ] && [ "$T4_INJECTED" -eq 1 ] && [ "$T4RC" -ne 0 ] \
+   && grep -q "GATE ERROR" "$T4OUT" && grep -qi "enumerat" "$T4OUT" \
+   && grep -q "shim: simulated mid-run enumeration outage" "$T4OUT"; then
   t_pass "T4 runner aborted mid-suite (rc=$T4RC) with explicit enumeration error"
 else
-  t_fail "T4 expected nonzero rc + explicit 'GATE ERROR ... enumeration' abort; got rc=$T4RC"
+  t_fail "T4 expected observed readiness + injected outage + nonzero rc + explicit shim/gate/enumeration abort; readiness=$T4_READY injected=$T4_INJECTED rc=$T4RC"
   sed 's/^/    T4| /' "$T4OUT"
 fi
 

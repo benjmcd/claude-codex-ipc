@@ -1023,6 +1023,106 @@ function selfTestExpectGate(repo, source, expectedStatus, reason = null, seams =
   return result;
 }
 
+function addStartupTests(add, tempParent) {
+  const root = path.join(tempParent, "startup-guard");
+  if (path.dirname(root) !== tempParent || existsSync(root)) throw new Error("unsafe-startup-fixture");
+  mkdirSync(root);
+  SELF_TEST_TEMP_REGISTRY.push(root);
+  const physical = path.join(root, "physical files");
+  const isolatedHome = path.join(root, "home");
+  mkdirSync(physical);
+  mkdirSync(isolatedHome);
+  const entry = path.join(physical, "check_text_integrity.mjs");
+  writeFileSync(entry, readFileSync(fileURLToPath(import.meta.url)));
+  const href = pathToFileURL(entry).href;
+  const invoke = (args, input) => spawnSync(process.execPath, args, {
+    cwd: root, input, encoding: "utf8", shell: false, windowsHide: true, timeout: 10000,
+    env: {
+      PATH: process.env.PATH, SystemRoot: process.env.SystemRoot,
+      HOME: isolatedHome, USERPROFILE: isolatedHome,
+      CODEX_HOME: path.join(isolatedHome, "codex"), CODEX_IPC_ROOT: path.join(isolatedHome, "ipc"),
+      TMP: root, TEMP: root, GIT_CONFIG_NOSYSTEM: "1",
+      GIT_CONFIG_GLOBAL: path.join(root, "missing-gitconfig"),
+    },
+  });
+  const expect = (args, status, stderr, input, stdout = "") => {
+    const result = invoke(args, input);
+    if (result.error || result.status !== status || result.stdout !== stdout || result.stderr !== stderr) {
+      throw new Error(`startup args=${JSON.stringify(args)} status=${result.status} stdout=${asciiEscape(result.stdout || "")} stderr=${asciiEscape(result.stderr || "")} error=${asciiEscape(result.error?.message || "none")}`);
+    }
+  };
+  const invalid = "TXT900 source=cli path=<none> byte=0 codepoint=0 reason=usage: exactly --self-test or --source <index|worktree> is required\n";
+  add("Startup executes physical relative and native alias paths with spaces", () => {
+    const alias = path.join(root, "alias files");
+    symlinkSync(physical, alias, process.platform === "win32" ? "junction" : "dir");
+    try {
+      const aliasedEntry = path.join(alias, path.basename(entry));
+      const cases = [[entry], [path.relative(root, entry)], [aliasedEntry], ["--preserve-symlinks-main", aliasedEntry]];
+      cases.push(["-expose-gc", entry], ["-expose-gc", aliasedEntry]);
+      cases.push(["-p", "--", entry], ["-p", "--", aliasedEntry],
+        ["--print", "--title=startup-test", entry], ["--print", "--title=startup-test", aliasedEntry]);
+      if (process.platform === "win32") {
+        // Node's Windows loader needs this flag to accept a namespaced main path.
+        cases.push([path.join(alias.toUpperCase(), path.basename(entry))],
+          ["--preserve-symlinks-main", path.toNamespacedPath(aliasedEntry)]);
+      }
+      for (const args of cases) expect([...args, "--unknown"], 2, invalid);
+    } finally {
+      if (path.dirname(alias) !== root || !lstatSync(alias).isSymbolicLink()
+          || realpathSync.native(alias) !== realpathSync.native(physical)
+          || path.dirname(realpathSync.native(physical)) !== realpathSync.native(root)) {
+        throw new Error("unsafe-startup-alias-cleanup");
+      }
+      unlinkSync(alias);
+    }
+  });
+  add("Startup does not mistake Node option values for eval mode", () => {
+    for (const args of [["--title=-e"], ["--title=--eval"], ["--title", "\\-e"], ["--title", "startup-test"]]) {
+      expect([...args, entry, "--unknown"], 2, invalid);
+    }
+  });
+  add("Startup imports stay silent for file eval and stdin arguments", () => {
+    const script = `await import(${JSON.stringify(href)});`;
+    const driver = path.join(root, "import-driver.mjs");
+    writeFileSync(driver, script);
+    const before = readdirSync(root, { recursive: true }).sort().join("\n");
+    const original = readFileSync(entry);
+    for (const args of [[], ["nonexistent-argument"], [entry]]) {
+      expect([driver, ...args], 0, "");
+      expect(["--input-type=module", "--eval", script, ...args], 0, "");
+      expect(["--input-type=module", `--eval=${script}`, ...args], 0, "");
+      expect(["--input-type=module", "-e", script, ...args], 0, "");
+      expect(["--input-type=module", "-", ...args], 0, "", script);
+      const printScript = `void import(${JSON.stringify(href)});`;
+      for (const flag of ["-p", "-pe", "--print"]) {
+        expect([flag, printScript, ...args], 0, "", undefined, "undefined\n");
+      }
+      expect(["--print=ignored", printScript, ...args], 0, "", undefined, "undefined\n");
+    }
+    expect(["--import", pathToFileURL(driver).href, "--eval", "", entry], 0, "");
+    for (const suffix of ["?import-check", "#import-check"]) {
+      expect(["--input-type=module", "--eval", `await import(${JSON.stringify(href + suffix)});`, entry], 0, "");
+    }
+    if (readdirSync(root, { recursive: true }).sort().join("\n") !== before || !readFileSync(entry).equals(original)) {
+      throw new Error("startup-import-mutated-fixture");
+    }
+  });
+  add("Startup physical resolution failure is diagnostic rc2 without CLI output", () => {
+    const preload = path.join(root, "resolution-fault.mjs");
+    writeFileSync(preload, `import { realpathSync } from "node:fs";
+const original = realpathSync.native;
+realpathSync.native = (value, ...options) => {
+  if (value instanceof URL && value.href === ${JSON.stringify(href)}) {
+    throw Object.assign(new Error("isolated-entrypoint-fault"), { code: "EACCES" });
+  }
+  return original(value, ...options);
+};
+`);
+    expect(["--import", pathToFileURL(preload).href, entry, "--unknown"], 2,
+      "TXT900 source=cli path=<none> byte=0 codepoint=0 reason=entrypoint-resolution-failed\n");
+  });
+}
+
 function runSelfTests() {
   const tests = [];
   const add = (name, run) => tests.push({ name, run });
@@ -1091,6 +1191,7 @@ function runSelfTests() {
       throw new Error(`status=${result.status} stdout=${asciiEscape(result.stdout)} stderr=${asciiEscape(result.stderr)}`);
     }
   });
+  addStartupTests(add, tempParent);
   add("valid ASCII and empty files pass", () => {
     expectIds(Buffer.from("plain text\n"), []);
     expectIds(Buffer.alloc(0), []);
@@ -2114,6 +2215,30 @@ function main(argv, seams = {}) {
   return runRepositoryGate(options.source, seams);
 }
 
-if (process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url) {
+function isMainModule() {
+  const entry = process.argv[1];
+  if (!entry || entry === "-") return false;
+  const args = process.execArgv;
+  // Print without a consumed expression can still launch a file; -expose-gc is not eval.
+  const isEval = args.some((arg, index) => {
+    if (arg === "-e" || arg === "-pe" || arg === "--eval" || arg.startsWith("--eval=")) return true;
+    const print = arg === "-p" || arg === "--print" || arg.startsWith("--print=");
+    return print && typeof args[index + 1] === "string"
+      && args[index + 1].length > 0 && !args[index + 1].startsWith("-");
+  });
+  if (isEval) return false;
+  try {
+    const moduleUrl = new URL(import.meta.url);
+    if (moduleUrl.search || moduleUrl.hash) return false;
+    return path.toNamespacedPath(realpathSync.native(path.resolve(entry)))
+      === path.toNamespacedPath(realpathSync.native(moduleUrl));
+  } catch {
+    console.error("TXT900 source=cli path=<none> byte=0 codepoint=0 reason=entrypoint-resolution-failed");
+    process.exitCode = 2;
+    return false;
+  }
+}
+
+if (isMainModule()) {
   process.exitCode = main(process.argv.slice(2));
 }
