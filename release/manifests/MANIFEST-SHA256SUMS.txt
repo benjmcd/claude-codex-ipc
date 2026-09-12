@@ -1,7 +1,7 @@
 9e7649ac1673248f82487456c0dbb4225f48058b380122d30c4f4869c2cedfee *./base-overlay.manifest
 4cf1cf5ff34dcdd567d55b98f303bbac0704b4a55f0e9df97999fc053d8c2c24 *./base-runtime.manifest
-a3494e52f9367568ea885f5ad78a4fb88267bcca3b345234e302978ef05691f5 *./final-overlay.manifest
-0bc8b20a7964b7e13336277f3af4f019e94faecc47e57cbf8a584017621a1610 *./final-runtime.manifest
+5738ca765e67b94eac649a3ce15d70f50f379abc88865652654ba0bf30b44b05 *./final-overlay.manifest
+708e4d452d60bd1abd22b66480423ec0245776a0720e45cc9fff1a736f18fac6 *./final-runtime.manifest
 b9b517c1a0471c8a8a3d3acaf1aa80a628b0f201cbdf964424fbfdc9e6072169 *./root-agents.manifest
 b9b517c1a0471c8a8a3d3acaf1aa80a628b0f201cbdf964424fbfdc9e6072169 *./root-claude.manifest
 1722153925375d834dd603317bd9443e4c8eeaefc72e4fb3152e5adc2660e70a *./root-codex.manifest
