@@ -193,6 +193,6 @@ machine (any same-user process can read and modify them).
 
 ## Status
 
-v0.1.13 · [MIT](LICENSE.md) · [benjmcd/claude-codex-ipc](https://github.com/benjmcd/claude-codex-ipc).
+v0.1.14 · [MIT](LICENSE.md) · [benjmcd/claude-codex-ipc](https://github.com/benjmcd/claude-codex-ipc).
 Re-run `codex_ipc_revalidate.mjs` after any Codex Desktop update. The live route and its bounded
 rollout observation remain experimental; `restore-if-known` remains fail-closed/unvalidated.

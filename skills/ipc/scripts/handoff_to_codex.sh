@@ -92,7 +92,7 @@ case "${1:-}" in
         exit 0
         ;;
     -v|--version)
-        printf '%s\n' 'handoff_to_codex.sh 0.1.13'
+        printf '%s\n' 'handoff_to_codex.sh 0.1.14'
         exit 0
         ;;
 esac
