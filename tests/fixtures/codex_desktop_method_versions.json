@@ -1,5 +1,5 @@
 {
-  "$comment": "Derived read-only from Codex Desktop build 26.901.1978.0, with retained re-verifications on 26.901.2854.0 and 26.901.4073.0. Build 26.901.6511.0 retains the examined wire behavior but changes a conditional admission guard. See the reverification block and then the reverifications list, whose LAST element is the newest build reading. Do not hand-edit: re-derive at each release cut and after every Desktop update.",
+  "$comment": "Derived read-only from Codex Desktop build 26.901.1978.0. The primary block and top-level methodVersions retain that derivation; reverification and reverifications preserve dated build observations, newest last. The 26.903.8094.0 and 26.908.4834.0 entries record measured differences in methods this client does not send; start-turn version 2, params.turnStart and frame hostId omission remain unchanged in their stated evidence scopes. The 4834 entry separately records one independently adjudicated merged-primary wrapper dispatch, not installed acceptance or general compatibility. Re-derive at each release cut and after every Desktop update; append hash-bound read-only derivations rather than overwrite historical observations.",
   "build": "26.901.1978.0",
   "package": "OpenAI.Codex_26.901.1978.0_x64__2p2nqsd0c76g0",
   "derivedAtUtc": "2026-09-03T10:36:50Z",
@@ -286,6 +286,280 @@
         }
       },
       "scope": "Read-only static comparison completed at 2026-09-08T00:49:57.295919Z, followed by package/hash rebinding and bounded byte seeks at the times above. The complete 22-entry method table, byte-identical broker member, 49 complete named renderer function pairs, four class methods and the runtime preparation callback were compared. Inspected wire framing, discovery/version checks, request topology/default construction, context restrictions and response handling remain equivalent; the followed admission predicate changed. This is not whole-renderer or whole-application equivalence, certification of other follower methods, or proof of any target's effective model/program, live admission or delivery. The three-member turnStartParams count excludes its two automation-only occurrences elsewhere in the archive."
+    },
+    {
+      "$comment": "Appended from the retained corrected 8094 capture. This is a historical observation, not a new read of the installed application during release preparation. The full methodVersions object transcribes the preserved 22-entry baseline with the capture's single measured change; it does not relabel the top-level 1978 derivation table.",
+      "build": "26.903.8094.0",
+      "capture": {
+        "name": "05-build-26.903.8094.0-rederivation.md",
+        "sha256": "55d57b7a1467931b665e626082b322e1436c1f1cb1ab84a1647b310c683f7234",
+        "size": 6233,
+        "readWindowUtc": "2026-09-09T21:54Z/2026-09-09T22:05Z (minute precision)",
+        "correctionsDated": "2026-09-10",
+        "custody": "Private retained capture; only this bounded provenance summary is published."
+      },
+      "hostBinding": "The retained capture identifies installed OpenAI.Codex 26.903.8094.0 and ten running ChatGPT.exe processes under that package. This statement is receipt-derived; no release-preparation package or process read is claimed.",
+      "asar": {
+        "size": 309474501,
+        "mtimeUtc": "2026-09-09T05:09:06Z",
+        "sha256": "3b8e61c9b7afefeda3166f251270724a138af15eb947b7c3907691a695bce66c"
+      },
+      "methodVersions": {
+        "thread-stream-state-changed": 11,
+        "thread-stream-following-changed": 1,
+        "thread-stream-following-status-requested": 1,
+        "ipc-connection-reset": 1,
+        "thread-read-state-changed": 3,
+        "thread-archived": 2,
+        "thread-unarchived": 1,
+        "thread-owner-discovery": 1,
+        "thread-follower-start-turn": 2,
+        "thread-follower-load-complete-history": 1,
+        "thread-follower-compact-thread": 1,
+        "thread-follower-steer-turn": 1,
+        "thread-follower-interrupt-turn": 4,
+        "thread-follower-update-thread-settings": 1,
+        "thread-follower-edit-last-user-turn": 2,
+        "thread-follower-command-approval-decision": 1,
+        "thread-follower-file-approval-decision": 1,
+        "thread-follower-permissions-request-approval-response": 1,
+        "thread-follower-submit-user-input": 1,
+        "thread-follower-submit-mcp-server-elicitation-response": 1,
+        "thread-follower-set-queued-follow-ups-state": 1,
+        "thread-queued-followups-changed": 1
+      },
+      "methodVersionsComparison": {
+        "baselineBuild": "26.901.6511.0",
+        "baselineEntryCount": 22,
+        "observedEntryCount": 22,
+        "changedEntryCount": 1,
+        "changes": [
+          {
+            "method": "thread-read-state-changed",
+            "before": 2,
+            "after": 3,
+            "sentByThisClient": false
+          }
+        ],
+        "unchangedEntryCount": 21
+      },
+      "clientSentFields": {
+        "followerStartTurnVersion": 2,
+        "payloadKey": "turnStart",
+        "hostIdMustBeAbsent": true,
+        "note": "These are the client's start-turn emission fields. The capture records unchanged version 2, params.turnStart, frame hostId omission and request.threadId equality with params.conversationId; it does not certify the changed notification method."
+      },
+      "observations": {
+        "$comment": "Offsets below are retained absolute BYTE offsets into the hash-bound archive. Corrections dated 2026-09-10 supersede the earlier grep-context offsets. No new seek or member extraction is claimed here.",
+        "methodVersionsOffset": 6646561,
+        "payloadStartCall": {
+          "absoluteOffset": 28555616,
+          "bytes": "startTurn(t.params.conversationId,t.params.turnStart)"
+        },
+        "senderPayload": {
+          "absoluteOffset": 28754642,
+          "bytes": "turnStart:{request:"
+        },
+        "threadIdIdentityThrow": {
+          "absoluteOffset": 28753950,
+          "occurrences": 1,
+          "bytes": "if(p.threadId!==t)throw Error(`Turn request thread does not match the conversation`)"
+        },
+        "hostIdPlusOneResolver": {
+          "absoluteOffset": 6647435,
+          "bytesPrefix": "function yv(e,t,n){if(n!=null&&e.startsWith(`thread-follower-`))return(_v[e]??0)+1",
+          "note": "Non-null hostId raises the required follower version by one. The interrupt-turn special case without expectedTurnId is present; the retained prior resolver fragment does not establish when that case was introduced."
+        },
+        "turnStartParams": {
+          "archiveWideCount": 2,
+          "absoluteOffsets": [
+            3317410,
+            3317767
+          ],
+          "context": "Both occurrences are local parameter names in the main-process bundle."
+        },
+        "dotTurnStart": {
+          "archiveWideRawSubstringCount": 136,
+          "wordBoundedPropertyTokenCount": 2,
+          "wordBoundedPropertyTokenAbsoluteOffsets": [
+            7803567,
+            28555658
+          ],
+          "note": "The raw count includes longer identifiers; the two token occurrences are not an archive-wide raw substring count."
+        },
+        "daybreakPredicate": {
+          "absoluteOffset": 30050669,
+          "bytes": "function Jvr(e,t){return t!==`standard`&&Yvr(e)}"
+        },
+        "daybreakModelPredicate": {
+          "absoluteOffset": 30050717,
+          "bytes": "function Yvr(e){return e===`gpt-6-astra`||e===`gpt-6-astra-wm`}"
+        },
+        "daybreakMessageKey": {
+          "literal": "composer.daybreak.modelUnavailableOnSubmit",
+          "archiveWideCount": 65
+        }
+      },
+      "scope": "The retained capture supports the complete 22-entry table comparison and the named wire/admission anchors, with its later offset and count corrections. It does not supply per-member names, sizes, hashes or an archive data-start offset for this build; none is invented. Its reported table range ends at 6647384 without an explicit endpoint convention, so only the corrected start offset is promoted here. This is not a full application comparison, proof of admission-guard traversal by follower IPC, or general Desktop compatibility.",
+      "liveEvidence": "At the time of this capture, no live follower start-turn acceptance on 8094 had been recorded in this source. The capture separately records an initialize-only router response; that is not follower delivery proof. This entry makes no claim about later 8094 activity."
+    },
+    {
+      "$comment": "Appended from retained Step 16b archive-scan and comparison captures, with the independent adjudication receipt. A separate 2026-09-12T04:41:52.6965826Z read of the same hash-bound archive verifies its seven retained follower-token positions as byte offsets; it does not rerun the historical scan or live trial. The earlier derivation and re-verification records remain unchanged.",
+      "build": "26.908.4834.0",
+      "package": "OpenAI.Codex_26.908.4834.0_x64__2p2nqsd0c76g0",
+      "capture": {
+        "name": "09-asar-rederivation-26.908.4834.0.txt",
+        "sha256": "35ccd440f95427f5b3903c9cc52694094c484cf96077774e0c82c2a5d4c896d8",
+        "size": 1718,
+        "capturedAtUtc": "2026-09-12T00:04:48Z",
+        "custody": "Private retained capture; only this bounded provenance summary is published."
+      },
+      "tableCapture": {
+        "name": "10-table-vs-fixture.txt",
+        "sha256": "db4243b78a8c1913ee6328461a782098460bf550495802874170995177a22602",
+        "size": 1684,
+        "limit": "The full table was printed before this comparison failed with a fixture-path ENOENT. This is retained table text, not a passing comparison. The corrected comparison below and its independent reproduction establish the comparison result."
+      },
+      "comparisonCapture": {
+        "name": "10b-table-vs-fixture.txt",
+        "sha256": "63e785afcc4338dba550a49fceaf01a4b199544cb213059ac2e1b661a62a499a",
+        "size": 595,
+        "adjudication": "STEP16B-VERDICT-2026-09-12.md section 3.1 and F-10 record an independent reproduction: 22/22 entries, exactly three differences, follower-start-turn 2 = 2."
+      },
+      "hostBinding": "The retained verdict binds installed build 26.908.4834.0 before the send at 2026-09-12T00:09:53.454Z and records the same full package at its 2026-09-12T00:17:17.150Z reread. This draft makes no additional process-image or current-installation binding claim.",
+      "asar": {
+        "size": 324915597,
+        "sha256": "2bd5b96a48232f3ccf3df6be50965920699ea3a1b4512dcdd770e209fd1f009e"
+      },
+      "byteSeekReverification": {
+        "name": "provenance-seeks.json",
+        "sha256": "e002398074552167c293b3d72b9bad6d43b6815de319e6a11ea36029751570f9",
+        "observedAtUtc": "2026-09-12T04:41:52.6965826Z",
+        "archiveMtimeUtc": "2026-09-11T22:09:26.1232267Z",
+        "matchedSeeks": 7,
+        "scope": "Private preparation capture: full archive SHA-256 before and after matched the retained archive hash; size and mtime were stable. Each of the seven retained positions returned the exact 26 UTF-8 bytes thread-follower-start-turn. No archive extraction, new token census, runtime execution, IPC or new live acceptance."
+      },
+      "methodVersions": {
+        "thread-stream-state-changed": 11,
+        "thread-stream-following-changed": 1,
+        "thread-stream-following-status-requested": 1,
+        "ipc-connection-reset": 1,
+        "thread-read-state-changed": 3,
+        "thread-archived": 2,
+        "thread-unarchived": 1,
+        "thread-owner-discovery": 1,
+        "thread-follower-start-turn": 2,
+        "thread-follower-load-complete-history": 1,
+        "thread-follower-compact-thread": 1,
+        "thread-follower-steer-turn": 1,
+        "thread-follower-interrupt-turn": 4,
+        "thread-follower-update-thread-settings": 2,
+        "thread-follower-edit-last-user-turn": 2,
+        "thread-follower-command-approval-decision": 1,
+        "thread-follower-file-approval-decision": 1,
+        "thread-follower-permissions-request-approval-response": 1,
+        "thread-follower-submit-user-input": 1,
+        "thread-follower-submit-mcp-server-elicitation-response": 1,
+        "thread-follower-set-queued-follow-ups-state": 1,
+        "thread-queued-followups-changed": 2
+      },
+      "methodVersionsComparison": {
+        "baselineBuild": "26.901.1978.0",
+        "baselineEntryCount": 22,
+        "observedEntryCount": 22,
+        "changedEntryCount": 3,
+        "changes": [
+          {
+            "method": "thread-read-state-changed",
+            "before": 2,
+            "after": 3,
+            "sentByThisClient": false
+          },
+          {
+            "method": "thread-follower-update-thread-settings",
+            "before": 1,
+            "after": 2,
+            "sentByThisClient": false
+          },
+          {
+            "method": "thread-queued-followups-changed",
+            "before": 1,
+            "after": 2,
+            "sentByThisClient": false
+          }
+        ],
+        "unchangedEntryCount": 19,
+        "note": "These are measured differences in methods this client does not send. Step 16b criterion (ii) considered only the three client-sent fields below; excluding these differences from that stop criterion does not establish compatibility of the changed methods."
+      },
+      "clientSentFields": {
+        "followerStartTurnVersion": 2,
+        "payloadKey": "turnStart",
+        "hostIdMustBeAbsent": true,
+        "evidence": "The table retains version 2; the captured router case consumes t.params.turnStart. The corrected comparison records zero hostId hits within +/-6000 of the sender, and the independent verdict confirms no frame-level hostId in the client. The zero archive occurrences of the literal hostIdMustBeAbsent are not evidence of a wire omission rule.",
+        "step16bCriterionIi": "No drift in these three fields. This is not a claim that the entire method table or application is unchanged."
+      },
+      "observations": {
+        "$comment": "The retained scan supplied token-hit positions and raw literal counts. The separately hash-bound byteSeekReverification now proves that its seven follower-token positions are absolute BYTE offsets. The region@ lines show context around a hit; its token offset is not the beginning of that displayed context. Counts and surrounding excerpts remain retained observations, not a fresh token census or full-region verification.",
+        "followerMethodLiteral": {
+          "literal": "thread-follower-start-turn",
+          "archiveWideCount": 7,
+          "absoluteOffsets": [
+            4329672,
+            4559767,
+            7444660,
+            8634280,
+            8635945,
+            29052525,
+            29250175
+          ],
+          "tableEntryTokenOffset": 7444660,
+          "note": "7444660 addresses the follower method token in the table, not the beginning of the 22-entry table."
+        },
+        "routerPayloadRead": {
+          "followerMethodTokenOffset": 4329672,
+          "capturedCall": "e.startTurn(t.params.conversationId,t.params.turnStart)"
+        },
+        "senderPayload": {
+          "followerMethodTokenOffset": 4559767,
+          "capturedFragment": "{conversationId:t,turnStart:{request:w.request,context:"
+        },
+        "archiveWideLiteralCounts": {
+          "thread-read-state-changed": 9,
+          "turnStartParams": 2,
+          ".turnStart": 160,
+          "params.turnStart": 2,
+          "hostIdMustBeAbsent": 0,
+          "composer.daybreak.modelUnavailableOnSubmit": 65
+        }
+      },
+      "liveEvidence": {
+        "dateUtc": "2026-09-12",
+        "verdict": "PASS",
+        "receipt": {
+          "name": "STEP16B-VERDICT-2026-09-12.md",
+          "sha256": "3448db684953dd8104b1bcaf9a02a1f49119c6dff1cbc619444ae9671d4da608",
+          "size": 31806,
+          "independence": "Retained receipt authored by a fresh non-dispatching adjudicator; no new live run or adjudication is claimed by this provenance entry."
+        },
+        "sourceCommit": "553b0df3f4d615722a56138411bb9df7938ddb32",
+        "route": "Merged-primary-checkout wrapper; autoload plus foreground switch.",
+        "dispatchCount": 1,
+        "resultTuple": "gui-delivered -- reason=foreground-switched -- confirmation=rollout-hit",
+        "waiterToken": "done",
+        "waiterExit": 0,
+        "replySource": "reply-file",
+        "dispatchTurnStartedAtUtc": "2026-09-12T00:09:57.743Z",
+        "dispatchTurnCompletedAtUtc": "2026-09-12T00:12:37.068Z",
+        "goalContinuationCompletedAtUtc": "2026-09-12T00:12:54.075Z",
+        "limits": [
+          "One correlated merged-primary wrapper dispatch and its first-path reply; not ordinary installed /ipc acceptance, a release, propagation, repeatability or general Desktop compatibility.",
+          "The receiver created a goal-continuation child after the dispatch turn completed. One dispatch is not a claim of exactly one task_started event.",
+          "The declared 15-minute/2-hour waiter cadence was not exercised; the result was read after the outcome had settled. Literal wrapper and waiter argv were not preserved.",
+          "The receipt records a correction to stored sandbox-policy prose and receiver task-compliance deviations; its transport PASS is not proof of complete receiver obedience or of future effective permissions.",
+          "The structural checker passed 45 checks on this capture; this does not certify the wrapper as a program or automatic exactly-once execution."
+        ]
+      },
+      "scope": "The retained archive scan, corrected full-table comparison and independent receipt support only the named observations; the separate byte-seek read verifies the seven follower-token offsets and records current archive mtime under the same full hash. The retained capture does not provide member paths/hashes, archive data-start offset, table-start offset, a re-derived hostId resolver byte anchor or an identity-throw byte anchor. None is copied from older builds. Raw .turnStart count 160 is not a word-bounded property-token count; the two turnStartParams hits are not localized by this capture. The Daybreak message-key count 65 does not establish unchanged predicate semantics or admission on other models. No whole-application comparison or new installed-route proof is claimed."
     }
   ],
   "frame": {

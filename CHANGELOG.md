@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.1.14] — 2026-09-12
+
+v0.1.14 includes the rollout parser/correlation repair and the version-2 Codex Desktop transport repair. On 2026-09-12, one independently adjudicated wrapper dispatch from the merged primary checkout on Codex Desktop 26.908.4834.0 used autoload plus foreground switch, reached its named dispatch turn's terminal completion, and returned the dispatch-correlated reply on the first printed path. This is one recorded wrapper result on that build. A retained-file metadata census with cutoff 2026-09-12T04:36:57.599666Z covered 7,017 physical rollout files and 7,005 initial session IDs; 1,473 files declared a fork, of which 1,458 declared both an ordinal boundary and a first-record ordinal, 14 declared the ordinal without the boundary, and one declared neither. These are first-record shape counts, not producer-frequency estimates, validated lineage counts, or reader-certification results. Record-owner integrity remains enforced. The earlier dated fork findings remain historical evidence; this census does not establish why retained shapes differ. Normal installed /ipc acceptance, broad Desktop/build/model compatibility, repeatability, automatic exactly-once execution, and production-broker reliability are not established. The live capture did not preserve literal wrapper/waiter argv or exercise the requested 15-minute/two-hour polling cadence. A goal-continuation turn followed the completed dispatch turn and wrote no second reply. Propagation and normal installed-route acceptance remain separate steps.
+
 - The generated handoff payload and its committed example under `skills/ipc/examples/` now instruct
   the receiver to finish and inspect the complete result before a separate, single reply-write
   attempt, never to combine result production with the reply write in one command, and to claim a
@@ -72,30 +76,30 @@ All notable changes to this project will be documented in this file.
   `0.148.0-alpha.9` on 2026-08-19, then absent from every `0.149`-`0.152` rollout, and written
   again by `0.153.0-alpha.5` and `0.153.0` - so naming it and adding the forward rule changes no
   other retained rollout's verdict.
-- The fork ordinal contract now applies only where the producer declares it. A rollout whose first
+- The fork ordinal contract applies only where the producer declares it. A rollout whose first
   record carries `forked_from_id` with neither `subagent_history_start_ordinal` nor a top-level
-  `ordinal` declares no ordinal stream, so it is admitted and read as an unforked rollout. Every
-  declared-contract check is unchanged, and a first record declaring an `ordinal` while omitting
-  the boundary field still fails closed. **Forked threads were affected, and this is not a
-  historical class:** nine such rollouts were written on 2026-09-01 by the Codex CLI then in use
-  (`0.151.0-alpha.7.2`), a tenth on 2026-09-03 by its successor (`0.153.0-alpha.5`), and 1,200
-  rollouts regress under the previous behaviour - 1,200 of the 1,390 retained rollout files whose
-  first record is a fork, out of 6,145 retained rollout files in all, measured
-  2026-09-03T02:42:28Z. One observation under the successor is existence, not a rate: no claim is
-  made about how often it writes the shape. For those threads the observer reported
-  `rollout-unavailable`, the
-  waiter returned `unavailable` before it could reach an existing reply file, harvest returned
-  `unavailable`, and the write-proof preflight returned a non-overridable `ambiguous`.
-  **Fixing the gate does not empty the class.** What still refuses a subagent fork of a
-  legacy-history thread is a second, independent cause the gate used to mask by tripping first:
-  `schema-drift` with reason `rollout-thread-id-mismatch`, raised on records inside the inherited
-  prefix whose `thread_id` is the **parent's**. Seventeen retained rollouts read worse under this
-  release than under the previously shipped reader for exactly that reason, measured
-  2026-09-03T21:14Z - eight written 2026-04 through 2026-08, and nine written on 2026-09-01 by
-  `0.151.0-alpha.7.2`. This is a current-producer class, not a historical one: it recurs whenever a
-  legacy-history thread spawns a subagent, so the seventeen are a count at an instant and not a
-  closed set. Record-owner integrity is deliberately not relaxed here; that would be a separate
-  decision with its own evidence.
+  `ordinal` declares no ordinal stream, so that declaration is read under the unforked contract.
+  Other identity, schema and lifecycle checks still apply. A first record declaring an `ordinal`
+  while omitting the boundary field still fails closed; the declared-contract checks are unchanged.
+  **Historical measurements:** the 2026-09-03T02:42:28Z record counted 1,200 no-boundary/no-ordinal
+  forks among 1,390 fork files and 6,145 retained files, including nine files labelled
+  `0.151.0-alpha.7.2` from 2026-09-01 and one labelled `0.153.0-alpha.5` from 2026-09-03. The earlier
+  observer, waiter, harvest and write-proof paths reported unavailable or ambiguous on that class.
+  A separate reader comparison recorded at 2026-09-03T21:14Z described seventeen inherited-owner
+  regressions: eight dated 2026-04 through 2026-08 and nine dated 2026-09-01. These are preserved
+  dated findings, not a current census or a measurement repeated for this release.
+  **Drafting-time census, cutoff 2026-09-12T04:36:57.599666Z:** a read-only streaming scan of active
+  and archived retained-session stores covered 7,017 physical files, 7,005 initial session IDs,
+  and 4,910,419 timestamp-admitted records, with 51 later records excluded. There was no file-size
+  exclusion and no read, JSON parse, or timestamp error. The 1,473 fork files declared these first-
+  record shapes: both boundary and ordinal, 1,458; ordinal without boundary, 14; neither, one;
+  boundary without ordinal, zero. The one neither-field file has initial producer label `0.144.2`
+  and no explicit record-owner carrier. No file in that shape matched the earlier foreign-owner
+  predicate at this cutoff. This does not establish that the old findings were false or that a
+  migration or repair removed them. First-record producer labels do not identify the producer of
+  every inherited record. Counts are retained-file observations, not rates or compatibility
+  results. Record-owner integrity is not relaxed; the census does not certify lineage, complete
+  turns, or reader verdicts.
 - A turn the boundary machine did not close can no longer be projected complete or certifiable. The
   dispatch projection now applies the marker proof's own predicate: a snapshot carrying a terminal
   but not `closed` returns unavailable with the snapshot's diagnostics. Previously a malformed line
@@ -158,20 +162,22 @@ All notable changes to this project will be documented in this file.
   `request.model`/`request.effort`/`request.cwd`, and model and effort rewrite the target thread's
   stored settings, so the client still omits all three unless the operator passes them; a
   `--turn-trigger` flag selects the provenance label, defaulting to the app's own literal for a
-  tool delivering a message into an existing thread. **Live status. The contract above is a static
-  derivation qualified by hermetic tests; historical live evidence on `26.901.4073.0` exists as four facts
-  that are not interchangeable. (1) The version-2 frame was accepted live by `26.901.4073.0` on
-  2026-09-05: a direct write-proof run from a working tree of this branch started a real turn, and
-  the reader bound the proof to that turn id from the target thread's own rollout. (2) The `--ipc`
-  wrapper, run the same day from the same working tree, delivered into a thread the renderer already
-  owned, so the autoload, foreground-switch and deep-link paths are still unexercised at version 2.
-  (3) The pre-tag delivery smoke from the merged primary checkout has NOT been run; it is ordered
-  before the tag and before propagation. (4) Acceptance through the normal installed route has NOT
-  been achieved: the installed clients sent version 1 on that date; the installed-wrapper attempt
-  returned `RESULT: gui-unowned -- reason=autoload-incomplete -- confirmation=not-attempted`, with
-  the sampled target rollout byte-identical. Those observations alone do not prove non-admission
-  or authorize target reuse. Merging this branch does not update installed clients — only
-  propagation does. Nothing here certifies the installed route or live acceptance on 6511.**
+  tool delivering a message into an existing thread. **Live status, with separate evidence dates.
+  (1) On 2026-09-05, a direct write-proof run from a working tree of this branch was accepted by
+  Codex Desktop `26.901.4073.0`, started a real turn, and bound proof to that returned turn ID.
+  (2) The wrapper run from that working tree on the same date delivered into a renderer-owned
+  thread; that particular trial did not exercise autoload, foreground switch or deep linking.
+  (3) On 2026-09-12, the merged-primary Step 16b wrapper trial on `26.908.4834.0` was independently
+  adjudicated PASS: one authorized dispatch used autoload plus foreground switch, reached the named
+  dispatch turn's terminal completion, and returned the correlated reply on the first printed path.
+  This supersedes the prior statement that merged-primary Step 16b had not run, and proves only
+  that single captured wrapper result on that build. It does not transfer this proof to 6511 or
+  any other build, and the candidate-only 6511 trials remain separately described below.
+  (4) Normal installed `/ipc` acceptance is not established. The installed version-1 attempt on
+  2026-09-05 returned `gui-unowned`, `autoload-incomplete`, `confirmation=not-attempted`, with the
+  sampled rollout unchanged; those observations alone did not prove non-admission or authorize
+  reuse. Merging or reconciling the primary checkout does not propagate installed clients.
+  Propagation and owner-initiated normal installed acceptance remain separate.**
 - `codex_ipc_owner_probe.mjs` is retired and inert. It sent a version-1 follower start-turn at a
   synthetic sentinel thread and read `no-client-found` as evidence that the follower route is
   reachable from an external client. That inference never held and cannot hold now: the router
@@ -190,11 +196,13 @@ All notable changes to this project will be documented in this file.
   as what it is: enforced by omission rather than by the protocol. Neither the wrapper nor the
   write-proof harness passes those flags, and the client omits them unless an operator supplies
   them.
-- These changes are covered by sanitized hermetic tests and offline gates only. No fresh live IPC
-  proof, installed-root propagation, release, or deployment is claimed.
-- Documentation and repository gates now enforce the UTF-8/LF text policy and documentation
-  contracts. Intentional Unicode is retained. Primary dispatch behavior did not change, no fresh
-  live proof was performed, and no release or installed propagation is implied.
+- The qualification described by the earlier offline-only note used sanitized hermetic tests and
+  offline gates. Historical candidate live trials remain separately described. The 2026-09-12
+  merged-primary wrapper evidence and its limits are stated above; it does not establish
+  installed-root propagation or normal installed `/ipc` acceptance.
+- Documentation and repository gates enforce the UTF-8/LF text policy and documentation
+  contracts. Intentional Unicode is retained. Those documentation/gate changes did not change
+  primary dispatch behavior, perform a live proof, or establish installed propagation.
 - **Subsequent candidate-only live evidence on 2026-09-08 UTC.** At exact source base
   `1731a824850c1077fade0f58bdfff8d125007b53`, three wrapper invocations, each into an owner-named
   target thread, on Codex Desktop `26.901.6511.0` reached `gpt-5.6-luna` threads at medium
@@ -217,6 +225,8 @@ All notable changes to this project will be documented in this file.
 - Public-readiness hardening makes the repository safety scan fail closed, documents private
   vulnerability reporting, and runs CI with read-only permissions and commit-pinned official
   actions.
+- Corrected SECURITY.md Reporting instructions for the public repository and its enabled GitHub
+  Private Vulnerability Reporting route; removed the obsolete private-repository transition text.
 - Before public visibility, Git object history and annotated tags were re-created to remove
   personal mailbox metadata. Release names and content intent remain unchanged, but commit and
   tag object IDs necessarily change; private rollback mappings remain outside the public repo.
