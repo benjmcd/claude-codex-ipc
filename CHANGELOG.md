@@ -225,6 +225,8 @@ v0.1.14 includes the rollout parser/correlation repair and the version-2 Codex D
 - Public-readiness hardening makes the repository safety scan fail closed, documents private
   vulnerability reporting, and runs CI with read-only permissions and commit-pinned official
   actions.
+- Corrected SECURITY.md Reporting instructions for the public repository and its enabled GitHub
+  Private Vulnerability Reporting route; removed the obsolete private-repository transition text.
 - Before public visibility, Git object history and annotated tags were re-created to remove
   personal mailbox metadata. Release names and content intent remain unchanged, but commit and
   tag object IDs necessarily change; private rollback mappings remain outside the public repo.
