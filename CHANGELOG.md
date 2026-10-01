@@ -13,6 +13,16 @@ All notable changes to this project will be documented in this file.
   real-machine package-update and effective-handler readers intentionally remain unqualified, so
   real activation refuses until positive authorities replace those unknowns; hermetic DryRun tests
   cover the decision matrix without opening the protocol or changing application state.
+- Added one common read-only target inspection before the maintained wrapper's first live attempt.
+  It reuses that snapshot across guarded recovery and refuses missing, archived, non-root,
+  empty-model, malformed, contradictory, or ambiguous targets before host policy or pipe contact.
+  Explicit sub-agent and guardian-review evidence is non-root; known parents are reported. Legacy
+  null-source rows continue only as warned `legacy-root-assumed` targets when every available
+  child indicator is absent. The locator marks root/non-root/legacy candidates without becoming
+  send authority. Direct-client `--model` and `--effort` values now require nonempty trimmed
+  text and `--ack-thread-settings-change`, because either persists as stored-thread settings.
+  Hermetic inspector, wrapper, and client-argument tests cover the new refusal and acknowledgement
+  paths.
 - Hardened the hermetic test and release harness: top-level temporary roots now
   fail closed before derived writes, wrapper fixtures resolve only their owned
   Node/PowerShell/Codex stubs, inherited Git routing and trace variables are

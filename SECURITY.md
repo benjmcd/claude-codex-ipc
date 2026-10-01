@@ -56,8 +56,11 @@ A live Desktop send starts a real model turn in a real thread. Gates, all fail-c
 - Dry-run is the default everywhere; a live send requires `--send` **and** `--ack-live-write`.
 - `--allow-any-thread` is additionally required unless the target equals the operator-set
   `CODEX_IPC_AUTHORIZED_TEST_THREAD` env var. **No authorized thread id ships in the code.**
-- The wrapper refuses to deep-link missing or archived threads and writes the file-drop fallback
-  before any live attempt.
+- The wrapper writes the file-drop fallback, then runs one read-only target inspection before any
+  host gate or live attempt. It requires an exact active root target and a nonempty stored model;
+  missing, archived, non-root, empty-model, malformed, contradictory, or ambiguous state refuses
+  with `confirmation=not-attempted`. A legacy null source is assumed root only when every
+  available child indicator is absent and is warned.
 - Before every maintained-wrapper send or retry, a shared read-only policy requires a complete
   inventory with exactly one intended GUI host and no other GUI host. Configuration resolves per
   field as flag > environment > `${CODEX_IPC_ROOT}/host-policy.json` > defaults; malformed present
@@ -65,11 +68,14 @@ A live Desktop send starts a real model turn in a real thread. Gates, all fail-c
 - Activation defaults off. Alternate intended hosts can be send targets but are never package
   protocol activation targets. Package activation additionally requires positive package-update
   clearance and an effective-handler binding; unknown or conflicting evidence refuses.
-- Completeness note: selecting `--ipc <uuid>` is itself the live-delivery acknowledgement;
-  inspect-before-send is the `/ipc` agent's own preflight step, not a wrapper gate. The
+- Selecting `--ipc <uuid>` is itself the live-delivery acknowledgement. The
   `handoff_to_codex.sh --ipc <uuid>` wrapper internally supplies
   `--send --ack-live-write --allow-any-thread` to the client; the file-drop fallback envelope is
-  still written first.
+  still written first and the one target snapshot is reused across guarded recovery. Host
+  inventory remains fresh before every send or retry.
+- Direct-client `--model` or `--effort` values are persistent stored-thread settings changes,
+  must be nonempty after trimming, and require the separate
+  `--ack-thread-settings-change` acknowledgement.
 
 ### No direct SQLite writes
 

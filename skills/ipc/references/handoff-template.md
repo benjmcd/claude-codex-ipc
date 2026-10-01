@@ -19,7 +19,8 @@ Per the `/ipc` workspace-scoping rule, place the FILLED handoff inside the assoc
   default, which may be outside the authorized roster — observed in production). The target
   thread's own model and reasoning are preserved by the wrapper's omission policy; a direct
   version-2 client model/effort override persists as a thread-settings change and requires explicit
-  operator intent. Sandbox policy and approval mode are never changed by the wrapper dispatch — the
+  operator intent plus `--ack-thread-settings-change`; values empty after trimming are refused.
+  Sandbox policy and approval mode are never changed by the wrapper dispatch — the
   turn runs under whatever the thread is already set to. Narrowest-correct-change;
   no-delete/archive-instead; no
   co-author attribution; current phase (audit / plan / implement).

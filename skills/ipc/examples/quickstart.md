@@ -34,8 +34,9 @@ writes its reply to the printed per-dispatch `.reply.md` path.
 # 1. Inspect the target first (read-only; requires node:sqlite):
 node "${CLAUDE_SKILL_DIR}/scripts/codex_ipc_session_inspect.mjs" --thread <conversation-id> --tail-events 20 --summary
 
-# 2. Send via the wrapper (writes the file-drop fallback first). This sends only when the
-#    intended GUI is the sole proven host; activation of an unowned thread remains off:
+# 2. Send via the wrapper (writes the file-drop fallback first). It independently inspects once
+#    and requires a root target with a nonempty stored model, then sends only when the intended GUI
+#    is the sole proven host; activation of an unowned thread remains off:
 "${CLAUDE_SKILL_DIR}/scripts/handoff_to_codex.sh" --ipc <conversation-id> "run the failing test and fix it"
 ```
 
@@ -44,6 +45,8 @@ Host settings resolve per field as wrapper flag > environment >
 `package`; alternate intended hosts use an absolute executable path and are never protocol-activated.
 The shipped real-machine evidence readers currently refuse package activation because update
 clearance and the effective `codex` protocol handler are not yet qualified.
+The wrapper refuses missing, archived, non-root, empty-model, or ambiguous targets before host
+policy or pipe contact. A locator hint is not send authority.
 
 ## 3. Reply viewing (read-only derived view)
 

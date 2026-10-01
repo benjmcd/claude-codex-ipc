@@ -96,29 +96,33 @@ is not another exact occurrence, and discloses that uncertainty rather than eras
 
 Host configuration resolves per field as wrapper flag, environment, `${CODEX_IPC_ROOT}/host-policy.json`,
 then defaults (`autoload=off`, intended host `package`). Every present layer is validated even when
-overridden. The wrapper considers activation only from parsed structure, not text matches.
-`no-client-found` must be
-the exact failed response for the requested target with exactly one matching follower request; the
-pre-navigation inspector must then prove a successful read-only DB open and one exact active row for
-that same target. Rollout-only, missing, archived, malformed, or ambiguous state cannot authorize a
-deep link. Initial renderer-owned success and post-autoload retry success both require parsed
+overridden. After publishing the fallback envelope, the wrapper runs one read-only target inspection
+before its first host gate or pipe contact and reuses that snapshot across guarded recovery. It
+requires a trusted exact active DB row, a `root` or warned `legacy-root-assumed` classification,
+and a nonempty stored model. Explicit child evidence is non-root; a null legacy source is assumed
+root only when every available child indicator is absent. Missing, archived, non-root, empty-model,
+malformed, contradictory, or ambiguous state refuses with `confirmation=not-attempted`.
+
+The wrapper considers activation only from parsed structure, not text matches. `no-client-found`
+must be the exact failed response for the requested target with exactly one matching follower
+request; the existing pre-send snapshot remains target authority. Initial renderer-owned success
+and post-autoload retry success both require parsed
 `ok: true`, the exact `targetThreadId`, `response.resultType: "success"`, and exactly one follower
 occurrence whose `name`, `method`, and `conversationId` all match. Client exit 0 with missing or
 conflicting structure is post-attempt ambiguous: it is not classified as delivered and is never
 automatically retried. Inspection is necessary before considering a manual retry, but negative
 bounded/recent-tail evidence cannot prove non-admission. Retry requires either an exact
 full-history outcome proving non-admission or an explicit owner decision acknowledging the
-unresolved duplicate-send risk. The
-unowned-branch recheck is defense in depth: the renderer-owned fast path relies on the mandatory
-separate agent preflight and does not add another wrapper inspection before its initial attempt.
-The resulting preflight-to-send state-change window remains disclosed. Exact target binding
+unresolved duplicate-send risk. The same target snapshot gates the renderer-owned and unowned
+paths; only the host inventory repeats immediately before each send or retry. Exact target binding
 prevents heuristic retargeting, and ambiguous outcomes are not retried.
 
 ## Inspection surfaces (read-only)
 
-- `codex_ipc_session_inspect.mjs` — thread row + rollout tail + mid-turn heuristics.
+- `codex_ipc_session_inspect.mjs` — thread row, fail-closed root classification and parent facts,
+  stored settings, database-selected rollout, full-stream turn activity, and bounded display tail.
 - `codex_ipc_thread_locator.mjs` — candidate discovery for new-session mode (never send
-  authority).
+  authority); its root/non-root/legacy hints do not replace inspection.
 - `codex_ipc_snapshot.mjs` — config/DB hashing for before/after isolation evidence.
 - `codex_ipc_revalidate.mjs` — post-update validate-only checks. It parses and runs the shared host
   policy before the optional pipe read; a host refusal suppresses `--allow-live-ipc-read` rather

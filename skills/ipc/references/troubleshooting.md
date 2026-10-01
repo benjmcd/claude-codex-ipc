@@ -32,8 +32,17 @@ activation gate refused),
 line), `foreground-unidentified` (foreground app not provably
 Codex; never auto-switched), `foreground-restore-unproven` (restore-if-known is fail-closed),
 `autoload-incomplete` (poll window expired), `target-not-found`/`target-archived`/
-`target-inspection-ambiguous` (positive proof required before any deep link),
+`target-non-root`/`target-model-empty`/`target-inspection-ambiguous` (positive target proof
+required before any maintained-wrapper live attempt),
 `router-pipe-failure`, `foreground-switch-unacknowledged`, `invalid-foreground-policy`.
+The target snapshot is run once before the first live attempt and reused across auto-load recovery;
+the host inventory still runs fresh before each send or retry. `target-non-root` may print a known
+parent UUID. Legacy null-source rows continue only as warned `legacy-root-assumed` targets when
+every available child indicator is absent. The toolkit never repairs `target-model-empty`.
+
+Direct-client `--model` or `--effort` values persist as stored-thread settings, must be nonempty
+after trimming, and require `--ack-thread-settings-change` even for dry-run request generation.
+The maintained wrapper omits both values.
 On an accepted send the wrapper emits one bounded confirmation token: `rollout-hit` (the exact
 dispatch pickup was observed in a rollout user message — admission only, not completion),
 `rollout-pending` (authoritative candidate readable but no pickup observed within budget — do not

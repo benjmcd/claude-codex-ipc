@@ -50,6 +50,8 @@ Options:
                                    operator asked for that change.
   --effort <level>                 Optional reasoning effort for the turn. NOT a per-turn override:
                                    the app rewrites the thread's stored reasoning effort with it.
+  --ack-thread-settings-change     Required with --model or --effort; acknowledges that either
+                                   value persists by rewriting the target thread's stored setting.
   --cwd <path>                     Optional cwd for the turn. Honored only when the conversation
                                    has no environment cwd of its own.
   --turn-trigger <name>            Provenance label sent with the turn. Default:
@@ -67,6 +69,8 @@ Safety:
   Dry-run is the default. --send requires --ack-live-write. --send additionally requires
   --allow-any-thread unless the target equals the optional operator-set
   CODEX_IPC_AUTHORIZED_TEST_THREAD environment variable (no default is shipped).
+  --model/--effort require --ack-thread-settings-change even in dry-run mode because the
+  emitted request represents a persistent stored-thread settings rewrite when sent.
   The router forwards only to the owning renderer of the given conversationId (no broadcast).
   The app answers a follower start-turn within 5000ms or returns
   error "thread-follower-start-turn-timeout" while the turn may still start: treat that token as
@@ -87,6 +91,7 @@ function parseArgs(argv) {
     clientType: DEFAULT_CLIENT_TYPE,
     send: false,
     ackLiveWrite: false,
+    ackThreadSettingsChange: false,
     allowAnyThread: false,
     help: false,
   };
@@ -130,6 +135,9 @@ function parseArgs(argv) {
         break;
       case "--ack-live-write":
         opts.ackLiveWrite = true;
+        break;
+      case "--ack-thread-settings-change":
+        opts.ackThreadSettingsChange = true;
         break;
       case "--allow-any-thread":
         opts.allowAnyThread = true;
@@ -187,6 +195,21 @@ async function normalizeOptions(opts) {
   opts.task = opts.task?.trim();
   if (!opts.task) {
     throw new Error("--task or --task-file must provide non-empty text");
+  }
+
+  for (const [key, flag] of [["model", "--model"], ["effort", "--effort"]]) {
+    if (opts[key] !== null) {
+      opts[key] = opts[key].trim();
+      if (!opts[key]) {
+        throw new Error(`${flag} must provide non-empty text`);
+      }
+    }
+  }
+  if ((opts.model !== null || opts.effort !== null) && !opts.ackThreadSettingsChange) {
+    throw new Error(
+      "--model/--effort require --ack-thread-settings-change because they rewrite the " +
+        "target thread's stored settings",
+    );
   }
 
   if (opts.turnTrigger !== null && !TURN_TRIGGER_RE.test(opts.turnTrigger)) {
@@ -377,7 +400,7 @@ function dryRunResponse(opts, initializeRequest, followerRequest) {
       "This client issues no read-only owner query: the app's method table does carry a thread-owner-discovery method, but nothing here has ever exercised it, so real owner proof stays coupled to the first controlled follower write.",
       "thread-follower-start-turn starts a real model turn when sent.",
       "--model/--effort rewrite the target thread's stored model/reasoning settings; omit them " +
-        "unless the operator asked for that change.",
+        "unless the operator asked for that change, then pass --ack-thread-settings-change.",
       "The app answers a follower start-turn within 5000ms or returns error " +
         "'thread-follower-start-turn-timeout' while the turn may still start - treat that token " +
         "as possibly-started and never resend.",

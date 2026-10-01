@@ -92,7 +92,12 @@ constraints, and context — so the handoff is self-contained and needs no follo
 
 ## Existing-session mode
 
-Before using existing-session `/ipc`, the /ipc agent must run the read-only inspector as its separate preflight step. Selecting `--ipc <uuid>` is itself the live-delivery acknowledgement; the wrapper supplies the client's `--send --ack-live-write --allow-any-thread` internally. Inspect-before-send is the /ipc agent's own preflight step, not a wrapper gate.
+Before using existing-session `/ipc`, run the read-only inspector to preview the target. The
+wrapper independently runs that inspector exactly once after publishing the file-drop envelope and
+before its first live send. It reuses the resulting target snapshot across any guarded auto-load
+recovery; the shared host policy still runs fresh immediately before every send or retry. Selecting
+`--ipc <uuid>` is itself the live-delivery acknowledgement; the wrapper supplies the client's
+`--send --ack-live-write --allow-any-thread` internally.
 
 Run the read-only inspector (requires a Node.js version with `node:sqlite`; see
 [references/troubleshooting.md](references/troubleshooting.md)):
@@ -132,9 +137,15 @@ may differ from the effective turn, and MUST NOT gate the dispatch or be read as
 reply-writability prediction. A blocked reply write is expected, not an error. For a known-UUID
 `--ipc` dispatch, `codex_ipc_wait --accept-rollout-fallback` certifies named-dispatch completion
 and `replySource=rollout-fallback` but intentionally emits no body; retrieve and render the body
-with the existing read-only dual-source `scripts/codex_ipc_replies.sh` viewer. Display is capped at
-4096 bytes by default; if truncation is reported, rerun with a sufficient `--max-bytes`. This is
-never a policy gate. Identify the latest
+with the existing read-only dual-source `scripts/codex_ipc_replies.sh` viewer. Also inspect
+`targetClassification`, `threadSource`, and any parent facts. Explicit `subagent` and
+`guardian_review` sources, source JSON or agent metadata that marks a child, a spawn edge, or a
+rollout parent make the target non-root. A null legacy source is allowed only when every available
+child indicator is absent; it is labelled `legacy-root-assumed` and warned. Contradictory,
+invalid, or unreadable classification evidence is ambiguous and refuses delivery. Locator
+`targetKindHint` values are discovery hints only; the pre-send inspector remains authoritative.
+Display is capped at 4096 bytes by default; if truncation is reported, rerun with a sufficient
+`--max-bytes`. This is never a policy gate. Identify the latest
 user/agent/task-complete signals; and `activitySignals.turnActivity` — the authoritative
 open/closed/ambiguous read of the latest turn boundary from the shared turn-boundary machine over
 the FULL rollout stream (`open` = a start/user turn with no matching terminal; `closed` = the
@@ -217,12 +228,18 @@ Minimal descriptor:
 {"schemaVersion":1,"autoload":"off","intendedHost":{"kind":"package"}}
 ```
 
+The wrapper's one pre-send inspection must report a trusted read-only DB open, one exact active row,
+a `root` or warned `legacy-root-assumed` classification, and a nonempty stored model. Missing,
+archived, non-root, empty-model, malformed, contradictory, or ambiguous state refuses before host
+policy or pipe contact with `confirmation=not-attempted`; no refusal attempts to repair the
+thread. When a parent is known for a refused non-root target, the wrapper prints its UUID. The
+snapshot records the database-designated rollout page; downstream observation remains separately
+bound until the rollout-page wiring lands.
+
 The wrapper treats `no-client-found` as authority to consider auto-load only when the parsed client
 result is structurally exact: failed result for this target, the exact router error, and exactly
-one matching follower request. Nested or incidental text never qualifies. Before any deep link,
-the inspector must likewise report a successful read-only DB open and one thread row with the exact
-target ID and numeric active archive state (`0`); a matching rollout without that trusted row is not
-target authority. Missing, archived, malformed, or ambiguous state fails closed without navigation.
+one matching follower request. Nested or incidental text never qualifies. The already-completed
+pre-send inspection is reused; a matching rollout without its trusted row is not target authority.
 Neither the initial renderer-owned path nor a post-autoload retry treats client exit 0 alone as
 delivery. Both require parsed `ok: true`, the exact `targetThreadId`,
 `response.resultType: "success"`, and exactly one follower occurrence whose `name`, `method`, and
@@ -231,11 +248,11 @@ ambiguous: it is not classified as delivered and is never automatically retried.
 necessary before considering a manual retry, but negative bounded/recent-tail evidence cannot
 prove non-admission. Retry only after an exact full-history outcome proves non-admission, or after
 an explicit owner decision that acknowledges the unresolved duplicate-send risk.
-This recheck is defense-in-depth on the authoritative unowned branch only. The renderer-owned fast
-path deliberately does not repeat the inspector before its initial attempt; the separate agent
-preflight above remains mandatory. That preserves the fast path but leaves a disclosed
-preflight-to-send state-change window. Exact target binding prevents heuristic retargeting, while
-any ambiguous post-attempt outcome still requires inspection and forbids automatic retry.
+The single target snapshot precedes both renderer-owned and unowned paths. It is intentionally not
+repeated during auto-load recovery, while exact target binding prevents heuristic retargeting and
+the fresh host check gates each contact. Any ambiguous post-attempt outcome still requires
+inspection and forbids automatic retry. The snapshot can change after inspection; it does not
+prove future admission, completion, or reply writability.
 
 Every `--ipc` send reports exactly one machine-parseable result:
 `RESULT: gui-delivered|gui-unowned|failed-closed -- reason=<token> -- confirmation=<token>`.
@@ -409,8 +426,9 @@ message with the existing read-only dual-source `scripts/codex_ipc_replies.sh` v
 invocation stays file-primary and filedrop is not auto-recoverable. The wrapper dispatch never
 changes the target thread's model, reasoning, sandbox, or approval: it omits every version-2
 override field. A direct client `--model`/`--effort` override is a thread-settings change, not a
-per-turn override (see the new-session-mode note below and `docs/COMPATIBILITY.md`); `/ipc` never
-passes them.
+per-turn override (see the new-session-mode note below and `docs/COMPATIBILITY.md`); the client
+requires a nonempty trimmed value plus `--ack-thread-settings-change`, and `/ipc` never passes
+them.
 
 ## New-session mode
 
@@ -433,8 +451,10 @@ node "${CLAUDE_SKILL_DIR}/scripts/codex_ipc_thread_locator.mjs" --cwd <absolute-
 ```
 
 If the user created a clearly titled waiting thread, narrow with `--title-contains <text>` and
-`--require-single`. A locator result is only candidate discovery, not send authority. If exactly
-one intended candidate remains, run `codex_ipc_session_inspect.mjs` on that conversationId and then
+`--require-single`. A locator result is only candidate discovery, not send authority.
+`targetKindHint` marks explicit `user` rows as `root`, explicit child rows as `non-root`, and
+null-source rows as `legacy-unknown`; it never applies the full classification. If exactly one
+intended candidate remains, run `codex_ipc_session_inspect.mjs` on that conversationId and then
 apply the existing-session send rule. If no candidate or multiple plausible candidates remain, fall
 back to the file-drop handoff and ask the user to select/create the Desktop thread and paste the
 pickup line or provide the session id.
@@ -447,15 +467,18 @@ version-2 `params.turnStart` payload the app does read `request.model` and `requ
 writes them back as the thread's stored model and reasoning effort. The wrapper and the write-proof
 harness pass neither, and the client omits both unless an operator explicitly supplies
 `--model`/`--effort` — which is a thread-settings change, not a per-turn override. Do not attempt
-to override these through the delivery route, the client flags, or any other mechanism — never
-mutate. Consistent with the advisory rule above, do NOT treat a stored `sandboxPolicy` or
+to override these through the delivery route. Direct client use requires the operator's explicit
+intent and `--ack-thread-settings-change`; values must be nonempty after trimming and persist as
+the stored thread settings. Consistent with the advisory rule above, do NOT treat a stored
+`sandboxPolicy` or
 `approvalMode` as a prediction that the reply write will fail: a stored `managed` sandbox is not a
 reason to pick a different thread. A blocked reply write is expected, not an error, and is
 certified as named-dispatch completion with `replySource=rollout-fallback` by
 `codex_ipc_wait --accept-rollout-fallback`; the waiter intentionally emits no body, so retrieve and
 render it with the read-only dual-source `scripts/codex_ipc_replies.sh` viewer. Reserve "choose
-another thread or ask the operator" for cases the inspector proves — missing, archived, or
-identity-mismatched targets — not for stored policy rows. Model/reasoning tier guidance in a task belongs to the thread's
+another thread or ask the operator" for cases the inspector proves — missing, archived, non-root,
+empty-model, identity-mismatched, or ambiguously classified targets — not for stored policy rows.
+Model/reasoning tier guidance in a task belongs to the thread's
 SUBAGENT deployment instructions, not to the thread itself.
 
 ## Cross-session context

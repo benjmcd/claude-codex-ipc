@@ -61,8 +61,9 @@ The repository-relative Quickstart block below runs from the repository root.
 # 1. File-drop (stable): paste the printed pickup line into your Codex session
 skills/ipc/scripts/handoff_to_codex.sh "review src/parser.js for edge cases"
 
-# 2. Live Desktop delivery (experimental): explicit UUID only — inspect first, then send.
-#    This can reach only an already renderer-owned thread; Desktop activation stays off by default.
+# 2. Live Desktop delivery (experimental): explicit UUID only — preview, then send.
+#    The wrapper repeats one read-only root/model inspection and a fresh host gate before contact;
+#    Desktop activation stays off by default.
 node skills/ipc/scripts/codex_ipc_session_inspect.mjs --thread <conversation-id> --tail-events 20 --summary
 skills/ipc/scripts/handoff_to_codex.sh --ipc <conversation-id> "run the failing test and fix it"
 
@@ -196,8 +197,9 @@ CI adds syntax checks and public-safety scans on ubuntu + windows:
 ## Limitations
 
 Live route is Windows-only and version-fragile by nature. An explicit version-2 client model/effort
-override can rewrite and persist a target thread's stored settings; the wrapper and write-proof
-harness preserve those settings by omitting the override fields. Envelope files trust the local
+override can rewrite and persist a target thread's stored settings, so it requires
+`--ack-thread-settings-change` and a nonempty trimmed value; the wrapper and write-proof harness
+preserve those settings by omitting the override fields. Envelope files trust the local
 machine (any same-user process can read and modify them).
 
 ## Status

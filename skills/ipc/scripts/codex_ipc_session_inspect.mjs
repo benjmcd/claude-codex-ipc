@@ -39,6 +39,9 @@ const DEFAULT_MAX_TEXT_CHARS = 600;
 // Raw recentItems remain an inspection/display surface. Activity projections use this private,
 // non-serialized tail so copied fork history can never become child-local activity evidence.
 const ADMITTED_ACTIVITY_ITEMS = Symbol("admittedActivityItems");
+// Target classification must distinguish a cleanly absent parent from rollout owner evidence that
+// could not be trusted. Keep the parser detail invocation-local rather than expanding JSON output.
+const ROLLOUT_OWNER_INTEGRITY = Symbol("rolloutOwnerIntegrity");
 // --- `--summary` projection caps (O3) -------------------------------------------------------
 // These bound the ONLY two open-ended arrays the projection carries. They are projection-time
 // caps: they never reach parseArgs, inspectSession, parseRollout or inferActivitySignals, so
@@ -53,6 +56,8 @@ const THREAD_COLUMNS = [
   "updated_at",
   "cwd",
   "title",
+  "source",
+  "model_provider",
   "model",
   "reasoning_effort",
   "sandbox_policy",
@@ -60,6 +65,9 @@ const THREAD_COLUMNS = [
   "tokens_used",
   "archived",
   "thread_source",
+  "agent_nickname",
+  "agent_role",
+  "agent_path",
   "preview",
   "first_user_message",
   "created_at_ms",
@@ -187,6 +195,7 @@ async function inspectSession(opts) {
   const rolloutSummary = primaryRollout
     ? await parseRollout(primaryRollout.path, opts.tailEvents, opts.maxTextChars, opts.threadId)
     : null;
+  const targetClassification = classifyTarget(dbThread, rolloutSummary, rolloutSelection);
 
   const ok = Boolean(dbThread.thread?.exists || rolloutSummary?.parsedOk);
   return {
@@ -195,6 +204,7 @@ async function inspectSession(opts) {
     generatedAt: new Date().toISOString(),
     threadId: opts.threadId,
     dbThread,
+    targetClassification,
     rollout: {
       candidates: rolloutSelection.candidates,
       primary: rolloutSummary,
@@ -256,6 +266,7 @@ function readDbThread(dbPath, threadId) {
     const row = db
       .prepare(`select ${selectedColumns.join(", ")} from threads where id = ?`)
       .get(threadId);
+    const incomingSpawnEdges = readIncomingSpawnEdges(db, threadId);
 
     return {
       path: dbPath,
@@ -264,6 +275,7 @@ function readDbThread(dbPath, threadId) {
       stat: info,
       selectedColumns,
       thread: summarizeThread(row || null),
+      incomingSpawnEdges,
       warnings: [],
     };
   } catch (error) {
@@ -279,6 +291,61 @@ function readDbThread(dbPath, threadId) {
     if (db) {
       db.close();
     }
+  }
+}
+
+function readIncomingSpawnEdges(db, threadId) {
+  try {
+    const table = db
+      .prepare("select name from sqlite_master where type = 'table' and name = ?")
+      .get("thread_spawn_edges");
+    if (!table) {
+      return { available: false, readOnlyQueryOk: true, rows: [], warnings: [] };
+    }
+    const columns = new Set(
+      db.prepare("pragma table_info(thread_spawn_edges)").all().map((row) => row.name),
+    );
+    if (!columns.has("parent_thread_id") || !columns.has("child_thread_id")) {
+      return {
+        available: true,
+        readOnlyQueryOk: false,
+        rows: [],
+        warnings: ["thread_spawn_edges is missing a required parent/child column."],
+      };
+    }
+    const statusSelection = columns.has("status") ? ", status" : "";
+    const rows = db
+      .prepare(
+        "select parent_thread_id as parentThreadId, child_thread_id as childThreadId" +
+          `${statusSelection} from thread_spawn_edges where lower(child_thread_id) = ?`,
+      )
+      .all(threadId)
+      .map((row) => {
+        const parentValid = typeof row.parentThreadId === "string" && UUID_RE.test(row.parentThreadId);
+        const childValid =
+          typeof row.childThreadId === "string" &&
+          UUID_RE.test(row.childThreadId) &&
+          row.childThreadId.toLowerCase() === threadId;
+        return {
+          parentThreadId: parentValid ? row.parentThreadId.toLowerCase() : null,
+          parentValid,
+          childValid,
+          status: row.status ?? null,
+        };
+      });
+    return {
+      available: true,
+      readOnlyQueryOk: true,
+      rows,
+      warnings: [],
+    };
+  } catch (error) {
+    return {
+      available: true,
+      readOnlyQueryOk: false,
+      rows: [],
+      warnings: [`Failed to read thread_spawn_edges: ${error.message}`],
+    };
   }
 }
 
@@ -304,7 +371,9 @@ function summarizeThread(row) {
     rolloutPath: row.rollout_path || null,
     cwd: row.cwd || null,
     title: row.title || null,
-    model: row.model || null,
+    source: parseJsonColumn(row.source),
+    modelProvider: row.model_provider ?? null,
+    model: row.model ?? null,
     reasoningEffort: row.reasoning_effort || null,
     // `approvalMode`/`sandboxPolicy` are the parsed snapshot of the stored `threads.approval_mode`
     // / `threads.sandbox_policy` columns (permission-profile-shaped: observed `disabled`/`managed`).
@@ -325,7 +394,10 @@ function summarizeThread(row) {
     },
     tokensUsed: row.tokens_used ?? null,
     archived: row.archived ?? null,
-    threadSource: row.thread_source || null,
+    threadSource: row.thread_source ?? null,
+    agentNickname: row.agent_nickname ?? null,
+    agentRole: row.agent_role ?? null,
+    agentPath: row.agent_path ?? null,
     preview: truncate(row.preview || "", 300),
     firstUserMessage: truncate(row.first_user_message || "", 300),
     createdAt: row.created_at || null,
@@ -333,6 +405,175 @@ function summarizeThread(row) {
     createdAtMs: row.created_at_ms ?? null,
     updatedAtMs: row.updated_at_ms ?? null,
   };
+}
+
+function classifyTarget(dbThread, rollout, rolloutSelection) {
+  const reasons = [];
+  const warnings = [];
+  const parentFacts = [];
+  const addReason = (reason) => {
+    if (!reasons.includes(reason)) reasons.push(reason);
+  };
+  const addParent = (source, parentThreadId) => {
+    if (!parentFacts.some((item) => item.source === source && item.parentThreadId === parentThreadId)) {
+      parentFacts.push({ source, parentThreadId });
+    }
+  };
+  const finish = (kind, parentThreadId = null) => ({
+    kind,
+    parentThreadId,
+    parentFacts,
+    reasons,
+    warnings,
+  });
+
+  const thread = dbThread?.thread;
+  if (dbThread?.exists !== true || dbThread?.readOnlyOpenOk !== true) {
+    addReason("db-thread-untrusted");
+    return finish("ambiguous");
+  }
+  if (thread?.exists !== true) {
+    addReason("db-thread-missing");
+    return finish("ambiguous");
+  }
+
+  let ambiguous = false;
+  let childIndicator = false;
+  let explicitRoot = false;
+
+  if (rolloutSelection?.status === "ambiguous") {
+    ambiguous = true;
+    addReason("rollout-selection-ambiguous");
+  } else if (rolloutSelection?.status === "unavailable") {
+    if (rolloutSelection.reason !== "no-candidate") {
+      ambiguous = true;
+      addReason("rollout-selection-unavailable");
+    }
+  } else if (rolloutSelection?.status === "found") {
+    if (!rollout || rollout.parsedOk !== true) {
+      ambiguous = true;
+      addReason("rollout-parse-invalid");
+    } else if (rollout[ROLLOUT_OWNER_INTEGRITY] !== true) {
+      ambiguous = true;
+      addReason("rollout-owner-untrusted");
+    }
+  } else {
+    ambiguous = true;
+    addReason("rollout-selection-invalid");
+  }
+
+  const threadSource = thread.threadSource;
+  if (threadSource === null || threadSource === undefined) {
+    // Legacy rows are decided only after every other available child indicator is checked.
+  } else if (threadSource === "user") {
+    explicitRoot = true;
+    addReason("thread-source-root");
+  } else if (threadSource === "subagent" || threadSource === "guardian_review") {
+    childIndicator = true;
+    addReason("thread-source-child");
+  } else {
+    ambiguous = true;
+    addReason("thread-source-unknown");
+  }
+
+  const source = thread.source;
+  if (
+    source &&
+    typeof source === "object" &&
+    !Array.isArray(source) &&
+    Object.prototype.hasOwnProperty.call(source, "unparsed")
+  ) {
+    ambiguous = true;
+    addReason("source-malformed");
+  } else if (
+    source &&
+    typeof source === "object" &&
+    !Array.isArray(source) &&
+    Object.prototype.hasOwnProperty.call(source, "subagent")
+  ) {
+    childIndicator = true;
+    addReason("source-subagent");
+    const threadSpawn = source.subagent?.thread_spawn;
+    if (threadSpawn !== null && threadSpawn !== undefined) {
+      if (typeof threadSpawn !== "object" || Array.isArray(threadSpawn)) {
+        ambiguous = true;
+        addReason("source-parent-invalid");
+      } else {
+        const rawParent = threadSpawn.parent_thread_id;
+        if (rawParent !== null && rawParent !== undefined) {
+          if (typeof rawParent === "string" && UUID_RE.test(rawParent)) {
+            addParent("db.threads.source", rawParent.toLowerCase());
+          } else {
+            ambiguous = true;
+            addReason("source-parent-invalid");
+          }
+        }
+      }
+    }
+  } else if (
+    source !== null &&
+    source !== undefined &&
+    typeof source !== "string" &&
+    (typeof source !== "object" || Array.isArray(source))
+  ) {
+    ambiguous = true;
+    addReason("source-invalid");
+  }
+
+  for (const field of ["agentNickname", "agentRole", "agentPath"]) {
+    const value = thread[field];
+    if (typeof value === "string" && value.trim()) {
+      childIndicator = true;
+      addReason("agent-metadata");
+    } else if (value !== null && value !== undefined && typeof value !== "string") {
+      ambiguous = true;
+      addReason("agent-metadata-invalid");
+    }
+  }
+
+  const edges = dbThread.incomingSpawnEdges;
+  if (edges?.available === true && edges?.readOnlyQueryOk !== true) {
+    ambiguous = true;
+    addReason("spawn-edge-unreadable");
+  }
+  for (const edge of edges?.rows || []) {
+    if (edge?.parentValid !== true || edge?.childValid !== true || !edge.parentThreadId) {
+      ambiguous = true;
+      addReason("spawn-edge-invalid");
+      continue;
+    }
+    childIndicator = true;
+    addReason("spawn-edge");
+    addParent("db.thread_spawn_edges", edge.parentThreadId);
+  }
+
+  const ownerMeta = rollout?.ownerSessionMeta;
+  if (ownerMeta?.parentState === "invalid") {
+    ambiguous = true;
+    addReason("rollout-parent-invalid");
+  } else if (ownerMeta?.parentState === "valid" && ownerMeta.parentThreadId) {
+    childIndicator = true;
+    addReason("rollout-parent");
+    addParent("rollout.session_meta", ownerMeta.parentThreadId);
+  }
+
+  const parents = [...new Set(parentFacts.map((item) => item.parentThreadId))];
+  if (parents.length > 1) {
+    ambiguous = true;
+    addReason("parent-conflict");
+  }
+  if (explicitRoot && childIndicator) {
+    ambiguous = true;
+    addReason("root-child-conflict");
+  }
+  const parentThreadId = parents.length === 1 ? parents[0] : null;
+  if (ambiguous) return finish("ambiguous", parentThreadId);
+  if (childIndicator) return finish("non-root", parentThreadId);
+  if (explicitRoot) return finish("root");
+
+  addReason("legacy-indicators-absent");
+  warnings.push("legacy-null-source");
+  return finish("legacy-root-assumed");
 }
 
 function findRolloutCandidates(sessionsRoot, threadId, dbRolloutPath) {
@@ -551,6 +792,7 @@ async function parseRollout(filePath, tailEvents, maxTextChars, expectedThreadId
   let lineCount = 0;
   let parsedCount = 0;
   let sessionMeta = null;
+  let ownerSessionMeta = null;
   let rolloutThreadId = null;
   let rolloutLineageIds = [];
   let forkHistoryScope = null;
@@ -619,7 +861,19 @@ async function parseRollout(filePath, tailEvents, maxTextChars, expectedThreadId
       ownerLineage.status === "accepted" &&
       declaredSessionId !== null &&
       declaredSessionId === rolloutThreadId;
-    if (isCurrentOwnerSessionMeta) sessionMetaSeen = true;
+    if (isCurrentOwnerSessionMeta) {
+      sessionMetaSeen = true;
+      if (ownerSessionMeta === null) {
+        const rawParent = parsed?.payload?.parent_thread_id;
+        const parentPresent = rawParent !== undefined && rawParent !== null;
+        const parentValid = typeof rawParent === "string" && UUID_RE.test(rawParent);
+        ownerSessionMeta = {
+          line: lineCount,
+          parentState: !parentPresent ? "absent" : parentValid ? "valid" : "invalid",
+          parentThreadId: parentValid ? rawParent.toLowerCase() : null,
+        };
+      }
+    }
     const recordOwner = recordThreadIdentity(parsed);
     let inheritedHistory = false;
     let historyAdmitted = false;
@@ -751,6 +1005,8 @@ async function parseRollout(filePath, tailEvents, maxTextChars, expectedThreadId
     countsByEnvelopeType,
     countsByPayloadType,
     sessionMeta,
+    ownerSessionMeta,
+    [ROLLOUT_OWNER_INTEGRITY]: ownerIntegrityDiagnostics.length === 0,
     recentItems,
     [ADMITTED_ACTIVITY_ITEMS]:
       ownerIntegrityDiagnostics.length === 0 ? admittedActivityItems : [],
@@ -985,6 +1241,7 @@ function projectSummary(result) {
     mode: result.mode,
     generatedAt: result.generatedAt,
     threadId: result.threadId,
+    targetClassification: result.targetClassification,
     dbThread: {
       exists: db.exists,
       readOnlyOpenOk: db.readOnlyOpenOk,
@@ -994,12 +1251,18 @@ function projectSummary(result) {
         rolloutPath: thread.rolloutPath,
         cwd: thread.cwd,
         title: thread.title,
+        source: thread.source,
+        modelProvider: thread.modelProvider,
         model: thread.model,
         reasoningEffort: thread.reasoningEffort,
         approvalMode: thread.approvalMode,
         sandboxPolicy: thread.sandboxPolicy,
         permissionProfileAdvisory: thread.permissionProfileAdvisory,
         archived: thread.archived,
+        threadSource: thread.threadSource,
+        agentNickname: thread.agentNickname,
+        agentRole: thread.agentRole,
+        agentPath: thread.agentPath,
       },
       warnings: db.warnings,
     },
@@ -1013,6 +1276,7 @@ function projectSummary(result) {
         lineCount: primary.lineCount,
         parsedCount: primary.parsedCount,
         parseErrorCount: primary.parseErrorCount,
+        ownerSessionMeta: primary.ownerSessionMeta,
         recentItems: (primary.recentItems || [])
           .slice(-SUMMARY_TAIL_ITEMS)
           .map(projectSummaryItem),

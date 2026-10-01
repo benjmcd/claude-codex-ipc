@@ -247,23 +247,31 @@ reclassify an accepted send and never trigger an automatic resend. A thread-tail
 inform diagnosis, but a negative bounded/recent-tail result cannot prove non-admission or
 authorize a resend.
 
-Activation authority is structural. The wrapper accepts `no-client-found` only from a parsed failed
-client response for the exact target with exactly one matching follower request; nested or
-incidental text is ignored. It then requires the inspector to prove a successful read-only DB open
-and one exact active row for that target before navigation. A matching rollout alone, a
-missing/archived row, or malformed/ambiguous inspector output fails closed without firing a deep
-link. Initial renderer-owned success and post-autoload retry success both require parsed `ok: true`,
+Target authority is structural and precedes every live route. After publishing the fallback
+envelope, the wrapper runs one read-only inspector snapshot before its first pipe contact and reuses
+that snapshot across guarded auto-load recovery. The snapshot must prove a successful read-only DB
+open, one exact active row, a `root` or warned `legacy-root-assumed` classification, and a
+nonempty stored model. Explicit sub-agent or guardian-review evidence is `non-root`; legacy null
+source is assumed root only when every available child indicator is absent. Conflicting, invalid,
+or unreadable indicators are ambiguous. Missing, archived, non-root, empty-model, malformed, or
+ambiguous targets fail with `confirmation=not-attempted` before the fresh host gate or any pipe
+contact. Known parent identity is reported, while locator hints remain discovery-only.
+
+Activation authority is likewise structural. The wrapper accepts `no-client-found` only from a
+parsed failed client response for the exact target with exactly one matching follower request;
+nested or incidental text is ignored. The existing pre-send snapshot remains target authority; a
+matching rollout alone is insufficient. Initial renderer-owned success and post-autoload retry
+success both require parsed `ok: true`,
 the exact `targetThreadId`, `response.resultType: "success"`, and exactly one follower occurrence
 whose `name`, `method`, and `conversationId` all match. Client exit 0 with missing or conflicting
 structure is post-attempt ambiguous: it is not classified as delivered and is never automatically
 retried. Inspection is necessary before considering a manual retry, but negative
 bounded/recent-tail evidence cannot prove non-admission. Retry requires either an exact
 full-history outcome proving non-admission or an explicit owner decision acknowledging the
-unresolved duplicate-send risk. The inspector recheck is
-defense in depth on the authoritative unowned branch only; the renderer-owned fast path relies on
-the mandatory separate agent preflight and does not repeat that inspection before its initial
-attempt. The preflight-to-send state-change window remains disclosed. Exact target binding prevents
-heuristic retargeting, and ambiguous outcomes are never retried automatically.
+unresolved duplicate-send risk. The one target snapshot gates both renderer-owned and unowned
+paths. It is intentionally not repeated during recovery; the shared host inventory is repeated
+immediately before every send or retry. Exact target binding prevents heuristic retargeting, and
+ambiguous outcomes are never retried automatically.
 
 Rollout readers share one fail-closed owner and lineage contract. The first physical JSONL record
 must be a `session_meta` whose `payload.id` matches the requested thread; it pins the file-global

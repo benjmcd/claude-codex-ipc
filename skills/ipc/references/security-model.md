@@ -29,9 +29,11 @@ summary bundled with the skill.
   **and** `--ack-live-write`, and additionally `--allow-any-thread` unless the target equals the
   operator-set `CODEX_IPC_AUTHORIZED_TEST_THREAD` environment variable. No authorized thread id is
   shipped with the code.
-- The wrapper writes the file-drop fallback before attempting any live delivery, refuses to
-  deep-link missing, archived, or AMBIGUOUSLY-inspected threads (empty/malformed/schema-drifted
-  inspector output is not permission to navigate), and prints real diagnostics on failure.
+- The wrapper writes the file-drop fallback, then runs one read-only target inspection before any
+  live delivery. It requires a trusted exact active DB row, a `root` or warned
+  `legacy-root-assumed` classification, and a nonempty stored model. Missing, archived, non-root,
+  empty-model, malformed, contradictory, or ambiguous state refuses before host policy or pipe
+  contact with `confirmation=not-attempted`.
 - The maintained wrapper runs a fresh shared read-only host gate before every initial send and
   retry. It requires exactly one intended GUI host, no other GUI host, and complete identity
   evidence. Per-field precedence is flag > environment > `${CODEX_IPC_ROOT}/host-policy.json` >
@@ -47,6 +49,9 @@ summary bundled with the skill.
   navigates the visible app; `restore-if-known` is fail-closed until restoration is provable.
 - No tool writes to Codex SQLite databases (all SQLite access is `readOnly:true`), no tool touches
   Codex config/account/plugin/archive state, and nothing opens an HTTP listener.
+- Direct-client `--model` or `--effort` values persist as stored-thread settings, must be
+  nonempty after trimming, and require `--ack-thread-settings-change`. The maintained wrapper
+  omits both fields.
 
 ## Drift expectation
 

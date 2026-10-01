@@ -205,20 +205,32 @@ function main() {
         ok: contains("scripts/handoff_to_codex.sh", 'CODEX_IPC_INCLUDE_TRANSCRIPT:-0'),
       },
     ], "Transcript pointers expose full local session context; include them only when needed."),
-    check("REQ-006", "Existing-session /ipc has static preflight inspection guidance and the inspector file exists.", [
+    check("REQ-006", "Existing-session /ipc runs one shared read-only target inspection before its first live attempt.", [
       {
         label: "session inspector exists",
         file: "scripts/codex_ipc_session_inspect.mjs",
         ok: existsSync(skillPath("scripts/codex_ipc_session_inspect.mjs")),
       },
       {
-        label: "SKILL.md scopes inspect-before-send as agent preflight",
+        label: "wrapper invokes one inspector, classifies its tuple, and reaches the first live attempt afterward",
+        file: "scripts/handoff_to_codex.sh",
+        ok:
+          matchCount("scripts/handoff_to_codex.sh", /codex_ipc_session_inspect\.mjs/g) === 1 &&
+          contains(
+            "scripts/handoff_to_codex.sh",
+            /INSPECT_OUTPUT=\$\(node[\s\S]*?codex_ipc_session_inspect\.mjs[\s\S]*?INSPECT_FIELDS=\$\(classify_inspected_target\)[\s\S]*?IFS=\$'\\t' read -r INSPECT_CLASS INSPECT_PARENT INSPECT_WARNING[\s\S]*?case "\$INSPECT_CLASS" in[\s\S]*?if send_live; then/,
+          ) &&
+          contains("scripts/handoff_to_codex.sh", "is reused across auto-load"),
+      },
+      {
+        label: "SKILL.md documents the operator preview plus independent wrapper target gate",
         file: "SKILL.md",
         ok:
-          contains("SKILL.md", "Selecting `--ipc <uuid>` is itself the live-delivery acknowledgement") &&
-          contains("SKILL.md", "Inspect-before-send is the /ipc agent's own preflight step, not a wrapper gate."),
+          contains("SKILL.md", "live-delivery acknowledgement") &&
+          contains("SKILL.md", "wrapper independently runs that inspector exactly once") &&
+          contains("SKILL.md", "shared host policy still runs fresh immediately before every send or retry"),
       },
-    ], "Static doc/file-existence evidence only: this does not verify runtime ordering. Selecting `--ipc <uuid>` is itself the live-delivery acknowledgement; the wrapper supplies the client's `--send --ack-live-write --allow-any-thread` internally. Inspect-before-send is the /ipc agent's own preflight step, not a wrapper gate."),
+    ], "Static source-order and prose evidence only. The hermetic wrapper suite behaviorally checks one inspection before delivery and snapshot reuse across recovery; it does not contact a live Desktop."),
     check("REQ-007", "No-UUID /ipc has read-only candidate discovery before target selection.", [
       {
         label: "thread locator exists",
@@ -228,14 +240,20 @@ function main() {
       {
         label: "locator warns candidate is not write authority",
         file: "scripts/codex_ipc_thread_locator.mjs",
-        ok: contains("scripts/codex_ipc_thread_locator.mjs", "Candidate discovery is not write authority"),
+        ok:
+          contains("scripts/codex_ipc_thread_locator.mjs", "Candidate discovery is not write authority") &&
+          contains("scripts/codex_ipc_thread_locator.mjs", "targetKindHint") &&
+          ["non-root", "root", "legacy-unknown", "unknown"].every((kind) =>
+            contains("scripts/codex_ipc_thread_locator.mjs", `"${kind}"`),
+          ),
       },
       {
         label: "SKILL.md uses locator and requires follow-up inspection",
         file: "SKILL.md",
         ok:
           contains("SKILL.md", "codex_ipc_thread_locator.mjs") &&
-          contains("SKILL.md", "run `codex_ipc_session_inspect.mjs`"),
+          contains("SKILL.md", "run `codex_ipc_session_inspect.mjs`") &&
+          contains("SKILL.md", "it never applies the full classification"),
       },
     ]),
     check("REQ-008", "Post-update robustness has a validate-only revalidation surface.", [
@@ -343,9 +361,9 @@ function main() {
         ok: contains("SKILL.md", "write the file-drop envelope before any policy refusal"),
       },
     ]),
-    check("REQ-015", "Deep-linking requires positive target-inspection proof; ambiguity fails closed.", [
+    check("REQ-015", "Every maintained-wrapper live route requires positive root-target and stored-model proof; ambiguity fails closed.", [
       {
-        label: "wrapper classifier requires exact active DB proof and refuses ambiguous inspector output",
+        label: "wrapper classifier requires exact active DB, classification, and stored-model proof",
         file: "scripts/handoff_to_codex.sh",
         ok:
           inspectedTargetClassifier.length > 0 &&
@@ -359,19 +377,81 @@ function main() {
             /thread\.id\.toLowerCase\(\)\s*!==\s*target/,
             /thread\.archived\s*===\s*1/,
             /thread\.archived\s*!==\s*0/,
-            /process\.stdout\.write\("active"\)/,
+            /\["root", "non-root", "legacy-root-assumed", "ambiguous"\]\.includes\(classification\.kind\)/,
+            /Array\.isArray\(classification\.reasons\)/,
+            /Array\.isArray\(classification\.warnings\)/,
+            /classification\.kind\s*===\s*"ambiguous"/,
+            /classification\.kind\s*===\s*"non-root"/,
+            /typeof\s+thread\.model\s*!==\s*"string"\s*\|\|\s*thread\.model\.trim\(\)\s*===\s*""/,
+            /process\.stdout\.write\(\[state, parent, legacy\]\.join\("\\t"\)\)/,
           ].every((anchor) => anchor.test(inspectedTargetClassifier)) &&
-          contains("scripts/handoff_to_codex.sh", "INSPECT_CLASS=$(classify_inspected_target)") &&
+          contains("scripts/handoff_to_codex.sh", "INSPECT_FIELDS=$(classify_inspected_target)") &&
+          contains(
+            "scripts/handoff_to_codex.sh",
+            "IFS=$'\\t' read -r INSPECT_CLASS INSPECT_PARENT INSPECT_WARNING",
+          ) &&
           contains("scripts/handoff_to_codex.sh", "reason=target-inspection-ambiguous"),
       },
       {
-        label: "missing and archived targets refuse with distinct reasons",
+        label: "inspector derives root status from every available child and parent indicator",
+        file: "scripts/codex_ipc_session_inspect.mjs",
+        ok:
+          contains(
+            "scripts/codex_ipc_session_inspect.mjs",
+            "function classifyTarget(dbThread, rollout, rolloutSelection)",
+          ) &&
+          contains(
+            "scripts/codex_ipc_session_inspect.mjs",
+            "classifyTarget(dbThread, rolloutSummary, rolloutSelection)",
+          ) &&
+          contains(
+            "scripts/codex_ipc_session_inspect.mjs",
+            'threadSource === "subagent" || threadSource === "guardian_review"',
+          ) &&
+          contains("scripts/codex_ipc_session_inspect.mjs", 'hasOwnProperty.call(source, "subagent")') &&
+          contains(
+            "scripts/codex_ipc_session_inspect.mjs",
+            'addParent("db.threads.source", rawParent.toLowerCase())',
+          ) &&
+          [
+            "source-parent-invalid",
+            "agent-metadata",
+            "spawn-edge",
+            "rollout-parent",
+            "rollout-selection-ambiguous",
+            "rollout-selection-unavailable",
+            "rollout-parse-invalid",
+            "rollout-owner-untrusted",
+            "root-child-conflict",
+            "parent-conflict",
+          ].every((reason) =>
+            contains("scripts/codex_ipc_session_inspect.mjs", `"${reason}"`)) &&
+          contains("scripts/codex_ipc_session_inspect.mjs", 'warnings.push("legacy-null-source")') &&
+          contains("scripts/codex_ipc_session_inspect.mjs", 'return finish("legacy-root-assumed")'),
+      },
+      {
+        label: "summary preserves classification, source, model, agent, and current-owner parent facts",
+        file: "scripts/codex_ipc_session_inspect.mjs",
+        ok:
+          contains("scripts/codex_ipc_session_inspect.mjs", "targetClassification: result.targetClassification") &&
+          contains("scripts/codex_ipc_session_inspect.mjs", "source: thread.source") &&
+          contains("scripts/codex_ipc_session_inspect.mjs", "model: thread.model") &&
+          contains("scripts/codex_ipc_session_inspect.mjs", "threadSource: thread.threadSource") &&
+          contains("scripts/codex_ipc_session_inspect.mjs", "agentRole: thread.agentRole") &&
+          contains("scripts/codex_ipc_session_inspect.mjs", "ownerSessionMeta: primary.ownerSessionMeta"),
+      },
+      {
+        label: "unsafe targets refuse with distinct pre-attempt reasons and parent or legacy diagnostics",
         file: "scripts/handoff_to_codex.sh",
         ok:
           contains("scripts/handoff_to_codex.sh", "reason=target-not-found") &&
-          contains("scripts/handoff_to_codex.sh", "reason=target-archived"),
+          contains("scripts/handoff_to_codex.sh", "reason=target-archived") &&
+          contains("scripts/handoff_to_codex.sh", "reason=target-non-root") &&
+          contains("scripts/handoff_to_codex.sh", "reason=target-model-empty") &&
+          contains("scripts/handoff_to_codex.sh", "Target parent thread:") &&
+          contains("scripts/handoff_to_codex.sh", "TARGET-WARNING: legacy thread has no source classification"),
       },
-    ]),
+    ], "Static source evidence only. Hermetic inspector and wrapper suites prove classification parity, exact refusal tokens, one pre-send snapshot, zero downstream contact on refusal, and legacy-warning continuation."),
     check("REQ-016", "Results are parser-compatible: top-level category plus machine reason/confirmation tokens.", [
       {
         label: "successful sends require exact parsed target and one structurally valid follower request",
@@ -682,6 +762,41 @@ function main() {
           contains("scripts/codex_ipc_revalidate.mjs", "optional live IPC read probe suppressed"),
       },
     ], "Static source evidence only. Hermetic policy and wrapper suites exercise configuration precedence, host-cardinality refusal, alternate-host containment, activation evidence, and fresh retry gates; no live Desktop activation is performed."),
+    check("REQ-021", "Persistent client model or effort overrides require explicit acknowledgement and nonempty trimmed values.", [
+      {
+        label: "client parses the dedicated acknowledgement and rejects unacknowledged or empty overrides",
+        file: "scripts/codex_ipc_client.mjs",
+        ok:
+          contains("scripts/codex_ipc_client.mjs", 'case "--ack-thread-settings-change":') &&
+          contains("scripts/codex_ipc_client.mjs", "opts.ackThreadSettingsChange = true") &&
+          contains(
+            "scripts/codex_ipc_client.mjs",
+            'for (const [key, flag] of [["model", "--model"], ["effort", "--effort"]])',
+          ) &&
+          contains("scripts/codex_ipc_client.mjs", "opts[key] = opts[key].trim()") &&
+          contains("scripts/codex_ipc_client.mjs", "if (!opts[key])") &&
+          contains(
+            "scripts/codex_ipc_client.mjs",
+            "(opts.model !== null || opts.effort !== null) && !opts.ackThreadSettingsChange",
+          ),
+      },
+      {
+        label: "client usage states persistence and requires acknowledgement even for dry-run request generation",
+        file: "scripts/codex_ipc_client.mjs",
+        ok:
+          contains("scripts/codex_ipc_client.mjs", "rewrites the thread's stored model with it") &&
+          contains("scripts/codex_ipc_client.mjs", "rewrites the thread's stored reasoning effort with it") &&
+          contains("scripts/codex_ipc_client.mjs", "require --ack-thread-settings-change even in dry-run mode"),
+      },
+      {
+        label: "maintained wrapper and write-proof caller omit model and effort overrides",
+        file: "scripts/handoff_to_codex.sh",
+        ok:
+          matchCount("scripts/handoff_to_codex.sh", /--model|--effort/g) === 0 &&
+          matchCount("scripts/codex_ipc_write_proof.mjs", /--model|--effort/g) === 0 &&
+          contains("SKILL.md", "requires a nonempty trimmed value plus `--ack-thread-settings-change`"),
+      },
+    ], "Static client/caller evidence only. The hermetic router-contract suite exercises missing acknowledgements, whitespace values, acknowledged values, and acknowledgement-only omission without contacting the pipe."),
   ];
 
   const ok = Object.values(files).every((item) => item.ok) &&

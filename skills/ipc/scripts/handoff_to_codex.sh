@@ -970,15 +970,27 @@ let value;
 try {
   value = JSON.parse(fs.readFileSync(0, "utf8"));
 } catch {
-  process.stdout.write("ambiguous");
+  process.stdout.write("ambiguous\t-\t-");
   process.exit(0);
 }
 const target = String(process.argv[1] || "").toLowerCase();
 const db = value?.dbThread;
 const thread = value?.dbThread?.thread;
+const classification = value?.targetClassification;
 const dbTrusted = db?.exists === true && db?.readOnlyOpenOk === true;
+const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const classValid =
+  classification &&
+  ["root", "non-root", "legacy-root-assumed", "ambiguous"].includes(classification.kind) &&
+  (classification.parentThreadId === null ||
+    (typeof classification.parentThreadId === "string" && uuid.test(classification.parentThreadId))) &&
+  Array.isArray(classification.reasons) &&
+  classification.reasons.every((item) => typeof item === "string") &&
+  Array.isArray(classification.warnings) &&
+  classification.warnings.every((item) => typeof item === "string");
+let state = "ambiguous";
 if (dbTrusted && thread?.exists === false) {
-  process.stdout.write("missing");
+  state = "missing";
 } else if (
   value?.ok !== true ||
   !dbTrusted ||
@@ -986,14 +998,29 @@ if (dbTrusted && thread?.exists === false) {
   typeof thread.id !== "string" ||
   thread.id.toLowerCase() !== target
 ) {
-  process.stdout.write("ambiguous");
+  state = "ambiguous";
 } else if (thread.archived === 1) {
-  process.stdout.write("archived");
+  state = "archived";
 } else if (thread.archived !== 0) {
-  process.stdout.write("ambiguous");
+  state = "ambiguous";
+} else if (!classValid || classification.kind === "ambiguous") {
+  state = "ambiguous";
+} else if (classification.kind === "non-root") {
+  state = "non-root";
+} else if (typeof thread.model !== "string" || thread.model.trim() === "") {
+  state = "model-empty";
+} else if (classification.kind === "legacy-root-assumed") {
+  state = "legacy-root-assumed";
 } else {
-  process.stdout.write("active");
+  state = "active";
 }
+const parent = classValid && classification.parentThreadId
+  ? classification.parentThreadId.toLowerCase()
+  : "-";
+const legacy = classValid && classification.warnings.includes("legacy-null-source")
+  ? "legacy-null-source"
+  : "-";
+process.stdout.write([state, parent, legacy].join("\t"));
 ' "$IPC_CID"
     }
     observe_rollout() {
@@ -1026,6 +1053,69 @@ if (dbTrusted && thread?.exists === false) {
         echo "(Rollout confirmation reflects bounded pickup observation only; it does not confirm" >&2
         echo " completion or reply-file success.)" >&2
     }
+    # One read-only target snapshot gates every possible send and is reused across auto-load
+    # recovery. Host inventory remains fresh inside send_live(), immediately before each pipe
+    # contact. Inspector diagnostics are suppressed because they may carry local paths.
+    INSPECT_OUTPUT=""
+    INSPECT_STATUS=126
+    INSPECT_STDERR=""
+    if INSPECT_STDERR=$(mktemp); then
+        if INSPECT_OUTPUT=$(node "${SCRIPT_DIR}/codex_ipc_session_inspect.mjs" \
+            --thread "${IPC_CID}" --tail-events 1 --summary 2>"$INSPECT_STDERR"); then
+            INSPECT_STATUS=0
+        else
+            INSPECT_STATUS=$?
+        fi
+        if [[ -s "$INSPECT_STDERR" ]]; then
+            echo "TARGET-WARNING: inspector diagnostics were suppressed." >&2
+        fi
+        rm -f "$INSPECT_STDERR"
+    fi
+    INSPECT_FIELDS=$(classify_inspected_target)
+    IFS=$'\t' read -r INSPECT_CLASS INSPECT_PARENT INSPECT_WARNING <<< "$INSPECT_FIELDS"
+    case "${INSPECT_STATUS}:${INSPECT_CLASS}" in
+        0:active|0:legacy-root-assumed|0:archived|0:non-root|0:model-empty|1:missing) : ;;
+        *) INSPECT_CLASS=ambiguous ;;
+    esac
+    case "$INSPECT_CLASS" in
+        missing)
+            echo "RESULT: failed-closed -- reason=target-not-found -- confirmation=not-attempted" >&2
+            echo "(Target thread was not found in trusted local Codex state; no send was attempted.)" >&2
+            fallback
+            exit 1
+            ;;
+        archived)
+            echo "RESULT: failed-closed -- reason=target-archived -- confirmation=not-attempted" >&2
+            echo "(Target thread is archived; unarchive it in the intended app first.)" >&2
+            fallback
+            exit 1
+            ;;
+        non-root)
+            echo "RESULT: failed-closed -- reason=target-non-root -- confirmation=not-attempted" >&2
+            echo "(Direct delivery to sub-agent and guardian-review threads is refused.)" >&2
+            if [[ "$INSPECT_PARENT" != "-" ]]; then
+                echo "Target parent thread: ${INSPECT_PARENT}" >&2
+            fi
+            fallback
+            exit 1
+            ;;
+        model-empty)
+            echo "RESULT: failed-closed -- reason=target-model-empty -- confirmation=not-attempted" >&2
+            echo "(The stored thread model is null, empty, or whitespace; repair it in the app.)" >&2
+            fallback
+            exit 1
+            ;;
+        legacy-root-assumed)
+            echo "TARGET-WARNING: legacy thread has no source classification; root status was assumed only because all available child indicators were absent." >&2
+            ;;
+        active) : ;;
+        *)
+            echo "RESULT: failed-closed -- reason=target-inspection-ambiguous -- confirmation=not-attempted" >&2
+            echo "(Inspector output did not prove one exact active root thread with a stored model.)" >&2
+            fallback
+            exit 1
+            ;;
+    esac
     echo "Injecting pickup line into live Desktop thread ${IPC_CID} via IPC router..."
     if send_live; then
         if ! authoritative_success; then
@@ -1071,46 +1161,6 @@ if (dbTrusted && thread?.exists === false) {
         fallback
         exit 1
     fi
-    # Guard the unowned path: never deep-link a target that does not exist or is archived.
-    # Positive proof requires an exact active DB row for this thread. A matching rollout alone is
-    # not target existence, and malformed/schema-drifted output is never permission to navigate.
-    # Parse stdout only. Node may emit a node:sqlite warning on stderr even when the inspector's
-    # JSON result is valid; merging streams would corrupt the structural authorization input.
-    # Preserve the process status as a second authority: only status 0 with an active/archived
-    # result or status 1 with the inspector's structured missing result is admissible.
-    INSPECT_STATUS=0
-    if INSPECT_OUTPUT=$(node "${SCRIPT_DIR}/codex_ipc_session_inspect.mjs" --thread "${IPC_CID}" --tail-events 1); then
-        INSPECT_STATUS=0
-    else
-        INSPECT_STATUS=$?
-    fi
-    INSPECT_CLASS=$(classify_inspected_target)
-    case "${INSPECT_STATUS}:${INSPECT_CLASS}" in
-        0:active|0:archived|1:missing) : ;;
-        *) INSPECT_CLASS=ambiguous ;;
-    esac
-    case "$INSPECT_CLASS" in
-        missing)
-            echo "RESULT: failed-closed -- reason=target-not-found -- confirmation=not-attempted" >&2
-            echo "(Target thread not found in local Codex state; refusing to auto-load.)" >&2
-            fallback
-            exit 1
-            ;;
-        archived)
-            echo "RESULT: failed-closed -- reason=target-archived -- confirmation=not-attempted" >&2
-            echo "(Target thread is archived; unarchive it in the app first.)" >&2
-            fallback
-            exit 1
-            ;;
-        active) : ;;
-        *)
-            echo "RESULT: failed-closed -- reason=target-inspection-ambiguous -- confirmation=not-attempted" >&2
-            echo "(Inspector output did not prove one exact active DB thread; refusing to auto-load.)" >&2
-            printf '%s\n' "$INSPECT_OUTPUT" | sed -n '1,10p' >&2
-            fallback
-            exit 1
-            ;;
-    esac
     echo "Thread ${IPC_CID} is not loaded in Codex Desktop (no-client-found)."
     echo "Requesting gated Desktop activation (foreground policy: ${FOREGROUND_POLICY})..."
     AUTOLOAD_PS1="${SCRIPT_DIR}/codex_ipc_autoload.ps1"

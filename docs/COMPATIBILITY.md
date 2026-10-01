@@ -47,6 +47,11 @@ envelope remain available.
 | Touches live Desktop state | No (read-only) |
 | Fallback | Clear runtime error if `node:sqlite` is missing; file-drop continues to work |
 
+The full and `--summary` projections include `targetClassification`, `threadSource`, source
+and agent indicators, and current-owner rollout parent facts. Explicit child evidence classifies
+`non-root`; contradictory or malformed evidence classifies `ambiguous`; a null legacy source is
+`legacy-root-assumed` only when every available child indicator is absent, with a warning.
+
 ## Rollout reader (`codex_ipc_rollout_reader.mjs`) — producer-format coupling
 
 The reader parses a file format the Codex app owns and changes without notice, so its tolerance to
@@ -71,7 +76,8 @@ producer drift is itself a compatibility surface:
 ## Thread locator (`codex_ipc_thread_locator.mjs`)
 
 Same row as the session inspector (same dependencies/stability). Output is candidate discovery
-only — never send authority.
+only — never send authority. `targetKindHint` marks explicit root, non-root, legacy-unknown, and
+unknown rows without replacing the inspector's complete classification.
 
 ## Snapshot / isolation compare (`codex_ipc_snapshot.mjs`)
 
@@ -85,7 +91,9 @@ The provenance and live observations below are dated records. The retained `Live
 | | |
 |---|---|
 | Supported OS | **Windows only** (`\\.\pipe\codex-ipc`) |
-| Dependencies | Node.js; Codex Desktop running; private router protocol (`initialize`, `thread-follower-start-turn`, uint32le framing) |
+| Dependencies | Node.js; Codex Desktop running; private router protocol (`initialize`, `thread-follower-start-turn`, uint32le framing). The maintained wrapper additionally requires the session-inspector chain: Node.js with `node:sqlite` plus readable local state. The default file-drop path does not. |
+| Maintained-wrapper target gate | After publishing the fallback envelope, one read-only inspector snapshot must prove an exact active `root` or warned `legacy-root-assumed` target and a nonempty stored model before any host gate or pipe contact. Missing, archived, non-root, empty-model, malformed, contradictory, or ambiguous state refuses with `confirmation=not-attempted`. The snapshot is reused across auto-load recovery; host inventory remains fresh before each send or retry. |
+| Direct-client settings overrides | `--model` and `--effort` persist as stored-thread settings changes. Either requires `--ack-thread-settings-change`, including dry-run request generation, and values empty after trimming are rejected. The wrapper and write-proof harness omit both fields. |
 | Wire contract | `version` is per-method and is matched **exactly, before ownership is evaluated**. `thread-follower-start-turn` = **2**; the payload key is `params.turnStart` = `{request:{threadId,turnTrigger,input[]}, context?}`; `request.threadId` must equal `params.conversationId`; the frame carries **no `hostId` key** (this client's emission policy; in the examined app version resolver, a non-null `hostId` raises every `thread-follower-*` method's required version by one, while an absent or null `hostId` follows the same branch) and no `turnStart.context.responseItems`. The original 1978 method table remains at the top level of `tests/fixtures/codex_desktop_method_versions.json`; complete later tables and their measured differences are retained in the corresponding `reverifications` entries. `tests/test_router_contract.sh` checks the client's emitted start-turn version, payload key and host-ID omission against the top-level fixture. It does not independently re-derive archive facts or certify the appended build records |
 | Derived from | `OpenAI.Codex 26.901.1978.0` — `app.asar` 298,996,178 B, SHA-256 `09c7ef96…95183d`, mtime 2026-09-02T21:05:48.620Z; main member `.vite/build/src-BXVxNf6C.js` `4c68eec5…9fe7f`; renderer member `webview/assets/app-initial-bca8cba1737e.js` `6b27d8af…8bd0` — read 2026-09-03, with the runtime-to-bundle binding taken from the running process's own stack traces. **Re-derive after every Desktop update.** The previous shape (`version:1`, `params.turnStartParams`) worked on 26.707 and is rejected on 26.825 and 26.901, where every distinct cause is masked as `no-client-found` |
 | Re-verified on | `OpenAI.Codex 26.901.2854.0` — `app.asar` 299,067,987 B, SHA-256 `a09cab16…34f66f`, mtime 2026-09-03T19:23:51.790Z — read 2026-09-03T22:18:50.443Z. The Desktop updated about six hours after the derivation, so `26.901.1978.0` no longer exists on the host and its digests above are retained evidence rather than a current reading. **The following wire facts were re-derived first-hand from the successor archive and are unchanged**: the 22-entry method-version table is identical in order and value, `thread-follower-start-turn` is still 2, the payload key is still `params.turnStart`, the `threadId`/`conversationId` identity throw is still present, and a non-null frame `hostId` still raises the required version by one. The main member `.vite/build/src-BXVxNf6C.js` is **byte-identical** across the update (only its archive offset moved, 3,746,719 → 3,747,032); the renderer member was **replaced** — `app-initial-bca8cba1737e.js` (10,285,987 B) → `app-initial-14e7352db43a.js` (10,293,627 B, `bf0c9bca…103402`) — and the two facts it carries are unchanged within it. Scope: a read-only byte scan of the IPC-relevant members, not a full bundle diff; whether any **other** follower method moved is undetermined |

@@ -55,6 +55,15 @@ if [[ "\${1##*/}" == "codex_ipc_client.mjs" ]]; then
   done
   printf '{"ok":true,"targetThreadId":"%s","sentRequests":[{"name":"thread-follower-start-turn","json":{"method":"thread-follower-start-turn","params":{"conversationId":"%s"}}}],"response":{"resultType":"success"}}\n' "\$target" "\$target"
   exit 0
+elif [[ "\${1##*/}" == "codex_ipc_session_inspect.mjs" ]]; then
+  target=""
+  previous=""
+  for argument in "\$@"; do
+    if [[ "\$previous" == "--thread" ]]; then target="\$argument"; break; fi
+    previous="\$argument"
+  done
+  printf '{"ok":true,"dbThread":{"exists":true,"readOnlyOpenOk":true,"thread":{"exists":true,"id":"%s","archived":0,"model":"synthetic-model","threadSource":"user"}},"targetClassification":{"kind":"root","parentThreadId":null,"reasons":["thread-source-root"],"warnings":[]}}\n' "\$target"
+  exit 0
 fi
 exec "$REAL_NODE" "\$@"
 EOF
@@ -362,17 +371,28 @@ case "\$*" in
         else echo '{"ok":true}'; exit 0; fi;;
     esac;;
   *codex_ipc_session_inspect.mjs*)
+    printf '%s\n' inspect >> "\$FG/eventlog"
+    n=\$(cat "\$FG/inspect_count" 2>/dev/null || echo 0); n=\$((n+1)); echo "\$n" > "\$FG/inspect_count"
     mode=\$(cat "\$FG/inspect_mode" 2>/dev/null || echo ok)
     case "\$mode" in
-      ok)         echo '{"ok":true,"dbThread":{"exists":true,"readOnlyOpenOk":true,"thread":{"exists":true,"id":"$UUIDF","archived":0}}}'; exit 0;;
-      okarchived) echo '{"ok":true,"dbThread":{"exists":true,"readOnlyOpenOk":true,"thread":{"exists":true,"id":"$UUIDF","archived":1}}}'; exit 0;;
+      ok)         echo '{"ok":true,"dbThread":{"exists":true,"readOnlyOpenOk":true,"thread":{"exists":true,"id":"$UUIDF","archived":0,"model":"synthetic-model","threadSource":"user"}},"targetClassification":{"kind":"root","parentThreadId":null,"reasons":["thread-source-root"],"warnings":[]}}'; exit 0;;
+      legacy)     echo '{"ok":true,"dbThread":{"exists":true,"readOnlyOpenOk":true,"thread":{"exists":true,"id":"$UUIDF","archived":0,"model":"synthetic-model","threadSource":null}},"targetClassification":{"kind":"legacy-root-assumed","parentThreadId":null,"reasons":["legacy-indicators-absent"],"warnings":["legacy-null-source"]}}'; exit 0;;
+      child)      echo '{"ok":true,"dbThread":{"exists":true,"readOnlyOpenOk":true,"thread":{"exists":true,"id":"$UUIDF","archived":0,"model":"synthetic-model","threadSource":"subagent"}},"targetClassification":{"kind":"non-root","parentThreadId":"44444444-4444-4444-8444-444444444444","reasons":["thread-source-child","spawn-edge"],"warnings":[]}}'; exit 0;;
+      guardian)   echo '{"ok":true,"dbThread":{"exists":true,"readOnlyOpenOk":true,"thread":{"exists":true,"id":"$UUIDF","archived":0,"model":"synthetic-model","threadSource":"guardian_review"}},"targetClassification":{"kind":"non-root","parentThreadId":null,"reasons":["thread-source-child"],"warnings":[]}}'; exit 0;;
+      source-child) echo '{"ok":true,"dbThread":{"exists":true,"readOnlyOpenOk":true,"thread":{"exists":true,"id":"$UUIDF","archived":0,"model":"synthetic-model","threadSource":null}},"targetClassification":{"kind":"non-root","parentThreadId":null,"reasons":["source-subagent"],"warnings":[]}}'; exit 0;;
+      ambiguous) echo '{"ok":true,"dbThread":{"exists":true,"readOnlyOpenOk":true,"thread":{"exists":true,"id":"$UUIDF","archived":0,"model":"synthetic-model","threadSource":"user"}},"targetClassification":{"kind":"ambiguous","parentThreadId":null,"reasons":["root-child-conflict"],"warnings":[]}}'; exit 0;;
+      model-null) echo '{"ok":true,"dbThread":{"exists":true,"readOnlyOpenOk":true,"thread":{"exists":true,"id":"$UUIDF","archived":0,"model":null,"threadSource":"user"}},"targetClassification":{"kind":"root","parentThreadId":null,"reasons":["thread-source-root"],"warnings":[]}}'; exit 0;;
+      model-empty) echo '{"ok":true,"dbThread":{"exists":true,"readOnlyOpenOk":true,"thread":{"exists":true,"id":"$UUIDF","archived":0,"model":"","threadSource":"user"}},"targetClassification":{"kind":"root","parentThreadId":null,"reasons":["thread-source-root"],"warnings":[]}}'; exit 0;;
+      model-space) echo '{"ok":true,"dbThread":{"exists":true,"readOnlyOpenOk":true,"thread":{"exists":true,"id":"$UUIDF","archived":0,"model":"  ","threadSource":"user"}},"targetClassification":{"kind":"root","parentThreadId":null,"reasons":["thread-source-root"],"warnings":[]}}'; exit 0;;
+      okarchived) echo '{"ok":true,"dbThread":{"exists":true,"readOnlyOpenOk":true,"thread":{"exists":true,"id":"$UUIDF","archived":1,"model":"synthetic-model","threadSource":"user"}},"targetClassification":{"kind":"root","parentThreadId":null,"reasons":["thread-source-root"],"warnings":[]}}'; exit 0;;
       notfound)   echo '{"ok":false,"dbThread":{"exists":true,"readOnlyOpenOk":true,"thread":{"exists":false,"id":null,"archived":null}}}'; exit 1;;
-      positive-exit2) echo '{"ok":true,"dbThread":{"exists":true,"readOnlyOpenOk":true,"thread":{"exists":true,"id":"$UUIDF","archived":0}}}'; exit 2;;
+      positive-exit2) echo '{"ok":true,"dbThread":{"exists":true,"readOnlyOpenOk":true,"thread":{"exists":true,"id":"$UUIDF","archived":0,"model":"synthetic-model","threadSource":"user"}},"targetClassification":{"kind":"root","parentThreadId":null,"reasons":["thread-source-root"],"warnings":[]}}'; exit 2;;
       malformed) echo '{{{ not json'; exit 0;;
       empty)     exit 0;;
       stderr)    echo "boom: inspector crashed" >&2; exit 1;;
     esac;;
   *codex_ipc_rollout_observe.mjs*)
+    printf '%s\n' observe >> "\$FG/eventlog"
     printf '%s\n' "\$*" >> "\$FG/observe_args.log"
     n=\$(cat "\$FG/observe_count" 2>/dev/null || echo 0); n=\$((n+1)); echo "\$n" > "\$FG/observe_count"
     mode=\$(cat "\$FG/observe_mode" 2>/dev/null || echo rollout-hit)
@@ -453,7 +473,7 @@ chmod +x "$BIN2"/* || fatal "could not make foreground-policy stubs executable"
 assert_stub_resolution "$BIN2"
 
 fgreset(){ # fgreset <client_mode> [inspect_mode] [pscode] [observe_mode] [policy_mode]
-  rm -f "$FGDIR"/send_count "$FGDIR"/nodeargs.log "$FGDIR"/pslog \
+  rm -f "$FGDIR"/send_count "$FGDIR"/inspect_count "$FGDIR"/nodeargs.log "$FGDIR"/pslog \
         "$FGDIR"/observe_count "$FGDIR"/observe_args.log "$FGDIR"/policy_count \
         "$FGDIR"/policylog "$FGDIR"/eventlog "$FGDIR"/policy_stderr \
         "$FGDIR"/helper_stderr
@@ -489,8 +509,10 @@ fgrun --ipc "$UUIDF" "t13b initial host refusal"
 [[ $RC -ne 0 ]] \
   && printf '%s' "$OUT" | grep -q 'HOST-WARNING:' \
   && printf '%s' "$OUT" | grep -q 'RESULT: failed-closed -- reason=other-desktop-host-running -- confirmation=not-attempted' \
+  && [[ "$(cat "$FGDIR/inspect_count" 2>/dev/null || echo 0)" == "1" ]] \
   && [[ "$(cat "$FGDIR/policy_count" 2>/dev/null || echo 0)" == "1" ]] \
   && [[ ! -f "$FGDIR/send_count" && ! -f "$FGDIR/pslog" ]] \
+  && [[ "$(tr '\n' ' ' < "$FGDIR/eventlog")" == 'inspect policy ' ]] \
   && ok "initial host refusal happens after envelope publication and before client/helper contact" \
   || no "initial host refusal escaped the pre-send gate (rc=$RC)"
 t13b=""; while IFS= read -r f; do grep -qx 't13b initial host refusal' "$f" && { t13b="$f"; break; }; done < <(find "$IPCROOT/fgsess" -name '*.task.md' 2>/dev/null)
@@ -501,10 +523,12 @@ fgreset always-fail ok 0 rollout-hit eligible-off
 fgrun --ipc "$UUIDF" "t13b default off"
 [[ $RC -ne 0 ]] \
   && printf '%s' "$OUT" | grep -q 'RESULT: gui-unowned -- reason=autoload-disabled -- confirmation=not-attempted' \
+  && [[ "$(cat "$FGDIR/inspect_count" 2>/dev/null || echo 0)" == "1" ]] \
   && [[ "$(cat "$FGDIR/policy_count" 2>/dev/null || echo 0)" == "1" ]] \
   && [[ "$(cat "$FGDIR/send_count" 2>/dev/null || echo 0)" == "1" ]] \
   && [[ ! -f "$FGDIR/pslog" ]] \
-  && ok "default-off exact no-client stops without inspection, activation, or retry" \
+  && [[ "$(tr '\n' ' ' < "$FGDIR/eventlog")" == 'inspect policy client ' ]] \
+  && ok "default-off exact no-client uses one preflight, then stops without activation or retry" \
   || no "default-off no-client path activated or retried (rc=$RC)"
 assert_tax "t13b-default-off"
 
@@ -513,10 +537,11 @@ fgrun --ipc "$UUIDF" "t13b retry recheck"
 [[ $RC -ne 0 ]] \
   && printf '%s' "$OUT" | grep -q 'RESULT: failed-closed -- reason=other-desktop-host-running -- confirmation=not-attempted' \
   && [[ "$(cat "$FGDIR/policy_count" 2>/dev/null || echo 0)" == "2" ]] \
+  && [[ "$(cat "$FGDIR/inspect_count" 2>/dev/null || echo 0)" == "1" ]] \
   && [[ "$(cat "$FGDIR/send_count" 2>/dev/null || echo 0)" == "1" ]] \
   && [[ "$(grep -c '^helper$' "$FGDIR/eventlog" 2>/dev/null || echo 0)" == "1" ]] \
-  && [[ "$(tr '\n' ' ' < "$FGDIR/eventlog")" == 'policy client helper policy ' ]] \
-  && ok "retry rechecks host policy and cannot reuse stale no-client output" \
+  && [[ "$(tr '\n' ' ' < "$FGDIR/eventlog")" == 'inspect policy client helper policy ' ]] \
+  && ok "retry rechecks host policy while reusing the one target inspection" \
   || no "retry used stale policy/router state (rc=$RC; events=$(tr '\n' ' ' < "$FGDIR/eventlog" 2>/dev/null))"
 assert_tax "t13b-retry-refusal"
 
@@ -527,6 +552,7 @@ for policy_case in malformed empty invalid-report nonzero-ok; do
   [[ "$policy_case" == nonzero-ok ]] && want_reason=host-policy-unavailable
   [[ $RC -ne 0 ]] \
     && printf '%s' "$OUT" | grep -q "reason=${want_reason}" \
+    && [[ "$(cat "$FGDIR/inspect_count" 2>/dev/null || echo 0)" == "1" ]] \
     && [[ ! -f "$FGDIR/send_count" && ! -f "$FGDIR/pslog" ]] \
     && ok "$policy_case policy output refuses before contact" \
     || no "$policy_case policy output reached client/helper (rc=$RC)"
@@ -572,8 +598,8 @@ assert_tax "t13b-explicit-flags"
 fgreset fail-then-ok ok 0 rollout-hit eligible-codex-uri
 fgrun --ipc "$UUIDF" --autoload codex-uri -- "t13b fresh allowed retry"
 [[ $RC -eq 0 ]] \
-  && [[ "$(tr '\n' ' ' < "$FGDIR/eventlog")" == 'policy client helper policy client ' ]] \
-  && ok "allowed retry order is policy, client, helper, fresh policy, client" \
+  && [[ "$(tr '\n' ' ' < "$FGDIR/eventlog")" == 'inspect policy client helper policy client observe ' ]] \
+  && ok "allowed retry order is inspect, policy, client, helper, fresh policy, client, observe" \
   || no "allowed retry lacks an immediately preceding fresh policy (rc=$RC; events=$(tr '\n' ' ' < "$FGDIR/eventlog" 2>/dev/null))"
 assert_tax "t13b-fresh-retry"
 
@@ -702,15 +728,52 @@ tf19=""; while IFS= read -r f; do grep -qx "t19 invalid policy" "$f" && { tf19="
 [[ -n "$tf19" ]] && ok "envelope written before policy failure" || no "envelope missing on policy failure"
 assert_tax "t19"
 
-echo "== 20. inspection ambiguity: six refusals, all before autoload =="
-for m in notfound:target-not-found okarchived:target-archived positive-exit2:target-inspection-ambiguous malformed:target-inspection-ambiguous empty:target-inspection-ambiguous stderr:target-inspection-ambiguous; do
+echo "== 20. target preflight refuses unsafe identity/model state before any send gate =="
+for m in \
+  notfound:target-not-found \
+  okarchived:target-archived \
+  positive-exit2:target-inspection-ambiguous \
+  malformed:target-inspection-ambiguous \
+  empty:target-inspection-ambiguous \
+  stderr:target-inspection-ambiguous \
+  child:target-non-root \
+  guardian:target-non-root \
+  source-child:target-non-root \
+  ambiguous:target-inspection-ambiguous \
+  model-null:target-model-empty \
+  model-empty:target-model-empty \
+  model-space:target-model-empty; do
     imode="${m%%:*}"; want="${m##*:}"
-    fgreset always-fail "$imode" 0
+    fgreset always-ok "$imode" 0
     fgrun --ipc "$UUIDF" "t20 $imode"
-    [[ $RC -ne 0 ]] && printf '%s' "$OUT" | grep -q "reason=${want}" && [[ ! -f "$FGDIR/pslog" ]] \
-        && ok "inspect=$imode -> $want, no deep-link" || no "inspect=$imode (rc=$RC, want $want)"
+    parent_ok=1
+    if [[ "$imode" == child ]]; then
+      printf '%s' "$OUT" | grep -q 'Target parent thread: 44444444-4444-4444-8444-444444444444' || parent_ok=0
+    fi
+    [[ $RC -ne 0 ]] \
+      && printf '%s' "$OUT" | grep -q "RESULT: failed-closed -- reason=${want} -- confirmation=not-attempted" \
+      && printf '%s' "$OUT" | grep -q 'FALLBACK -- file-drop is ready' \
+      && ! printf '%s' "$OUT" | grep -q '^WAIT:' \
+      && [[ "$parent_ok" -eq 1 ]] \
+      && [[ "$(cat "$FGDIR/inspect_count" 2>/dev/null || echo 0)" == "1" ]] \
+      && [[ ! -f "$FGDIR/policy_count" && ! -f "$FGDIR/send_count" \
+            && ! -f "$FGDIR/pslog" && ! -f "$FGDIR/observe_args.log" ]] \
+      && [[ "$(tr '\n' ' ' < "$FGDIR/eventlog")" == 'inspect ' ]] \
+      && ok "inspect=$imode -> $want before policy/client/helper" \
+      || no "inspect=$imode escaped the pre-send refusal (rc=$RC, want=$want, events=$(tr '\n' ' ' < "$FGDIR/eventlog" 2>/dev/null))"
 done
 assert_tax "t20"
+
+fgreset always-ok legacy 0 rollout-hit eligible-off
+fgrun --ipc "$UUIDF" "t20 legacy root"
+[[ $RC -eq 0 ]] \
+  && printf '%s' "$OUT" | grep -q 'TARGET-WARNING: legacy thread has no source classification; root status was assumed only because all available child indicators were absent.' \
+  && printf '%s' "$OUT" | grep -q 'RESULT: gui-delivered -- reason=renderer-owned -- confirmation=rollout-hit' \
+  && [[ "$(cat "$FGDIR/inspect_count" 2>/dev/null || echo 0)" == "1" ]] \
+  && [[ "$(tr '\n' ' ' < "$FGDIR/eventlog")" == 'inspect policy client observe ' ]] \
+  && ok "legacy-root-assumed warns, inspects once, and may continue" \
+  || no "legacy-root-assumed was rejected, silent, or re-inspected (rc=$RC)"
+assert_tax "t20-legacy"
 
 echo "== 21. autoload ok but retry never succeeds: gui-unowned, not gui-delivered =="
 fgreset always-fail ok 0
@@ -722,7 +785,14 @@ assert_tax "t21"
 echo "== 22. default-policy auto-load delivery still works (reason=auto-loaded) =="
 fgreset fail-then-ok ok 0
 fgrun --ipc "$UUIDF" "t22 autoload delivery"
-[[ $RC -eq 0 ]] && printf '%s' "$OUT" | grep -q "RESULT: gui-delivered -- reason=auto-loaded -- confirmation=rollout-hit" && ok "auto-loaded delivery observed" || no "auto-loaded delivery (rc=$RC)"
+[[ $RC -eq 0 ]] \
+  && printf '%s' "$OUT" | grep -q "RESULT: gui-delivered -- reason=auto-loaded -- confirmation=rollout-hit" \
+  && [[ "$(cat "$FGDIR/inspect_count" 2>/dev/null || echo 0)" == "1" ]] \
+  && [[ "$(cat "$FGDIR/policy_count" 2>/dev/null || echo 0)" == "2" ]] \
+  && [[ "$(cat "$FGDIR/send_count" 2>/dev/null || echo 0)" == "2" ]] \
+  && [[ "$(tr '\n' ' ' < "$FGDIR/eventlog")" == 'inspect policy client helper policy client observe ' ]] \
+  && ok "auto-loaded delivery rechecks host policy, reuses one inspection, and observes after retry" \
+  || no "auto-loaded delivery order/count drifted (rc=$RC; events=$(tr '\n' ' ' < "$FGDIR/eventlog" 2>/dev/null))"
 assert_tax "t22"
 
 echo "== 22b. malformed exit-zero success after autoload is retry-ambiguous =="

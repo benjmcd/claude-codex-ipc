@@ -363,6 +363,64 @@ assert_dry initialize "initialize request shape is exact"
 assert_dry follower "thread-follower-start-turn request shape is exact"
 assert_dry framing "observable frame totals include exactly four overhead bytes"
 
+settings_reject(){ # settings_reject <label> <expected-fragment> [client args...]
+  local label="$1" expected="$2" out err rc
+  shift 2
+  err="$TMP/settings-reject-$RANDOM.err"
+  out="$("$NODE_BIN" "$CLIENT" --thread "$THREAD" --task "$TASK_TEXT" "$@" 2>"$err")"
+  rc=$?
+  if [[ $rc -ne 0 && -z "$out" ]] && grep -qF -- "$expected" "$err"; then
+    ok "$label"
+  else
+    no "$label (rc=$rc, stdout=${out:-<empty>})"
+    sed -n '1,8p' "$err"
+  fi
+}
+
+settings_accept(){ # settings_accept <label> <model|null> <effort|null> [client args...]
+  local label="$1" expected_model="$2" expected_effort="$3" out err rc
+  shift 3
+  err="$TMP/settings-accept-$RANDOM.err"
+  out="$("$NODE_BIN" "$CLIENT" --thread "$THREAD" --task "$TASK_TEXT" "$@" 2>"$err")"
+  rc=$?
+  if [[ $rc -eq 0 ]] && printf '%s' "$out" | "$NODE_BIN" -e '
+const fs = require("node:fs");
+const value = JSON.parse(fs.readFileSync(0, "utf8"));
+const request = value?.requests?.[1]?.json?.params?.turnStart?.request;
+const wantModel = process.argv[1] === "null" ? undefined : process.argv[1];
+const wantEffort = process.argv[2] === "null" ? undefined : process.argv[2];
+const ok = request && request.model === wantModel && request.effort === wantEffort;
+process.exit(ok ? 0 : 1);
+' "$expected_model" "$expected_effort" >/dev/null 2>&1; then
+    ok "$label"
+  else
+    no "$label (rc=$rc)"
+    sed -n '1,8p' "$err"
+  fi
+}
+
+echo "== 1b. stored thread-setting rewrites require their own explicit acknowledgement =="
+settings_reject "model override without settings acknowledgement is rejected" \
+  "--ack-thread-settings-change" --model synthetic-model
+settings_reject "effort override without settings acknowledgement is rejected" \
+  "--ack-thread-settings-change" --effort high
+settings_reject "combined overrides without settings acknowledgement are rejected" \
+  "--ack-thread-settings-change" --model synthetic-model --effort high
+settings_reject "live-write acknowledgement does not acknowledge stored setting rewrites" \
+  "--ack-thread-settings-change" --model synthetic-model --ack-live-write
+settings_reject "acknowledged whitespace-only model is rejected" \
+  "--model must provide non-empty text" --model $' \t' --ack-thread-settings-change
+settings_reject "acknowledged whitespace-only effort is rejected" \
+  "--effort must provide non-empty text" --effort $' \t' --ack-thread-settings-change
+settings_accept "acknowledged model override is retained exactly" synthetic-model null \
+  --model '  synthetic-model  ' --ack-thread-settings-change
+settings_accept "acknowledged effort override is retained exactly" null high \
+  --effort '  high  ' --ack-thread-settings-change
+settings_accept "acknowledged combined overrides are retained exactly" synthetic-model high \
+  --model synthetic-model --effort high --ack-thread-settings-change
+settings_accept "settings acknowledgement alone preserves omission of both fields" null null \
+  --ack-thread-settings-change
+
 CANONICAL_CASE_THREAD="00000000-0000-4000-8000-00000000c0de"
 UPPER_THREAD="${CANONICAL_CASE_THREAD^^}"
 UPPER_OUT="$("$NODE_BIN" "$CLIENT" --thread "$UPPER_THREAD" --task "$TASK_TEXT" --client-type "$CLIENT_TYPE" 2>/dev/null)"
@@ -549,10 +607,10 @@ case "$name" in
         exit 0
         ;;
       no-client-archived)
-        printf '{"ok":true,"dbThread":{"exists":true,"readOnlyOpenOk":true,"thread":{"exists":true,"id":"%s","archived":1}}}\n' "$target"
+        printf '{"ok":true,"dbThread":{"exists":true,"readOnlyOpenOk":true,"thread":{"exists":true,"id":"%s","archived":1,"model":"synthetic-model","threadSource":"user"}},"targetClassification":{"kind":"root","parentThreadId":null,"reasons":["thread-source-root"],"warnings":[]}}\n' "$target"
         ;;
       no-client-invalid-archive)
-        printf '{"ok":true,"dbThread":{"exists":true,"readOnlyOpenOk":true,"thread":{"exists":true,"id":"%s","archived":null}}}\n' "$target"
+        printf '{"ok":true,"dbThread":{"exists":true,"readOnlyOpenOk":true,"thread":{"exists":true,"id":"%s","archived":null,"model":"synthetic-model","threadSource":"user"}},"targetClassification":{"kind":"root","parentThreadId":null,"reasons":["thread-source-root"],"warnings":[]}}\n' "$target"
         ;;
       no-client-db-unavailable)
         printf '%s\n' '{"ok":true,"dbThread":{"exists":false,"readOnlyOpenOk":false,"thread":{"exists":false}},"rollout":{"primary":{"parsedOk":true}}}'
@@ -562,7 +620,9 @@ case "$name" in
         printf '%s\n' '{"ok":false,"dbThread":{"exists":true,"readOnlyOpenOk":true,"thread":{"exists":false}}}'
         exit 1
         ;;
-      *) printf '%s\n' '{"ok":false,"dbThread":{"thread":{"exists":false}}}' ;;
+      *)
+        printf '{"ok":true,"dbThread":{"exists":true,"readOnlyOpenOk":true,"thread":{"exists":true,"id":"%s","archived":0,"model":"synthetic-model","threadSource":"user"}},"targetClassification":{"kind":"root","parentThreadId":null,"reasons":["thread-source-root"],"warnings":[]}}\n' "$target"
+        ;;
     esac
     exit 0
     ;;
