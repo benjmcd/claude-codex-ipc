@@ -48,6 +48,7 @@ PASS=0
 FAIL=0
 ok(){ echo "  PASS: $1"; PASS=$((PASS+1)); }
 no(){ echo "  FAIL: $1"; FAIL=$((FAIL+1)); }
+fatal(){ echo "FATAL: $*" >&2; exit 1; }
 
 # A missing wrapper/example is a hard failure, never a skip: this suite exists precisely to
 # prove the pair stays in step, and a silent skip would restore the gap it closes.
@@ -67,8 +68,39 @@ CONDITIONAL_HEADINGS=$(printf '%s\n' \
     "## Uncommitted changes	UNCOMMITTED (git status --short is non-empty)" \
     "## Suggested reasoning effort	CODEX_REASONING_EFFORT")
 
-TMP="$(mktemp -d)"
+TMP="$(mktemp -d)" && [[ -n "$TMP" && -d "$TMP" ]] \
+    || { echo "FATAL: could not create payload-parity temporary directory" >&2; exit 1; }
 trap 'rm -rf "$TMP"' EXIT
+
+# Fixture Git operations must not inherit redirecting/tracing GIT_* variables from the caller.
+while IFS= read -r _git_var; do
+    [[ "${_git_var^^}" == GIT_* ]] && unset "$_git_var"
+done < <(compgen -e)
+for _git_var in $(compgen -e); do
+    [[ "${_git_var^^}" != GIT_* ]] || fatal "could not clear inherited Git variable $_git_var"
+done
+unset _git_var
+export GIT_OPTIONAL_LOCKS=0 GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
+export GIT_ATTR_NOSYSTEM=1 GIT_PAGER=cat GIT_NO_REPLACE_OBJECTS=1
+export GIT_NO_LAZY_FETCH=1 GIT_TERMINAL_PROMPT=0
+
+# These renders are file-drop only; child runtimes are unexpected and must be owned tripwires.
+STUB_BIN="$TMP/wrapper-bin"
+mkdir -p "$STUB_BIN" || fatal "could not create wrapper stub directory"
+for _stub in node powershell.exe codex; do
+    printf '%s\n' '#!/usr/bin/env bash' \
+        'printf "FATAL: unexpected wrapper child: %s\\n" "${0##*/}" >&2' \
+        'exit 97' > "$STUB_BIN/$_stub" \
+        || fatal "could not materialize $_stub tripwire"
+done
+chmod +x "$STUB_BIN"/* || fatal "could not make wrapper tripwires executable"
+for _stub in node powershell.exe codex; do
+    _resolved="$(PATH="$STUB_BIN:$PATH" command -v "$_stub" 2>/dev/null)" \
+        || fatal "$_stub tripwire does not resolve"
+    [[ "$_resolved" == "$STUB_BIN/$_stub" ]] \
+        || fatal "$_stub resolved outside the harness: $_resolved"
+done
+unset _stub _resolved
 
 TASK_TEXT="Review src/example.js for edge cases and add the missing null-input guard."
 
@@ -117,13 +149,13 @@ do_render() { # do_render <tag> <optional-env 0|1>
         R_OUT="$( cd "$FIX" && env HOME="$fakehome" CODEX_IPC_ROOT="$ipcroot" \
             CLAUDE_SESSION_ID="parity-fixture" CODEX_IPC_RETENTION_DAYS=0 \
             CODEX_IPC_INCLUDE_TRANSCRIPT=1 CODEX_REASONING_EFFORT=high \
-            CODEX_IPC_GIT_CONTEXT=full \
+            CODEX_IPC_GIT_CONTEXT=full PATH="$STUB_BIN:$PATH" \
             bash "$WRAPPER" "$TASK_TEXT" 2>&1 )"
     else
         R_OUT="$( cd "$FIX" && env -u CODEX_IPC_INCLUDE_TRANSCRIPT -u CODEX_REASONING_EFFORT \
             -u CLAUDE_TRANSCRIPT -u CLAUDE_CODE_SESSION_ID -u CODEX_IPC_GIT_CONTEXT \
             HOME="$fakehome" CODEX_IPC_ROOT="$ipcroot" \
-            CLAUDE_SESSION_ID="parity-fixture" CODEX_IPC_RETENTION_DAYS=0 \
+            CLAUDE_SESSION_ID="parity-fixture" CODEX_IPC_RETENTION_DAYS=0 PATH="$STUB_BIN:$PATH" \
             bash "$WRAPPER" "$TASK_TEXT" 2>&1 )"
     fi
     R_RC=$?

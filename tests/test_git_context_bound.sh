@@ -78,6 +78,7 @@ PASS=0
 FAIL=0
 ok(){ echo "  PASS: $1"; PASS=$((PASS+1)); }
 no(){ echo "  FAIL: $1"; FAIL=$((FAIL+1)); }
+fatal(){ echo "FATAL: $*" >&2; exit 1; }
 
 if [[ -z "$WRAPPER" ]]; then
     echo "FATAL: handoff_to_codex.sh not found in repo or installed layout" >&2
@@ -92,8 +93,40 @@ if ! command -v node >/dev/null 2>&1; then
     exit 1
 fi
 
-TMP="$(mktemp -d)"
+TMP="$(mktemp -d)" && [[ -n "$TMP" && -d "$TMP" ]] \
+    || { echo "FATAL: could not create git-context temporary directory" >&2; exit 1; }
 trap 'rm -rf "$TMP"' EXIT
+
+# Fixture Git operations must not inherit redirecting/tracing GIT_* variables from the caller.
+while IFS= read -r _git_var; do
+    [[ "${_git_var^^}" == GIT_* ]] && unset "$_git_var"
+done < <(compgen -e)
+for _git_var in $(compgen -e); do
+    [[ "${_git_var^^}" != GIT_* ]] || fatal "could not clear inherited Git variable $_git_var"
+done
+unset _git_var
+export GIT_OPTIONAL_LOCKS=0 GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
+export GIT_ATTR_NOSYSTEM=1 GIT_PAGER=cat GIT_NO_REPLACE_OBJECTS=1
+export GIT_NO_LAZY_FETCH=1 GIT_TERMINAL_PROMPT=0
+
+# Wrapper executions in this file are file-drop only. Any Node, PowerShell or Codex child is
+# therefore unexpected and must hit an owned tripwire rather than a real executable.
+STUB_BIN="$TMP/wrapper-bin"
+mkdir -p "$STUB_BIN" || fatal "could not create wrapper stub directory"
+for _stub in node powershell.exe codex; do
+    printf '%s\n' '#!/usr/bin/env bash' \
+        'printf "FATAL: unexpected wrapper child: %s\\n" "${0##*/}" >&2' \
+        'exit 97' > "$STUB_BIN/$_stub" \
+        || fatal "could not materialize $_stub tripwire"
+done
+chmod +x "$STUB_BIN"/* || fatal "could not make wrapper tripwires executable"
+for _stub in node powershell.exe codex; do
+    _resolved="$(PATH="$STUB_BIN:$PATH" command -v "$_stub" 2>/dev/null)" \
+        || fatal "$_stub tripwire does not resolve"
+    [[ "$_resolved" == "$STUB_BIN/$_stub" ]] \
+        || fatal "$_stub resolved outside the harness: $_resolved"
+done
+unset _stub _resolved
 
 # UTF-8 validity by round-trip: decoding invalid bytes yields U+FFFD, so re-encoding cannot
 # reproduce the original buffer. One short-lived node per call (the gate runner's owned-Node
@@ -226,12 +259,14 @@ do_render() { # do_render <tag> <git-context-value|-> <task> [wrapper-override]
     if [[ "$mode" == "-" ]]; then
         ( cd "$FIX" && env -u CODEX_IPC_GIT_CONTEXT -u CODEX_IPC_INCLUDE_TRANSCRIPT \
             -u CODEX_REASONING_EFFORT -u CLAUDE_TRANSCRIPT -u CLAUDE_CODE_SESSION_ID \
+            PATH="$STUB_BIN:$PATH" \
             HOME="$FAKEHOME" CODEX_IPC_ROOT="$IPCROOT" CLAUDE_SESSION_ID="bound-fixture" \
             CODEX_IPC_RETENTION_DAYS=0 \
             bash "$wrapper" "$task" ) > "$R_STDOUT" 2> "$R_STDERR"
     else
         ( cd "$FIX" && env -u CODEX_IPC_INCLUDE_TRANSCRIPT -u CODEX_REASONING_EFFORT \
             -u CLAUDE_TRANSCRIPT -u CLAUDE_CODE_SESSION_ID \
+            PATH="$STUB_BIN:$PATH" \
             HOME="$FAKEHOME" CODEX_IPC_ROOT="$IPCROOT" CLAUDE_SESSION_ID="bound-fixture" \
             CODEX_IPC_RETENTION_DAYS=0 CODEX_IPC_GIT_CONTEXT="$mode" \
             bash "$wrapper" "$task" ) > "$R_STDOUT" 2> "$R_STDERR"

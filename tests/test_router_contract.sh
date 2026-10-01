@@ -67,7 +67,8 @@ if [[ ! -f "$METHOD_TABLE" ]]; then
 fi
 export CODEX_IPC_METHOD_TABLE="$METHOD_TABLE"
 
-TMP="$(mktemp -d)"
+TMP="$(mktemp -d)" && [[ -n "$TMP" && -d "$TMP" ]] \
+    || { echo "FATAL: could not create router-contract temporary directory" >&2; exit 1; }
 trap 'rm -rf "$TMP"' EXIT
 THREAD="22222222-2222-4222-8222-222222222222"
 TASK_TEXT="router contract sentinel"
@@ -77,6 +78,20 @@ FAIL=0
 
 ok(){ echo "  PASS: $1"; PASS=$((PASS+1)); }
 no(){ echo "  FAIL: $1"; FAIL=$((FAIL+1)); }
+fatal(){ echo "FATAL: $*" >&2; exit 1; }
+
+# Wrapper-side Git probes must not inherit tracing, redirecting, or repository-selection
+# variables from the caller. In particular, GIT_TRACE* can write outside this fixture.
+while IFS= read -r _git_var; do
+  [[ "${_git_var^^}" == GIT_* ]] && unset "$_git_var"
+done < <(compgen -e)
+for _git_var in $(compgen -e); do
+  [[ "${_git_var^^}" != GIT_* ]] || fatal "could not clear inherited Git variable $_git_var"
+done
+unset _git_var
+export GIT_OPTIONAL_LOCKS=0 GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
+export GIT_ATTR_NOSYSTEM=1 GIT_PAGER=cat GIT_NO_REPLACE_OBJECTS=1
+export GIT_NO_LAZY_FETCH=1 GIT_TERMINAL_PROMPT=0
 
 # CLI_GUARD_BEGIN: real processes and owned aliases only; no host state or IPC.
 if CLI_GUARD_SCRIPTS="$(dirname "$CLIENT")" \
@@ -480,7 +495,7 @@ vacuity_case
 
 echo "== 3. wrapper process-result classification =="
 STUB_BIN="$TMP/bin"
-mkdir -p "$STUB_BIN"
+mkdir -p "$STUB_BIN" || fatal "could not create router-contract stub directory"
 TOOL_LOG="$TMP/tool.log"
 NODE_STUB="$STUB_BIN/node"
 cat > "$NODE_STUB" <<'EOF'
@@ -554,23 +569,35 @@ case "$name" in
   *) exec "$REAL_NODE" "$@" ;;
 esac
 EOF
+[[ $? -eq 0 ]] || fatal "could not materialize router-contract node stub"
 cat > "$STUB_BIN/powershell.exe" <<'EOF'
 #!/usr/bin/env bash
 printf 'powershell.exe invoked\n' >> "$TOOL_LOG"
 exit 99
 EOF
+[[ $? -eq 0 ]] || fatal "could not materialize router-contract PowerShell tripwire"
 cat > "$STUB_BIN/codex" <<'EOF'
 #!/usr/bin/env bash
 printf 'codex invoked\n' >> "$TOOL_LOG"
 exit 99
 EOF
-chmod +x "$NODE_STUB" "$STUB_BIN/powershell.exe" "$STUB_BIN/codex"
+[[ $? -eq 0 ]] || fatal "could not materialize router-contract Codex tripwire"
+chmod +x "$NODE_STUB" "$STUB_BIN/powershell.exe" "$STUB_BIN/codex" \
+  || fatal "could not make router-contract stubs executable"
+for _stub in node powershell.exe codex; do
+  _resolved="$(PATH="$STUB_BIN:$PATH" command -v "$_stub" 2>/dev/null)" \
+    || fatal "$_stub router-contract stub does not resolve"
+  [[ "$_resolved" == "$STUB_BIN/$_stub" ]] \
+    || fatal "$_stub resolved outside the harness: $_resolved"
+done
+unset _stub _resolved
 
 run_wrapper_case(){
   # $5 (optional): text that MUST NOT appear in the wrapper's combined output.
   local scenario="$1" expected_rc="$2" expected_result="$3" label="$4" forbidden="${5:-}" target="${6:-$THREAD}"
   local case_root="$TMP/$scenario" output rc
-  mkdir -p "$case_root/ipc" "$case_root/home"
+  mkdir -p "$case_root/ipc" "$case_root/home" \
+    || fatal "could not create router-contract fixture for $scenario"
   output="$(env \
     PATH="$STUB_BIN:$PATH" \
     REAL_NODE="$NODE_BIN" \

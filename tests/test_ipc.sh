@@ -15,14 +15,32 @@ for _cand in "$TDIR/../skills/ipc/scripts/handoff_to_codex.sh" "$TDIR/../scripts
     [[ -f "$_cand" ]] && SCRIPT="$_cand" && break
 done
 [[ -n "$SCRIPT" ]] || { echo "FATAL: handoff_to_codex.sh not found in repo or installed layout" >&2; exit 1; }
-TMP="$(mktemp -d)"
+TMP="$(mktemp -d)" && [[ -n "$TMP" && -d "$TMP" ]] \
+    || { echo "FATAL: could not create IPC temporary directory" >&2; exit 1; }
 trap 'rm -rf "$TMP"' EXIT
-IPCROOT="$TMP/ipcroot"; mkdir -p "$IPCROOT"
-BIN="$TMP/bin"; mkdir -p "$BIN"
-REPO="$TMP/repo"; mkdir -p "$REPO"; ( cd "$REPO" && git init -q && git config user.email t@t && git config user.name t )
-NOREPO="$TMP/norepo"; mkdir -p "$NOREPO"
+fatal(){ echo "FATAL: $*" >&2; exit 1; }
+
+# Fixture Git operations must not inherit redirecting/tracing GIT_* variables from the caller.
+while IFS= read -r _git_var; do
+  [[ "${_git_var^^}" == GIT_* ]] && unset "$_git_var"
+done < <(compgen -e)
+for _git_var in $(compgen -e); do
+  [[ "${_git_var^^}" != GIT_* ]] || fatal "could not clear inherited Git variable $_git_var"
+done
+unset _git_var
+export GIT_OPTIONAL_LOCKS=0 GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
+export GIT_ATTR_NOSYSTEM=1 GIT_PAGER=cat GIT_NO_REPLACE_OBJECTS=1
+export GIT_NO_LAZY_FETCH=1 GIT_TERMINAL_PROMPT=0
+
+IPCROOT="$TMP/ipcroot"; mkdir -p "$IPCROOT" || fatal "could not create IPC fixture root"
+BIN="$TMP/bin"; mkdir -p "$BIN" || fatal "could not create IPC stub directory"
+REPO="$TMP/repo"; mkdir -p "$REPO" || fatal "could not create IPC fixture repository"
+( cd "$REPO" && git init -q && git config user.email t@t && git config user.name t ) \
+  || fatal "could not initialize IPC fixture repository"
+NOREPO="$TMP/norepo"; mkdir -p "$NOREPO" || fatal "could not create non-repository fixture"
 UUID="00000000-0000-4000-8000-000000000000"
-REAL_NODE="$(command -v node)"
+REAL_NODE="$(command -v node 2>/dev/null)" || fatal "node is required"
+[[ -n "$REAL_NODE" ]] || fatal "node resolved empty"
 
 # --- stubs on PATH (node records argv; codex/powershell are no-ops) ---
 cat > "$BIN/node" <<EOF
@@ -40,16 +58,30 @@ if [[ "\${1##*/}" == "codex_ipc_client.mjs" ]]; then
 fi
 exec "$REAL_NODE" "\$@"
 EOF
+[[ $? -eq 0 ]] || fatal "could not materialize node stub"
 cat > "$BIN/codex" <<EOF
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "$TMP/codexargs.log"
 exit 0
 EOF
+[[ $? -eq 0 ]] || fatal "could not materialize codex tripwire"
 cat > "$BIN/powershell.exe" <<'EOF'
 #!/usr/bin/env bash
 exit 0
 EOF
-chmod +x "$BIN"/*
+[[ $? -eq 0 ]] || fatal "could not materialize PowerShell stub"
+chmod +x "$BIN"/* || fatal "could not make IPC stubs executable"
+
+assert_stub_resolution(){ # assert_stub_resolution <bin-dir>
+  local bin="$1" tool resolved
+  for tool in node powershell.exe codex; do
+    resolved="$(PATH="$bin:$PATH" command -v "$tool" 2>/dev/null)" \
+      || fatal "$tool stub does not resolve from $bin"
+    [[ "$resolved" == "$bin/$tool" ]] \
+      || fatal "$tool resolved outside the harness: $resolved"
+  done
+}
+assert_stub_resolution "$BIN"
 
 PASS=0; FAIL=0
 ok(){ echo "  PASS: $1"; PASS=$((PASS+1)); }
@@ -222,7 +254,7 @@ echo "== 11d. an EXECUTED wrapper ignores an inherited _TEST_SOURCE_ONLY (no sil
 # of an executed dispatch must NOT silently exit 0 without publishing.
 SS="$TMP/sourceseam/filedrop"; mkdir -p "$(dirname "$SS")"
 _TEST_SOURCE_ONLY=1 CODEX_IPC_ROOT="$TMP/sourceseam" CLAUDE_CODE_SESSION_ID="seam" \
-    bash "$SCRIPT" "seam-executed task" >/dev/null 2>&1
+    PATH="$BIN:$PATH" bash "$SCRIPT" "seam-executed task" >/dev/null 2>&1
 seam_rc=$?
 seam_made=$(find "$TMP/sourceseam" -name '*.task.md' 2>/dev/null | wc -l)
 [[ "$seam_rc" -eq 0 && "$seam_made" -eq 1 ]] \
@@ -268,9 +300,11 @@ printf '%s' "$OUTQ" | grep -q 'read "' && ok "pickup line double-quotes the path
 # name with a first-send-fail mode; powershell.exe records args and exits with a
 # configured code. Timing knobs keep negative poll cases under ~3s.
 # ============================================================================
-FGDIR="$TMP/fg"; BIN2="$TMP/bin2"; mkdir -p "$FGDIR" "$BIN2"
+FGDIR="$TMP/fg"; BIN2="$TMP/bin2"
+mkdir -p "$FGDIR" "$BIN2" || fatal "could not create foreground-policy stub roots"
 UUIDF="33333333-3333-4333-8333-333333333333"
-REAL_NODE="$(command -v node)"
+REAL_NODE="$(command -v node 2>/dev/null)" || fatal "node is required for foreground-policy fixtures"
+[[ -n "$REAL_NODE" ]] || fatal "node resolved empty for foreground-policy fixtures"
 
 cat > "$BIN2/node" <<EOF
 #!/usr/bin/env bash
@@ -347,17 +381,21 @@ case "\$*" in
   *) exec "$REAL_NODE" "\$@";;
 esac
 EOF
+[[ $? -eq 0 ]] || fatal "could not materialize foreground-policy node stub"
 cat > "$BIN2/powershell.exe" <<EOF
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "$FGDIR/pslog"
 exit "\$(cat "$FGDIR/pscode" 2>/dev/null || echo 0)"
 EOF
+[[ $? -eq 0 ]] || fatal "could not materialize foreground-policy PowerShell stub"
 cat > "$BIN2/codex" <<EOF
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "$FGDIR/codexargs.log"
 exit 0
 EOF
-chmod +x "$BIN2"/*
+[[ $? -eq 0 ]] || fatal "could not materialize foreground-policy codex tripwire"
+chmod +x "$BIN2"/* || fatal "could not make foreground-policy stubs executable"
+assert_stub_resolution "$BIN2"
 
 fgreset(){ # fgreset <client_mode> [inspect_mode] [pscode]
   rm -f "$FGDIR"/send_count "$FGDIR"/nodeargs.log "$FGDIR"/pslog \
@@ -645,7 +683,7 @@ echo "== 30. injected session id is contained to one segment under the transport
 # Regression: CLAUDE_SESSION_ID becomes a path segment, so a dot segment or separator wrote the
 # envelope OUTSIDE CODEX_IPC_ROOT (audit A-02). Fail closed; never sanitize silently.
 SIDROOT="$TMP/sidroot"; mkdir -p "$SIDROOT/root"
-sid_run(){ ( cd "$NOREPO" && CODEX_IPC_ROOT="$SIDROOT/root" CLAUDE_SESSION_ID="$1" bash "$SCRIPT" "sid containment" >/dev/null 2>&1 ); }
+sid_run(){ ( cd "$NOREPO" && CODEX_IPC_ROOT="$SIDROOT/root" CLAUDE_SESSION_ID="$1" PATH="$BIN:$PATH" bash "$SCRIPT" "sid containment" >/dev/null 2>&1 ); }
 esc=0
 for bad in '../escape' '..' 'a/b' 'a\b' '/abs'; do
     sid_run "$bad" && esc=1

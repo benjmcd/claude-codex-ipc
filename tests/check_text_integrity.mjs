@@ -912,9 +912,7 @@ function selfTestGit(repo, args, input = undefined, expectedStatus = 0) {
     encoding: null,
     windowsHide: true,
     env: {
-      ...process.env,
-      GIT_OPTIONAL_LOCKS: "0",
-      GIT_CONFIG_NOSYSTEM: "1",
+      ...gitChildEnvironment(),
       GIT_CONFIG_GLOBAL: path.join(path.dirname(repo), "empty-gitconfig"),
       HOME: path.join(path.dirname(repo), "isolated-home"),
       USERPROFILE: path.join(path.dirname(repo), "isolated-home"),

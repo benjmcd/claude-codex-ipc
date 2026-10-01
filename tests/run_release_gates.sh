@@ -43,6 +43,21 @@ set -uo pipefail
 TDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BASH_BIN="$(command -v bash)"
 
+# The outer manifest and safety gates invoke Git. Clear every inherited Git selector,
+# redirection, and trace sink here so the complete release battery cannot write through an
+# ambient GIT_TRACE* path or inspect a caller-selected repository.
+for _git_var in $(compgen -e); do
+  [[ "${_git_var^^}" == GIT_* ]] && unset "$_git_var"
+done
+for _git_var in $(compgen -e); do
+  [[ "${_git_var^^}" == GIT_* ]] \
+    && { echo "GATE ABORT: could not clear inherited Git variable $_git_var" >&2; exit 2; }
+done
+unset _git_var
+export GIT_OPTIONAL_LOCKS=0 GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
+export GIT_ATTR_NOSYSTEM=1 GIT_PAGER=cat GIT_NO_REPLACE_OBJECTS=1
+export GIT_NO_LAZY_FETCH=1 GIT_TERMINAL_PROMPT=0
+
 # ---- pinned budgets (NEXT-STEPS §5.1) ----------------------------------------------------
 # Correctness gates (UNCHANGED — never weakened): the process bound (PEAK_LIMIT=2,
 # POST_SUITE_DRAIN_S=2, KILL_DEADLINE_S=5), fail-on-SKIP, and safety-by-exit-status.
@@ -55,8 +70,8 @@ KILL_DEADLINE_S=5            # on timeout, kill/reap the owned tree within this 
 # that recalibrate-and-record authorization is hereby extended to the per-suite value on Windows.
 # Historical calibration measured the then-nine standalone suites (all green, 381 assertions, 0 failures):
 #   * test_ipc.sh       ~362s
-#   * test_reply_view.sh ~453s  (its T23 nests a FULL test_ipc re-run — a Phase-5/WS-D de-dup
-#                                candidate; NOT fixed here)
+#   * test_reply_view.sh ~453s  (historical measurement from when T23 nested test_ipc; current
+#                                T23 uses a bounded wrapper/viewer seam)
 # Both exceed the provisional 300s per-suite cap on this host, so the caps are raised WITH margin:
 # per-suite 300 -> 600s; whole-layout 600 -> 1800s (raised proportionally). No correctness gate
 # above is touched.
@@ -456,7 +471,8 @@ run_monitor_self_test() {
 }
 
 # ---- main --------------------------------------------------------------------------------
-RUNDIR="$(mktemp -d)"
+RUNDIR="$(mktemp -d)" && [ -n "$RUNDIR" ] && [ -d "$RUNDIR" ] \
+  || { echo "GATE ABORT: could not create runner temporary directory" >&2; exit 2; }
 trap 'rm -rf "$RUNDIR"' EXIT
 LAYOUT_T0=$SECONDS
 

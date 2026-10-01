@@ -29,7 +29,8 @@ if ! "$NODE_BIN" -e 'await import("node:sqlite")' >/dev/null 2>&1; then
   exit 0
 fi
 
-TMP="$(mktemp -d)"
+TMP="$(mktemp -d)" && [[ -n "$TMP" && -d "$TMP" ]] \
+    || { echo "FATAL: could not create inspector temporary directory" >&2; exit 1; }
 trap 'rm -rf "$TMP"' EXIT
 THREAD="11111111-1111-4111-8111-111111111111"
 PAGE="00000000-0000-4000-8000-00000000c0de"
@@ -43,6 +44,20 @@ ERR=""
 
 ok(){ echo "  PASS: $1"; PASS=$((PASS+1)); }
 no(){ echo "  FAIL: $1"; FAIL=$((FAIL+1)); }
+fatal(){ echo "FATAL: $*" >&2; exit 1; }
+
+# The historical-comparison leg reads blobs from REPO_ROOT. Clear inherited Git routing and
+# trace variables so that read cannot be redirected or emit trace files outside this fixture.
+while IFS= read -r _git_var; do
+  [[ "${_git_var^^}" == GIT_* ]] && unset "$_git_var"
+done < <(compgen -e)
+for _git_var in $(compgen -e); do
+  [[ "${_git_var^^}" != GIT_* ]] || fatal "could not clear inherited Git variable $_git_var"
+done
+unset _git_var
+export GIT_OPTIONAL_LOCKS=0 GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
+export GIT_ATTR_NOSYSTEM=1 GIT_PAGER=cat GIT_NO_REPLACE_OBJECTS=1
+export GIT_NO_LAZY_FETCH=1 GIT_TERMINAL_PROMPT=0
 
 DB_BUILDER="$TMP/build-db.mjs"
 cat > "$DB_BUILDER" <<'EOF'
@@ -1646,6 +1661,7 @@ assert_case unresolved-candidate-set "inspector root discovery cannot silently r
 # ============================================================================================
 
 REPO_ROOT="$(cd "$TDIR/.." && pwd)"
+export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0="$REPO_ROOT"
 
 # The commit immediately BEFORE --summary landed. AC1 diffs the SHIPPED DEFAULT output against
 # this ref's inspector byte for byte as an explicit compatibility guard for downstream consumers

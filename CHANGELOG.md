@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- Hardened the hermetic test and release harness: top-level temporary roots now
+  fail closed before derived writes, wrapper fixtures resolve only their owned
+  Node/PowerShell/Codex stubs, inherited Git routing and trace variables are
+  removed before fixture and outer-gate Git operations, and localhost UNC
+  probes require an explicit test-only opt-in. The text gate's direct Git child
+  now uses the same sanitized environment as its other Git operations.
+- The public-safety structural traversal now prunes only the selected checkout's
+  `.git` metadata and nested `worktrees` directory. A checkout located beneath a
+  parent `worktrees` directory is therefore scanned, and the gate fails closed
+  unless it enumerates both the checkout root and its own scanner file.
+
 ## [0.1.14] — 2026-09-12
 
 v0.1.14 includes the rollout parser/correlation repair and the version-2 Codex Desktop transport repair. On 2026-09-12, one independently adjudicated wrapper dispatch from the merged primary checkout on Codex Desktop 26.908.4834.0 used autoload plus foreground switch, reached its named dispatch turn's terminal completion, and returned the dispatch-correlated reply on the first printed path. This is one recorded wrapper result on that build. A retained-file metadata census with cutoff 2026-09-12T04:36:57.599666Z covered 7,017 physical rollout files and 7,005 initial session IDs; 1,473 files declared a fork, of which 1,458 declared both an ordinal boundary and a first-record ordinal, 14 declared the ordinal without the boundary, and one declared neither. These are first-record shape counts, not producer-frequency estimates, validated lineage counts, or reader-certification results. Record-owner integrity remains enforced. The earlier dated fork findings remain historical evidence; this census does not establish why retained shapes differ. Normal installed /ipc acceptance, broad Desktop/build/model compatibility, repeatability, automatic exactly-once execution, and production-broker reliability are not established. The live capture did not preserve literal wrapper/waiter argv or exercise the requested 15-minute/two-hour polling cadence. A goal-continuation turn followed the completed dispatch turn and wrote no second reply. Propagation and normal installed-route acceptance remain separate steps.

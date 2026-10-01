@@ -12,7 +12,9 @@ for _cand in "$DIR/../skills/ipc/scripts/codex_ipc_replies.sh" "$DIR/../scripts/
 done
 [[ -n "$SCRIPT" ]] || { echo "FATAL: codex_ipc_replies.sh not found in repo or installed layout" >&2; exit 1; }
 REAL_FIND="$(command -v find)"; REAL_SORT="$(command -v sort)"
-TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
+TMP="$(mktemp -d)" && [[ -n "$TMP" && -d "$TMP" ]] \
+    || { echo "FATAL: could not create reply-view temporary directory" >&2; exit 1; }
+trap 'rm -rf "$TMP"' EXIT
 IPCROOT="$TMP/ipcroot"
 CODEX_IPC_SESSIONS_ROOT="$TMP/sessions"; export CODEX_IPC_SESSIONS_ROOT
 U1="11111111-1111-4111-8111-111111111111"; U2="22222222-2222-4222-8222-222222222222"
@@ -20,6 +22,21 @@ U1="11111111-1111-4111-8111-111111111111"; U2="22222222-2222-4222-8222-222222222
 PASS=0; FAIL=0
 ok(){ echo "  PASS: $1"; PASS=$((PASS+1)); }
 no(){ echo "  FAIL: $1"; FAIL=$((FAIL+1)); }
+fatal(){ echo "FATAL: $*" >&2; exit 1; }
+
+# The T23 wrapper seam performs Git probes. Strip inherited Git routing/tracing before any
+# fixture process runs so an ambient GIT_TRACE* path cannot write outside this temporary root.
+while IFS= read -r _git_var; do
+  [[ "${_git_var^^}" == GIT_* ]] && unset "$_git_var"
+done < <(compgen -e)
+for _git_var in $(compgen -e); do
+  [[ "${_git_var^^}" != GIT_* ]] || fatal "could not clear inherited Git variable $_git_var"
+done
+unset _git_var
+export GIT_OPTIONAL_LOCKS=0 GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
+export GIT_ATTR_NOSYSTEM=1 GIT_PAGER=cat GIT_NO_REPLACE_OBJECTS=1
+export GIT_NO_LAZY_FETCH=1 GIT_TERMINAL_PROMPT=0
+
 reset(){ rm -rf "$IPCROOT"; mkdir -p "$IPCROOT"; }
 mkreply(){ local sid="$1" th="$2" disp="$3" mt="$4" body="$5"; mkdir -p "$IPCROOT/$sid/$th"; printf '%s' "$body" > "$IPCROOT/$sid/$th/$disp.reply.md"; touch -d "@$mt" "$IPCROOT/$sid/$th/$disp.reply.md"; }
 mktask(){ local sid="$1" th="$2" disp="$3"; mkdir -p "$IPCROOT/$sid/$th"; printf 'task' > "$IPCROOT/$sid/$th/$disp.task.md"; }
@@ -227,12 +244,22 @@ if [[ -z "$WRAPPER" ]]; then
   no "T23 seam: handoff_to_codex.sh not found in repo or installed layout"
 else
   bash -n "$WRAPPER" && ok "bash -n handoff_to_codex.sh clean" || no "syntax error in wrapper"
-  SEAMROOT="$TMP/seamroot"; mkdir -p "$SEAMROOT"
-  BIN23="$TMP/bin23"; mkdir -p "$BIN23"
-  printf '#!/usr/bin/env bash\necho "{\\"ok\\":true}"\nexit 0\n' > "$BIN23/node"
-  printf '#!/usr/bin/env bash\nexit 0\n' > "$BIN23/codex"
-  printf '#!/usr/bin/env bash\nexit 0\n' > "$BIN23/powershell.exe"
-  chmod +x "$BIN23"/*
+  SEAMROOT="$TMP/seamroot"; mkdir -p "$SEAMROOT" || fatal "could not create T23 seam root"
+  BIN23="$TMP/bin23"; mkdir -p "$BIN23" || fatal "could not create T23 stub directory"
+  for _stub in node powershell.exe codex; do
+    printf '%s\n' '#!/usr/bin/env bash' \
+      'printf "FATAL: unexpected T23 wrapper child: %s\\n" "${0##*/}" >&2' \
+      'exit 97' > "$BIN23/$_stub" \
+      || fatal "could not materialize T23 $_stub tripwire"
+  done
+  chmod +x "$BIN23"/* || fatal "could not make T23 tripwires executable"
+  for _stub in node powershell.exe codex; do
+    _resolved="$(PATH="$BIN23:$PATH" command -v "$_stub" 2>/dev/null)" \
+      || fatal "T23 $_stub tripwire does not resolve"
+    [[ "$_resolved" == "$BIN23/$_stub" ]] \
+      || fatal "T23 $_stub resolved outside the harness: $_resolved"
+  done
+  unset _stub _resolved
   seam_manifest(){ "$REAL_FIND" "$SEAMROOT" -printf '%p|%s|%T@\n' 2>/dev/null | "$REAL_SORT"; }
   WOUT="$( cd "$TMP" && CODEX_IPC_ROOT="$SEAMROOT" CLAUDE_CODE_SESSION_ID=seam23 PATH="$BIN23:$PATH" bash "$WRAPPER" "seam probe task" 2>&1 )"; WRC=$?
   wtask="$("$REAL_FIND" "$SEAMROOT/seam23" -name '*.task.md' -type f 2>/dev/null | head -1)"

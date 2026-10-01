@@ -16,7 +16,8 @@ for candidate in \
 done
 [[ -n "$WAIT" ]] || { echo "FAIL: codex_ipc_wait.mjs not found" >&2; exit 1; }
 
-TMP="$(mktemp -d)"
+TMP="$(mktemp -d)" && [[ -n "$TMP" && -d "$TMP" ]] \
+    || { echo "FATAL: could not create waiter temporary directory" >&2; exit 1; }
 trap 'rm -rf "$TMP"' EXIT
 
 WAIT="$WAIT" TMPDIR_TEST="$TMP" node --input-type=module <<'NODE'

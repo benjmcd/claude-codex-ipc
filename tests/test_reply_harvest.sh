@@ -20,7 +20,9 @@ HARVESTER="$(resolve_script codex_ipc_reply_harvest.mjs)" || { echo "FAIL: harve
 OBSERVER="$(resolve_script codex_ipc_rollout_observe.mjs)" || { echo "FAIL: observer not found" >&2; exit 1; }
 VIEWER="$(resolve_script codex_ipc_replies.sh)" || { echo "FAIL: viewer not found" >&2; exit 1; }
 FIXTURES="$DIR/fixtures/rollout"
-TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
+TMP="$(mktemp -d)" && [[ -n "$TMP" && -d "$TMP" ]] \
+    || { echo "FATAL: could not create reply-harvest temporary directory" >&2; exit 1; }
+trap 'rm -rf "$TMP"' EXIT
 
 if ! HARVESTER="$HARVESTER" OBSERVER="$OBSERVER" FIXTURES="$FIXTURES" TMPDIR_TEST="$TMP" \
   node --input-type=module <<'NODE'

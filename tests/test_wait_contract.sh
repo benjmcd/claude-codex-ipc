@@ -64,7 +64,8 @@ if ! command -v node >/dev/null 2>&1; then
 fi
 
 NODE_BIN="$(command -v node)"
-TMP="$(mktemp -d)"
+TMP="$(mktemp -d)" && [[ -n "$TMP" && -d "$TMP" ]] \
+    || { echo "FATAL: could not create wait-contract temporary directory" >&2; exit 1; }
 trap 'rm -rf "$TMP"' EXIT
 
 THREAD="11111111-1111-4111-8111-111111111111"

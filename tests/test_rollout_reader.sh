@@ -16,7 +16,8 @@ for candidate in \
 done
 [[ -n "$MODULE" ]] || { echo "FAIL: codex_ipc_rollout_reader.mjs not found" >&2; exit 1; }
 
-TMP="$(mktemp -d)"
+TMP="$(mktemp -d)" && [[ -n "$TMP" && -d "$TMP" ]] \
+    || { echo "FATAL: could not create rollout-reader temporary directory" >&2; exit 1; }
 trap 'rm -rf "$TMP"' EXIT
 
 MODULE="$MODULE" FIXTURES="$DIR/fixtures/rollout" TMPDIR_TEST="$TMP" node --input-type=module <<'NODE'

@@ -21,9 +21,9 @@
 #   remove anything.
 # - Junction/symlink behavior. True of symlinks, which need SeCreateSymbolicLinkPrivilege;
 #   NOT true of directory junctions (`mklink /J` needs no elevation), so the ancestor-reparse
-#   arm is testable and simply is not tested yet. An earlier version of this line lumped UNC
-#   in as equally unconstructible; it is not, and UNC IS asserted below wherever an admin
-#   share is reachable.
+#   arm is testable and simply is not tested yet. UNC is asserted only when the caller
+#   explicitly opts in with IPC_TEST_UNC_PROBES=1; the default release gate never performs
+#   a localhost SMB reachability probe.
 #
 # PORTABILITY:
 # This suite runs on BOTH CI legs (.github/workflows/test.yml). Several assertions below encode
@@ -49,6 +49,12 @@ ok(){ echo "  PASS: $1"; PASS=$((PASS+1)); }
 no(){ echo "  FAIL: $1"; FAIL=$((FAIL+1)); }
 # Indented and parenthesized on purpose -- see PORTABILITY in the header.
 skip(){ echo "  (SKIP: $1)"; SKIP=$((SKIP+1)); }
+
+UNC_PROBE_MODE="${IPC_TEST_UNC_PROBES:-0}"
+case "$UNC_PROBE_MODE" in
+    0|1) ;;
+    *) echo "FATAL: IPC_TEST_UNC_PROBES must be 0 or 1" >&2; exit 1 ;;
+esac
 
 if [[ ! -f "$UNINSTALL" ]]; then
     echo "SKIP: uninstall.sh not present at $UNINSTALL (installed-skill layout)"
@@ -111,15 +117,20 @@ UNC_PREFIX=""
 if [[ "$ROOT" =~ ^/([A-Za-z])/ ]]; then UNC_PREFIX="//localhost/${BASH_REMATCH[1]}\$"; fi
 UNC_SRC=""
 [[ -n "$UNC_PREFIX" ]] && UNC_SRC="${UNC_PREFIX}${ROOT#/?}"
-if [[ -n "$UNC_SRC" && -d "$UNC_SRC/skills/ipc" ]]; then
-    refuses "$UNC_SRC/skills/ipc" "UNC respelling of the source tree is refused"
+if [[ "$UNC_PROBE_MODE" == "1" ]]; then
+    if [[ -n "$UNC_SRC" && -d "$UNC_SRC/skills/ipc" ]]; then
+        refuses "$UNC_SRC/skills/ipc" "UNC respelling of the source tree is refused"
+    else
+        skip "UNC respelling of the source tree: admin share unreachable for \"$ROOT\""
+    fi
+    if [[ -n "$UNC_PREFIX" && -d "$UNC_PREFIX/" ]]; then
+        refuses "$UNC_PREFIX/" "UNC root is refused"
+    else
+        skip "UNC root: admin share unreachable for \"$ROOT\""
+    fi
 else
-    skip "UNC respelling of the source tree: admin share unreachable for \"$ROOT\""
-fi
-if [[ -n "$UNC_PREFIX" && -d "$UNC_PREFIX/" ]]; then
-    refuses "$UNC_PREFIX/" "UNC root is refused"
-else
-    skip "UNC root: admin share unreachable for \"$ROOT\""
+    skip "UNC respelling of the source tree: probes disabled (set IPC_TEST_UNC_PROBES=1 to opt in)"
+    skip "UNC root: probes disabled (set IPC_TEST_UNC_PROBES=1 to opt in)"
 fi
 
 echo "== 2. case variants are refused (the bypass this suite exists for) =="

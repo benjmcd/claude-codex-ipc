@@ -36,7 +36,8 @@ command -v node >/dev/null 2>&1 || { echo "FAIL: node not on PATH (required by r
 
 is_windows() { case "$(uname -s 2>/dev/null)" in *NT*|*MINGW*|*MSYS*|*CYGWIN*) return 0;; *) return 1;; esac; }
 
-WORK="$(mktemp -d)"
+WORK="$(mktemp -d)" && [ -n "$WORK" ] && [ -d "$WORK" ] \
+  || { echo "FAIL: could not create process-ownership temporary directory" >&2; exit 1; }
 SLEEPER_PIDS=()
 cleanup() {
   local p
