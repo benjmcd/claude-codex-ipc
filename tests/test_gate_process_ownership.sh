@@ -34,36 +34,120 @@ TDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RUNNER="$TDIR/run_release_gates.sh"
 [ -f "$RUNNER" ] || { echo "FAIL: runner not found at $RUNNER"; exit 1; }
 
-# Pure, table-driven checks use the very same classifier as live enumeration. This
+# Pure, table-driven checks use the same stat parser and classifiers as live enumeration. This
 # mode exits before temporary files, enumeration, child launch, or any cleanup.
 CLASSIFIER_ONLY=0
 if [ "${1:-}" = --classifier-only ] && [ "$#" -eq 1 ]; then CLASSIFIER_ONLY=1; fi
 run_classifier_cases() (
   source "$RUNNER"
+  # Retained read-only local record: Git-for-Windows MSYS 3.6.6-1cdd4371.
+  local retained='1927 (cat) R 1 1927 1927 0 -1 0 2551 2551 0 0 31 15 31 15 20 0 0 0 84028164 5758976 1469 1413120'
+  local parser_names=(retained spaces nested trailing last-close truncated invalid-start mismatched-pid unknown-state)
+  local parser_rows=("$retained" "${retained/\(cat\)/(node child)}" "${retained/\(cat\)/(node (child))}"
+    "${retained/\(cat\)/(node child)))}" "${retained/\(cat\)/(node) child))}"
+    "${retained/84028164 5758976 1469 1413120/}" "${retained/84028164/not-a-start}" "$retained" "${retained/ R / Q }")
+  local parser_pids=(1927 1927 1927 1927 1927 1927 1927 1928 1927)
+  local parser_expected=('1927 R 1 84028164' '1927 R 1 84028164' '1927 R 1 84028164'
+    '1927 R 1 84028164' '1927 R 1 84028164' ERROR ERROR ERROR ERROR)
+  local i rc got failed=0
+  for i in "${!parser_names[@]}"; do
+    parse_msys_stat "${parser_pids[$i]}" "${parser_rows[$i]}"; rc=$?
+    got="$MSYS_STAT_PID $MSYS_STAT_STATE $MSYS_STAT_PPID $MSYS_STAT_START"
+    if { [ "$rc" -eq 0 ] && [ "$got" = "${parser_expected[$i]}" ]; } \
+      || { [ "$rc" -ne 0 ] && [ "${parser_expected[$i]}" = ERROR ]; }; then
+      echo "PASS: stat parser ${parser_names[$i]}"
+    else
+      echo "FAIL: stat parser ${parser_names[$i]} rc=$rc got=$got"; failed=$((failed + 1))
+    fi
+  done
+  stat_record() {
+    local fields=() suffix="${retained#*') '}"
+    read -r -a fields <<<"$suffix"
+    fields[0]="$3"; fields[1]="$2"; fields[19]="$4"
+    printf '%s (node child) %s\n' "$1" "${fields[*]}"
+  }
+  local stat_r stat_s stat_dead stat_start stat_parent
+  stat_r="$(stat_record 200 100 R 84028166)"; stat_s="$(stat_record 200 100 S 84028166)"
+  stat_dead="$(stat_record 200 100 Z 84028166)"; stat_start="$(stat_record 200 100 S 84028167)"
+  stat_parent="$(stat_record 200 999 S 84028166)"
+  local endpoint_names=(state-change unknown-state dead winpid-change start-change ppid-change invalid-winpid invalid-stat)
+  local endpoint_stat2=("$stat_s" "${stat_s/ S / Q }" "$stat_dead" "$stat_s" "$stat_start" "$stat_parent" "$stat_s" "${stat_s/84028166/bad}")
+  local endpoint_win2=(2000 2000 2000 2001 2000 2000 0 2000)
+  local endpoint_expected=('LIVE 200 100 84028166 2000' 'MALFORMED 200' 'DEAD 200' 'TRANSITION 200' 'TRANSITION 200' 'TRANSITION 200' 'MALFORMED 200' 'MALFORMED 200')
+  for i in "${!endpoint_names[@]}"; do
+    got="$(classify_msys_endpoint 200 "$stat_r" 2000 "${endpoint_stat2[$i]}" "${endpoint_win2[$i]}")"
+    if [ "$got" = "${endpoint_expected[$i]}" ]; then echo "PASS: endpoint ${endpoint_names[$i]}"
+    else echo "FAIL: endpoint ${endpoint_names[$i]} got=$got"; failed=$((failed + 1)); fi
+  done
   RUNNER_PID=100
   RUNNER_WINPID=1000
   RUNNER_CREATED=20261001000000000000
-  local base=$'PS PID PPID PGID WINPID TTY UID STIME COMMAND\nPS 100 1 100 1000 ? 1 00:00 bash\nCIM SELF 9000\nCIM 9000 1000 powershell.exe 20261001000009000000\nCIM 1000 0 bash.exe 20261001000000000000'
-  local names=() expected=() inputs=() pins=() times=() cutoffs=()
+  RUNNER_MSYS_START=84028164
+  local base=$'PS PID PPID PGID WINPID TTY UID STIME COMMAND\nPS 100 1 100 1000 ? 1 00:00 bash\nPS 101 100 100 1001 ? 1 00:01 bash\nPRE LIVE 100 1 84028164 1000\nPOST LIVE 100 1 84028164 1000\nPRE LIVE 101 100 84028165 1001\nPOST LIVE 101 100 84028165 1001\nCIM SELF 9000\nCIM 9000 1001 powershell.exe 20261001000009000000\nCIM 1001 1000 bash.exe 20261001000001000000\nCIM 1000 0 bash.exe 20261001000000000000'
+  local mapped=$'\nPS 200 100 100 2000 ? 1 00:02 node\nPRE LIVE 200 100 84028166 2000\nPOST LIVE 200 100 84028166 2000\nCIM 2000 7777 node.exe 20261001000002000000'
+  local names=() expected=() inputs=() pins=() times=() starts=()
   add_case() {
     names+=("$1"); expected+=("$2"); inputs+=("$3")
     pins+=("${4:-1000}"); times+=("${5:-20261001000000000000}")
-    cutoffs+=("${6-20261001000008000000}")
+    starts+=("${6-84028164}")
   }
   add_case empty-owned '' "$base"
-  add_case zero-root '' "$base"$'\nPS 200 100 100 0 ? 1 00:01 <defunct>\nCIM 3000 0 node.exe 20261001000002000000'
-  add_case missing-root '' "$base"$'\nPS 200 100 100 2000 ? 1 00:01 bash\nCIM 3000 2000 node.exe 20261001000002000000'
-  add_case stale-root ERROR "$base"$'\nPS 200 100 100 2000 ? 1 00:01 bash\nCIM 2000 0 bash.exe 20260930235959000000\nCIM 3000 2000 node.exe 20261001000002000000'
+  add_case zero-root '' "$base"$'\nPS 200 100 100 0 ? 1 00:01 <defunct>\nPRE DEAD 200\nPOST DEAD 200\nCIM 3000 0 node.exe 20261001000002000000'
+  add_case unavailable-root '' "$base"$'\nPS 200 100 100 2000 ? 1 00:01 bash\nPRE MISSING 200\nPOST MISSING 200\nCIM 3000 2000 node.exe 20261001000002000000'
+  add_case stale-root ERROR "$base${mapped/20261001000002000000/20260930235959000000}"
   add_case recycled-parent '' "$base"$'\nCIM 2000 1000 bash.exe 20261001000004000000\nCIM 3000 2000 node.exe 20261001000002000000'
   add_case older-candidate '' "$base"$'\nCIM 3000 1000 node.exe 20260930235959000000'
-  add_case status-prefix 3000 "$base"$'\nPS I 200 100 100 2000 ? 1 00:01 bash\nCIM 2000 0 bash.exe 20261001000001000000\nCIM 3000 2000 node.exe 20261001000002000000'
-  add_case status-defunct '' "$base"$'\nPS Z 200 100 100 0 ? 1 00:01 <defunct>\nCIM 3000 0 node.exe 20261001000002000000'
-  add_case replacement-root ERROR "$base"$'\nPS 200 100 100 2000 ? 1 00:01 bash\nCIM 2000 0 node.exe 20261001000008000001'
-  add_case cutoff-equality ERROR "$base"$'\nPS 200 100 100 2000 ? 1 00:01 bash\nCIM 2000 0 node.exe 20261001000008000000'
-  add_case defunct-replacement '' "$base"$'\nPS I 200 100 100 2000 ? 1 00:01 <defunct>\nCIM 2000 0 node.exe 20261001000008000001'
-  add_case missing-cutoff ERROR "$base" 1000 20261001000000000000 ''
-  add_case malformed-cutoff ERROR "$base" 1000 20261001000000000000 not-a-cutoff
-  add_case valid-mapped-root 2000 "$base"$'\nPS 200 100 100 2000 ? 1 00:01 node\nCIM 2000 7777 node.exe 20261001000001000000'
+  add_case status-prefix 2000 "$base${mapped/PS 200/PS I 200}"
+  add_case status-defunct '' "$base"$'\nPS Z 200 100 100 0 ? 1 00:01 <defunct>\nPRE DEAD 200\nPOST DEAD 200\nCIM 3000 0 node.exe 20261001000002000000'
+  add_case born-during-snapshot 2000 "$base${mapped/20261001000002000000/20261001000008000001}"
+  add_case defunct-replacement ERROR "$base${mapped/00:02 node/00:02 <defunct>}"
+  add_case valid-mapped-root 2000 "$base$mapped"
+  local state_pre state_post state_mapped
+  state_pre="$(classify_msys_endpoint 200 "$stat_r" 2000 "$stat_s" 2000)"
+  state_post="$(classify_msys_endpoint 200 "$stat_s" 2000 "$stat_r" 2000)"
+  state_mapped="${mapped/PRE LIVE 200 100 84028166 2000/PRE $state_pre}"
+  state_mapped="${state_mapped/POST LIVE 200 100 84028166 2000/POST $state_post}"
+  add_case state-changes-count 2000 "$base$state_mapped"
+  add_case ps-pre-winpid-mismatch ERROR "$base${mapped/PRE LIVE 200 100 84028166 2000/PRE LIVE 200 100 84028166 2001}"
+  add_case ps-parent-mismatch ERROR "$base${mapped/PS 200 100/PS 200 999}"
+  add_case winpid-change ERROR "$base${mapped/POST LIVE 200 100 84028166 2000/POST LIVE 200 100 84028166 2001}"
+  add_case start-change ERROR "$base${mapped/POST LIVE 200 100 84028166/POST LIVE 200 100 84028167}"
+  local opaque_mapped="${mapped//84028166/9007199254740992}"
+  add_case opaque-start-change ERROR "$base${opaque_mapped/POST LIVE 200 100 9007199254740992/POST LIVE 200 100 9007199254740993}"
+  add_case ppid-change ERROR "$base${mapped/POST LIVE 200 100/POST LIVE 200 999}"
+  add_case pre-missing ERROR "$base${mapped/PRE LIVE 200 100 84028166 2000/PRE MISSING 200}"
+  add_case post-missing ERROR "$base${mapped/POST LIVE 200 100 84028166 2000/POST MISSING 200}"
+  add_case pre-dead ERROR "$base${mapped/PRE LIVE 200 100 84028166 2000/PRE DEAD 200}"
+  add_case post-dead ERROR "$base${mapped/POST LIVE 200 100 84028166 2000/POST DEAD 200}"
+  add_case transition ERROR "$base${mapped/POST LIVE 200 100 84028166 2000/POST TRANSITION 200}"
+  add_case missing-pre-record ERROR "$base${mapped/PRE LIVE 200 100 84028166 2000/}"
+  add_case missing-post-record ERROR "$base${mapped/POST LIVE 200 100 84028166 2000/}"
+  add_case duplicate-pre-record ERROR "$base$mapped"$'\nPRE LIVE 200 100 84028166 2000'
+  add_case duplicate-post-record ERROR "$base$mapped"$'\nPOST LIVE 200 100 84028166 2000'
+  local unavailable=$'\nPS 200 100 100 2000 ? 1 00:02 bash\nPRE LIVE 200 100 84028166 2000\nPOST MISSING 200'
+  add_case unrelated-unavailable '' "$base$unavailable"
+  local uncertain_shell="$base$unavailable"$'\nCIM 2000 7777 bash.exe 20261001000002000000'
+  add_case uncertain-non-node '' "$uncertain_shell"
+  add_case node-behind-uncertain-shell ERROR "$uncertain_shell"$'\nCIM 3000 2000 node.exe 20261001000003000000'
+  add_case unrelated-missing-pre-record ERROR "$base${unavailable/PRE LIVE 200 100 84028166 2000/}"
+  add_case unrelated-missing-post-record ERROR "$base${unavailable/POST MISSING 200/}"
+  local foreign_unavailable="${unavailable/PS 200 100/PS 200 999}"
+  foreign_unavailable="${foreign_unavailable/PRE LIVE 200 100/PRE LIVE 200 999}"
+  add_case foreign-unavailable-candidate '' "$base$foreign_unavailable"$'\nCIM 2000 7777 node.exe 20261001000002000000'
+  add_case alternative-windows-path 2000 "$base${mapped/POST LIVE 200 100 84028166 2000/POST TRANSITION 200}"$'\nCIM 7777 1000 bash.exe 20261001000001000000'
+  add_case unreadable ERROR "$base${mapped/POST LIVE 200 100 84028166 2000/POST MALFORMED 200}"
+  add_case stable-missing-cim ERROR "$base${mapped/CIM 2000 7777 node.exe 20261001000002000000/}"
+  add_case unavailable-intermediate ERROR "$base$unavailable"$'\nPS 300 200 100 3000 ? 1 00:03 node\nPRE LIVE 300 200 84028167 3000\nPOST LIVE 300 200 84028167 3000\nCIM 3000 7777 node.exe 20261001000003000000'
+  add_case three-behind-unavailable ERROR "$base$unavailable"$'\nCIM 2000 7777 bash.exe 20261001000002000000\nCIM 3000 2000 node.exe 20261001000003000000\nCIM 3001 2000 node.exe 20261001000003000000\nCIM 3002 2000 node.exe 20261001000003000000'
+  add_case runner-pre-missing ERROR "${base/PRE LIVE 100 1 84028164 1000/PRE MISSING 100}"
+  add_case runner-post-change ERROR "${base/POST LIVE 100 1 84028164/POST LIVE 100 1 84028165}"
+  add_case runner-start-pin ERROR "$base" 1000 20261001000000000000 84028165
+  add_case enum-owner-missing ERROR "${base/POST LIVE 101 100 84028165 1001/POST MISSING 101}"
+  add_case enum-owner-change ERROR "${base/POST LIVE 101 100 84028165 1001/POST LIVE 101 100 84028166 1001}"
+  local invalid_book="${base/PS 101 100/PS 101 150}"
+  invalid_book="${invalid_book/PRE LIVE 101 100/PRE LIVE 101 150}"
+  invalid_book="${invalid_book/POST LIVE 101 100/POST LIVE 101 150}"
+  add_case invalid-bookkeeping ERROR "$invalid_book"$'\nPS 150 100 100 3000 ? 1 00:01 bash\nPRE MISSING 150\nPOST MISSING 150\nCIM 3000 1000 node.exe 20261001000002000000'
   add_case microsecond-pin ERROR "$base" 1000 20261001000000000001
   add_case microsecond-duplicate ERROR "$base"$'\nCIM 1000 0 bash.exe 20261001000000000001'
   add_case microsecond-parent '' "$base"$'\nCIM 2000 1000 bash.exe 20261001000002000001\nCIM 3000 2000 node.exe 20261001000002000000'
@@ -81,13 +165,14 @@ run_classifier_cases() (
   add_case three-descendants '3000 3001 3002' "$base"$'\nCIM 3000 1000 node.exe 20261001000001000000\nCIM 3001 3000 node.exe 20261001000002000000\nCIM 3002 3001 node.exe 20261001000003000000'
   # The logical MSYS child predates its logical parent after exec-style remapping.
   # Both remain newer than the runner; applying Windows chronology here loses 3000.
-  add_case msys-exec 3000 "$base"$'\nPS 200 100 100 2000 ? 1 00:04 bash\nPS 300 200 100 3000 ? 1 00:02 node\nCIM 2000 0 bash.exe 20261001000004000000\nCIM 3000 7777 node.exe 20261001000002000000'
+  add_case msys-exec 3000 "$base"$'\nPS 200 100 100 2000 ? 1 00:04 bash\nPS 300 200 100 3000 ? 1 00:02 node\nPRE LIVE 200 100 84028166 2000\nPOST LIVE 200 100 84028166 2000\nPRE LIVE 300 200 84028167 3000\nPOST LIVE 300 200 84028167 3000\nCIM 2000 0 bash.exe 20261001000004000000\nCIM 3000 7777 node.exe 20261001000002000000'
   add_case windows-cycle ERROR "$base"$'\nCIM 2000 2001 bash.exe 20261001000002000000\nCIM 2001 2000 node.exe 20261001000002000000'
-  add_case msys-cycle ERROR "$base"$'\nPS 200 201 100 2000 ? 1 00:01 bash\nPS 201 200 100 2001 ? 1 00:01 bash'
-  local i out rc got failed=0
+  add_case msys-cycle ERROR "$base"$'\nPS 200 201 100 2000 ? 1 00:01 bash\nPS 201 200 100 2001 ? 1 00:01 bash\nPRE LIVE 200 201 84028166 2000\nPOST LIVE 200 201 84028166 2000\nPRE LIVE 201 200 84028167 2001\nPOST LIVE 201 200 84028167 2001\nCIM 2000 0 bash.exe 20261001000001000000\nCIM 2001 0 bash.exe 20261001000001000000'
+  local out
   for i in "${!names[@]}"; do
     RUNNER_WINPID="${pins[$i]}"; RUNNER_CREATED="${times[$i]}"
-    out="$(printf '%s\n' "${inputs[$i]}" | classify_windows_process_rows 0 "${cutoffs[$i]}")"; rc=$?
+    RUNNER_MSYS_START="${starts[$i]}"
+    out="$(printf '%s\n' "${inputs[$i]}" | classify_windows_process_rows 101)"; rc=$?
     got="$(printf '%s\n' "$out" | awk '$1 != "RUNNER" && tolower($2) == "node.exe" { print $1 }' | sort -n | paste -sd ' ' -)"
     if { [ "${expected[$i]}" = ERROR ] && [ "$rc" -ne 0 ] && [[ "$out" == ENUM_ERROR:* ]] && [[ "$out" != *$'\n'* ]]; } \
       || { [ "${expected[$i]}" != ERROR ] && [ "$rc" -eq 0 ] && [ "$got" = "${expected[$i]}" ] && [[ "$out" == RUNNER\ * ]]; }; then
@@ -98,7 +183,7 @@ run_classifier_cases() (
     fi
   done
   [ "$failed" -eq 0 ] || return 1
-  echo "process classifier: ALL PASS (${#names[@]} cases)"
+  echo "process classifier/parser: ALL PASS (${#names[@]} ownership, ${#parser_names[@]} parser, ${#endpoint_names[@]} endpoint cases)"
 )
 run_classifier_cases || exit 1
 [ "$CLASSIFIER_ONLY" -eq 0 ] || exit 0

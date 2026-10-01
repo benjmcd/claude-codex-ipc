@@ -31,8 +31,9 @@
 # (exit 3) — an owned count of 0 is never fabricated from a failed measurement.
 # KNOWN LIMITATION (documented, NOT covered): an owned node whose intermediate parents
 # already exited (orphan/reparent; or rejected Windows PID reuse breaking a chain) can no longer be
-# attributed by ancestry and escapes the bound. The Windows mapped-root cutoff also assumes UTC
-# does not step backward during one process-table sample.
+# attributed by ancestry and escapes the bound. Windows MSYS anchors are sampled before/after
+# CIM using /proc identity continuity. Node attribution depending on a vanished or changing
+# sampled anchor/intermediate fails measurement; only certified identities enter cleanup.
 #
 # Usage:
 #   run_release_gates.sh                 # preflight + 13 suites + text/docs/manifest/safety/contract
@@ -128,14 +129,85 @@ is_windows() { case "$(uname -s 2>/dev/null)" in *NT*|*MINGW*|*MSYS*|*CYGWIN*) r
 RUNNER_PID=$$
 RUNNER_WINPID=""
 RUNNER_CREATED=""
+RUNNER_MSYS_START=""
+
+# Pure Git-for-Windows /proc stat parser. The comm field may contain spaces or
+# parentheses; consume through its last closing ") " before indexing the suffix.
+# Field 22 (suffix token 20) is retained as opaque decimal text, never clock-converted.
+parse_msys_stat() {
+  local expected="$1" record="$2" suffix fields=()
+  MSYS_STAT_PID="" MSYS_STAT_STATE="" MSYS_STAT_PPID="" MSYS_STAT_START=""
+  [[ "$record" =~ ^([1-9][0-9]*)[[:space:]]+\(.*\)[[:space:]](.*)$ ]] || return 1
+  MSYS_STAT_PID="${BASH_REMATCH[1]}"; suffix="${BASH_REMATCH[2]}"
+  [ "$MSYS_STAT_PID" = "$expected" ] || return 1
+  read -r -a fields <<<"$suffix"
+  [ "${#fields[@]}" -ge 20 ] || return 1
+  # Known /proc live states R/S/D/T/t/W/K/P/I and dead states Z/X/x; unknown states fail closed.
+  [[ "${fields[0]}" =~ ^[RSDTtWKPIZXx]$ && "${fields[1]}" =~ ^[0-9]+$ && "${fields[19]}" =~ ^[0-9]+$ ]] || return 1
+  MSYS_STAT_STATE="${fields[0]}"; MSYS_STAT_PPID="${fields[1]}"; MSYS_STAT_START="${fields[19]}"
+}
+
+unreadable_msys_endpoint() {
+  if [ -d "/proc/$2" ]; then printf '%s MALFORMED %s\n' "$1" "$2"
+  else printf '%s MISSING %s\n' "$1" "$2"; fi
+}
+
+# Pure endpoint classifier, shared with fixtures that exercise state and identity churn.
+classify_msys_endpoint() {
+  local p="$1" stat1="$2" win1="$3" stat2="$4" win2="$5" pid1 parent1 start1 state1
+  if ! parse_msys_stat "$p" "$stat1"; then printf 'MALFORMED %s\n' "$p"; return; fi
+  pid1="$MSYS_STAT_PID"; parent1="$MSYS_STAT_PPID"; start1="$MSYS_STAT_START"; state1="$MSYS_STAT_STATE"
+  if ! parse_msys_stat "$p" "$stat2"; then printf 'MALFORMED %s\n' "$p"; return; fi
+  if [[ "$state1" == [ZXx] || "$MSYS_STAT_STATE" == [ZXx] ]]; then
+    printf 'DEAD %s\n' "$p"; return
+  fi
+  if [[ ! "$win1" =~ ^[1-9][0-9]*$ || ! "$win2" =~ ^[1-9][0-9]*$ ]]; then
+    printf 'MALFORMED %s\n' "$p"; return
+  fi
+  if [ "$pid1" != "$MSYS_STAT_PID" ] || [ "$parent1" != "$MSYS_STAT_PPID" ] \
+    || [ "$start1" != "$MSYS_STAT_START" ] || [ "$win1" != "$win2" ]; then
+    printf 'TRANSITION %s\n' "$p"; return
+  fi
+  printf 'LIVE %s %s %s %s\n' "$p" "$parent1" "$start1" "$win1"
+}
+
+# Builtins only: each PS-listed logical PID is read stat1 -> winpid1 -> stat2 -> winpid2.
+# A phase emits one explicit availability result; changing R/S is not identity churn.
+collect_msys_endpoints() {
+  local phase="$1" table="$2" line fields=() p stat1 stat2 win1 win2
+  local -A listed=()
+  while IFS= read -r line; do
+    read -r -a fields <<<"$line"
+    if [[ "${fields[0]:-}" =~ ^[A-Z]$ ]]; then fields=("${fields[@]:1}"); fi
+    p="${fields[0]:-}"
+    [[ "$p" =~ ^[1-9][0-9]*$ ]] && listed["$p"]=1
+  done <<<"$table"
+  for p in "${!listed[@]}"; do
+    stat1=""; stat2=""; win1=""; win2=""
+    if ! { IFS= read -r stat1 <"/proc/$p/stat" || [ -n "$stat1" ]; } 2>/dev/null; then
+      unreadable_msys_endpoint "$phase" "$p"; continue
+    fi
+    if ! { IFS= read -r win1 <"/proc/$p/winpid" || [ -n "$win1" ]; } 2>/dev/null; then
+      unreadable_msys_endpoint "$phase" "$p"; continue
+    fi
+    if ! { IFS= read -r stat2 <"/proc/$p/stat" || [ -n "$stat2" ]; } 2>/dev/null; then
+      unreadable_msys_endpoint "$phase" "$p"; continue
+    fi
+    if ! { IFS= read -r win2 <"/proc/$p/winpid" || [ -n "$win2" ]; } 2>/dev/null; then
+      unreadable_msys_endpoint "$phase" "$p"; continue
+    fi
+    printf '%s ' "$phase"
+    classify_msys_endpoint "$p" "$stat1" "$win1" "$stat2" "$win2"
+  done
+}
 
 # Pure classifier shared by live enumeration and deterministic ownership fixtures.
-# Input: PS <raw MSYS row>, CIM SELF <pid>, CIM <pid> <ppid> <name> <UTC creation>.
+# Input: PS <raw MSYS row>; PRE/POST <status> <pid> [<ppid> <start> <winpid>];
+# CIM SELF <pid>; CIM <pid> <ppid> <name> <UTC creation>.
 # UTC identities use yyyyMMddHHmmssffffff (the common CIM/.NET microsecond precision).
 classify_windows_process_rows() {
   awk -v me="$RUNNER_PID" -v enummsys="${1:-0}" \
-      -v cutoff="${2:-}" \
-      -v pinnedpid="$RUNNER_WINPID" -v pinnedtime="$RUNNER_CREATED" '
+      -v pinnedpid="$RUNNER_WINPID" -v pinnedtime="$RUNNER_CREATED" -v pinnedstart="$RUNNER_MSYS_START" '
     function fail(s) { error = s }
     function positive(s) { return s ~ /^[0-9]+$/ && s + 0 > 0 }
     function timestamp(s,yr,mo,day,days) {
@@ -148,6 +220,12 @@ classify_windows_process_rows() {
     }
     function before(a,b) { return ("t" a) < ("t" b) }
     function same(a,b) { return ("t" a) == ("t" b) }
+    function stable(p,a,b) {
+      a = "PRE" SUBSEP p; b = "POST" SUBSEP p
+      return !mdead[p] && estate[a] == "LIVE" && estate[b] == "LIVE" &&
+             same(eparent[a],eparent[b]) && same(estart[a],estart[b]) && same(ewin[a],ewin[b]) &&
+             same(eparent[a],mppid[p]) && same(ewin[a],mwin[p])
+    }
     $1 == "PS" {
       i = 2; status = ""
       if ($i ~ /^[A-Z]$/) { status = $i; i++ } # optional MSYS status prefix
@@ -162,6 +240,20 @@ classify_windows_process_rows() {
         fail("conflicting MSYS process row"); next
       }
       mppid[p] = parent; mwin[p] = win; mdead[p] = dead; next
+    }
+    $1 == "PRE" || $1 == "POST" {
+      if (!positive($3) || !($3 in mppid) ||
+          ($2 != "LIVE" && $2 != "DEAD" && $2 != "MISSING" && $2 != "TRANSITION" && $2 != "MALFORMED") ||
+          ($2 == "LIVE" && (NF != 6 || $4 !~ /^[0-9]+$/ || $5 !~ /^[0-9]+$/ || !positive($6))) ||
+          ($2 != "LIVE" && NF != 3)) {
+        fail("malformed MSYS endpoint record"); next
+      }
+      key = $1 SUBSEP $3
+      if (++ecount[key] != 1) {
+        fail("duplicate MSYS endpoint record"); next
+      }
+      if ($2 == "MALFORMED") fail("malformed or unreadable MSYS endpoint")
+      estate[key] = $2; eparent[key] = $4; estart[key] = $5; ewin[key] = $6; next
     }
     $1 == "CIM" && $2 == "SELF" {
       if (NF != 3 || !positive($3) || (enumself != "" && enumself != $3))
@@ -179,18 +271,21 @@ classify_windows_process_rows() {
     }
     NF { fail("unexpected process row") }
     END {
-      if (!timestamp(cutoff)) fail("missing or malformed MSYS snapshot cutoff")
       runner = (me in mwin ? mwin[me] : "")
-      if (mdead[me] || !positive(runner))
-        fail("runner has no current CIM-backed WINPID")
-      else if (!(runner in wppid))
-        fail("runner has no current CIM-backed WINPID")
+      if (!(me in mppid) || !stable(me)) fail("runner MSYS continuity unavailable")
+      if (!positive(enummsys) || !(enummsys in mppid) || !stable(enummsys))
+        fail("enumeration-owner MSYS continuity unavailable")
+      for (p in mppid) {
+        if (ecount["PRE" SUBSEP p] != 1 || ecount["POST" SUBSEP p] != 1)
+          fail("missing or duplicate MSYS endpoint record")
+        if (stable(p) && !(mwin[p] in wppid)) fail("stable MSYS identity absent from Win32 snapshot")
+      }
       if (!positive(enumself) || !(enumself in wppid))
         fail("enumerator absent from Win32 snapshot")
       if (error != "") { print "ENUM_ERROR:" error; exit 1 }
-      created = wtime[runner]
-      if ((pinnedpid != "" || pinnedtime != "") &&
-          (runner != pinnedpid || !same(created,pinnedtime)))
+      created = wtime[runner]; runnerstart = estart["PRE" SUBSEP me]
+      if ((pinnedpid != "" || pinnedtime != "" || pinnedstart != "") &&
+          (runner != pinnedpid || !same(created,pinnedtime) || !same(runnerstart,pinnedstart)))
         fail("runner identity changed across samples")
       # Logical MSYS edges can span fork/exec stubs; they have no time ordering.
       for (p in mppid) {
@@ -198,43 +293,69 @@ classify_windows_process_rows() {
         while (cur in mppid) {
           if (seen[cur] == walk) { fail("MSYS parent cycle"); break }
           seen[cur] = walk
+          if (!stable(cur)) break # Unavailable logical intermediates cannot confer ownership.
           if (cur == me) { hit = 1; break }
           cur = mppid[cur]
         }
         win = mwin[p]
-        if (hit && !mdead[p] && positive(win) && win in wppid) {
-          if (before(wtime[win],created) || !before(wtime[win],cutoff))
+        if (hit && positive(win) && win in wppid) {
+          if (before(wtime[win],created))
             fail("ambiguous MSYS mapped process identity")
           else root[win] = 1
         }
       }
+      # Preserve possible runner paths through uncertain sampled edges, without certifying
+      # any identity. PS and available endpoint parents are evidence of possible ownership.
+      possible[me] = 1
+      do {
+        changed = 0
+        for (p in mppid) {
+          a = "PRE" SUBSEP p; b = "POST" SUBSEP p
+          if (!(p in possible) && (mppid[p] in possible ||
+              (estate[a] == "LIVE" && eparent[a] in possible) ||
+              (estate[b] == "LIVE" && eparent[b] in possible))) {
+            possible[p] = 1; changed = 1
+          }
+        }
+      } while (changed)
+      for (p in possible) {
+        a = "PRE" SUBSEP p; b = "POST" SUBSEP p
+        if (positive(mwin[p]) && !(mwin[p] in root)) uncertain[mwin[p]] = 1
+        if (positive(ewin[a]) && !(ewin[a] in root)) uncertain[ewin[a]] = 1
+        if (positive(ewin[b]) && !(ewin[b] in root)) uncertain[ewin[b]] = 1
+      }
+      if (!(mwin[enummsys] in root)) fail("enumeration owner has no certified runner path")
       cur = enummsys; walk++
       while (cur in mppid && cur != me) {
         if (seen[cur] == walk) { fail("MSYS bookkeeping cycle"); break }
         seen[cur] = walk
         win = mwin[cur]
-        if (!mdead[cur] && positive(win) && win in root) book[win] = 1
+        if (!stable(cur) || !(win in root)) break
+        book[win] = 1
         cur = mppid[cur]
       }
       for (w in wname) {
         if (before(wtime[w],created)) continue
-        cur = w; owned = 0; bookkeeping = 0; walk++
+        cur = w; owned = 0; bookkeeping = 0; ambiguous = 0; walk++
         while (cur in wppid) { # Existence must precede root membership.
           if (seen[cur] == walk) { fail("Win32 parent cycle"); break }
           seen[cur] = walk
           if (cur in book) { bookkeeping = 1; break }
           if (cur in root) { owned = 1; break }
+          if (cur in uncertain) ambiguous = 1
           parent = wppid[cur]
           if (!positive(parent) || !(parent in wppid)) break
           # A parent created later than its child is a recycled PID, not ancestry.
           if (before(wtime[cur],wtime[parent])) break
           cur = parent
         }
+        if (ambiguous && !owned && !bookkeeping && tolower(wname[w]) == "node.exe")
+          fail("candidate MSYS ancestry continuity unavailable")
         if (owned && !bookkeeping && w != runner && w != enumself)
           output[w] = w " " wname[w] " " wtime[w]
       }
       if (error != "") { print "ENUM_ERROR:" error; exit 1 }
-      print "RUNNER", runner, created
+      print "RUNNER", runner, created, runnerstart
       for (w in output) print output[w]
     }'
 }
@@ -242,27 +363,30 @@ classify_windows_process_rows() {
 owned_process_rows() {
   local enum_owner_pid="$BASHPID"
   if is_windows; then
-    local pstab cimtab cutoff
+    local pstab cimtab pretab posttab
     # Layer 1: MSYS process table (PID PPID PGID WINPID ... after a header line).
-    # Bound mapped process creation strictly before the start of this snapshot. This assumes
-    # UTC does not step backward before the matching Win32_Process table is captured (see header).
-    if ! cutoff="$(date -u +%Y%m%d%H%M%S%6N)"; then
-      echo "ENUM_ERROR:MSYS snapshot cutoff capture failed"; return 1
-    fi
     if ! pstab="$(ps -e)"; then
       echo "ENUM_ERROR:MSYS ps enumeration failed (nonzero exit)"; return 1
     fi
+    pretab="$(collect_msys_endpoints PRE "$pstab")" || {
+      echo "ENUM_ERROR:MSYS PRE identity collection failed"; return 1;
+    }
     # Layer 2: all positive Win32 PIDs, including non-node intermediaries. PID 0 is
     # a sentinel with no usable identity; neither it nor absent parents are roots.
     # Normalize whitespace in names to retain strict token framing. Failure is NOT swallowed.
     if ! cimtab="$(powershell.exe -NoProfile -NonInteractive -Command "\$ErrorActionPreference='Stop'; 'SELF {0}' -f \$PID; Get-CimInstance Win32_Process | Where-Object { \$_.ProcessId -gt 0 } | ForEach-Object { '{0} {1} {2} {3}' -f \$_.ProcessId, \$_.ParentProcessId, (\$_.Name -replace '\\s','_'), \$_.CreationDate.ToUniversalTime().ToString('yyyyMMddHHmmssffffff',[Globalization.CultureInfo]::InvariantCulture) }")"; then
       echo "ENUM_ERROR:Win32_Process enumeration failed (powershell.exe nonzero exit)"; return 1
     fi
+    posttab="$(collect_msys_endpoints POST "$pstab")" || {
+      echo "ENUM_ERROR:MSYS POST identity collection failed"; return 1;
+    }
     cimtab="$(printf '%s\n' "$cimtab" | tr -d '\r')"
     {
       printf '%s\n' "$pstab" | awk '{ print "PS", $0 }'
+      printf '%s\n' "$pretab"
       printf '%s\n' "$cimtab" | awk 'NF { print "CIM", $0 }'
-    } | classify_windows_process_rows "$enum_owner_pid" "$cutoff"
+      printf '%s\n' "$posttab"
+    } | classify_windows_process_rows "$enum_owner_pid"
   else
     local tab
     if ! tab="$(sh -c 'printf "SELF %s\n" "$$"; exec ps -e -o pid=,ppid=,comm=')"; then
@@ -630,11 +754,11 @@ echo "=== release gate runner ==="
 # enumerator must never let a suite pass against a fabricated 0-measurement.
 if is_windows; then
   RUNNER_SNAPSHOT="$(owned_process_rows)" || enum_abort "startup identity pin"
-  read -r _runner_tag RUNNER_WINPID RUNNER_CREATED \
+  read -r _runner_tag RUNNER_WINPID RUNNER_CREATED RUNNER_MSYS_START \
     <<<"$(printf '%s\n' "$RUNNER_SNAPSHOT" | awk '$1 == "RUNNER" { print }')"
-  [[ "$_runner_tag" == RUNNER && "$RUNNER_WINPID" =~ ^[1-9][0-9]*$ && "$RUNNER_CREATED" =~ ^[0-9]{20}$ ]] \
+  [[ "$_runner_tag" == RUNNER && "$RUNNER_WINPID" =~ ^[1-9][0-9]*$ && "$RUNNER_CREATED" =~ ^[0-9]{20}$ && "$RUNNER_MSYS_START" =~ ^[0-9]+$ ]] \
     || enum_abort "startup identity pin malformed"
-  readonly RUNNER_WINPID RUNNER_CREATED
+  readonly RUNNER_WINPID RUNNER_CREATED RUNNER_MSYS_START
 fi
 SELFTEST_OWNED="$(count_owned_node)" || enum_abort "startup self-check"
 echo "owned-Node scope: ancestry to runner pid $RUNNER_PID (fail-closed; nodes with an already-exited parent chain are NOT attributable — known limitation, see header)"
