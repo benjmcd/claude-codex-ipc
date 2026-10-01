@@ -6,9 +6,8 @@
 # absent (e.g. the ubuntu CI leg).
 #
 # Identity matrix under test (2026-07-09 ChatGPT/Codex host merge):
-#   legacy GUI  : process 'Codex'  (any path)                      -> Codex-certain
-#   merged GUI  : process 'ChatGPT' + path under WindowsApps\OpenAI.Codex_* -> Codex-certain
-#   other-ChatGPT: process 'ChatGPT' + readable non-Codex path     -> known non-Codex
+#   intended GUI: process 'Codex'/'ChatGPT' + exact intended executable -> Codex-certain
+#   other Desktop: process 'Codex'/'ChatGPT' + another readable path    -> refuse immediately
 #   ambiguous   : process 'ChatGPT' + unreadable/empty path        -> gate (defer), fail closed
 #   unknown     : process 'unknown' / unidentifiable               -> gate (defer), fail closed
 # Dual-layout probe: repo layout (tests/ beside skills/ipc/) and installed-skill
@@ -44,6 +43,9 @@ fi
 UUID="00000000-0000-4000-8000-000000000000"
 CODEX_PATH='C:\Program Files\WindowsApps\OpenAI.Codex_26.707.3563.0_x64__2p2nqsd0c76g0\app\ChatGPT.exe'
 CLASSIC_PATH='C:\Program Files\WindowsApps\OpenAI.ChatGPT-Desktop_1.2026.100.0_x64__9x9x9x9x9x9x9\app\ChatGPT.exe'
+ALT_PATH='C:\Alt\Host\ChatGPT.exe'
+CLAUDE_PATH='C:\Alt\Tools\claude.exe'
+EXPLORER_PATH='C:\Windows\explorer.exe'
 
 PASS=0; FAIL=0
 ok(){ PASS=$((PASS+1)); echo "  ok: $1"; }
@@ -100,6 +102,93 @@ process.stdin.on("end", () => {
         no "$label (rc=$POLICY_RC want=$want_rc; out: $(printf '%s' "$POLICY_OUT" | head -c 300))"
     fi
 }
+
+echo "== P2. standalone default-root resolution =="
+DEFAULT_HOME="$POLICY_ROOT/default-home"
+DEFAULT_ROOT="$DEFAULT_HOME/.claude/ipc"
+HOME_ONLY="$POLICY_ROOT/home-only"
+HOME_ONLY_ROOT="$HOME_ONLY/.claude/ipc"
+ENV_ROOT="$POLICY_ROOT/env-root"
+mkdir -p "$DEFAULT_ROOT" "$HOME_ONLY_ROOT" "$ENV_ROOT"
+if command -v cygpath >/dev/null 2>&1; then
+    DEFAULT_HOME_WIN="$(cygpath -w "$DEFAULT_HOME")"
+    HOME_ONLY_WIN="$(cygpath -w "$HOME_ONLY")"
+    ENV_ROOT_WIN="$(cygpath -w "$ENV_ROOT")"
+else
+    DEFAULT_HOME_WIN="$DEFAULT_HOME"
+    HOME_ONLY_WIN="$HOME_ONLY"
+    ENV_ROOT_WIN="$ENV_ROOT"
+fi
+cat > "$DEFAULT_ROOT/host-policy.json" <<'JSON'
+{"schemaVersion":1,"autoload":"codex-uri"}
+JSON
+cat > "$HOME_ONLY_ROOT/host-policy.json" <<'JSON'
+{"schemaVersion":1,"autoload":"off"}
+JSON
+cat > "$ENV_ROOT/host-policy.json" <<'JSON'
+{"schemaVersion":1,"autoload":"off","intendedHost":{"kind":"package"}}
+JSON
+
+POLICY_OUT="$(env -u CODEX_IPC_ROOT -u CODEX_IPC_AUTOLOAD -u CODEX_IPC_INTENDED_HOST \
+  USERPROFILE="$DEFAULT_HOME_WIN" HOME="$HOME_ONLY_WIN" \
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$POLICYWIN" \
+    -Purpose configuration 2>&1)"; POLICY_RC=$?
+assert_policy 0 "P2 USERPROFILE default descriptor is loaded before HOME" '
+  value.configuration.autoload.value === "codex-uri" &&
+  value.configuration.autoload.source === "descriptor" &&
+  value.configuration.descriptor.status === "loaded"'
+
+POLICY_OUT="$(env -u CODEX_IPC_AUTOLOAD -u CODEX_IPC_INTENDED_HOST CODEX_IPC_ROOT= \
+  USERPROFILE="$DEFAULT_HOME_WIN" HOME="$HOME_ONLY_WIN" \
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$POLICYWIN" \
+    -Purpose configuration 2>&1)"; POLICY_RC=$?
+assert_policy 0 "P3 empty CODEX_IPC_ROOT falls back to USERPROFILE" '
+  value.configuration.autoload.value === "codex-uri" &&
+  value.configuration.autoload.source === "descriptor"'
+
+POLICY_OUT="$(env -u CODEX_IPC_ROOT -u CODEX_IPC_AUTOLOAD -u CODEX_IPC_INTENDED_HOST \
+  -u USERPROFILE HOME="$HOME_ONLY_WIN" \
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$POLICYWIN" \
+    -Purpose configuration 2>&1)"; POLICY_RC=$?
+assert_policy 0 "P4 HOME supplies the default when USERPROFILE is absent" '
+  value.configuration.autoload.value === "off" &&
+  value.configuration.autoload.source === "descriptor" &&
+  value.configuration.descriptor.status === "loaded"'
+
+POLICY_OUT="$(env -u CODEX_IPC_AUTOLOAD -u CODEX_IPC_INTENDED_HOST CODEX_IPC_ROOT="$ENV_ROOT_WIN" \
+  USERPROFILE="$DEFAULT_HOME_WIN" HOME="$HOME_ONLY_WIN" \
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$POLICYWIN" \
+    -Purpose configuration 2>&1)"; POLICY_RC=$?
+assert_policy 0 "P5 CODEX_IPC_ROOT overrides the home-derived root" '
+  value.configuration.autoload.value === "off" &&
+  value.configuration.autoload.source === "descriptor" &&
+  value.configuration.descriptor.status === "loaded"'
+
+printf '%s\n' '{"schemaVersion":1,' > "$DEFAULT_ROOT/host-policy.json"
+POLICY_OUT="$(env -u CODEX_IPC_ROOT -u CODEX_IPC_AUTOLOAD -u CODEX_IPC_INTENDED_HOST \
+  USERPROFILE="$DEFAULT_HOME_WIN" HOME="$HOME_ONLY_WIN" \
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$POLICYWIN" \
+    -Purpose configuration -Autoload off 2>&1)"; POLICY_RC=$?
+assert_policy 1 "P6 malformed default descriptor refuses despite a flag" '
+  value.ok === false && value.error.reason === "host-policy-invalid" &&
+  value.error.message.includes("descriptor")'
+cat > "$DEFAULT_ROOT/host-policy.json" <<'JSON'
+{"schemaVersion":1,"autoload":"codex-uri"}
+JSON
+
+POLICY_OUT="$(powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$POLICYWIN" \
+    -Purpose configuration -IpcRoot ' ' 2>&1)"; POLICY_RC=$?
+assert_policy 1 "P7 explicit blank IpcRoot refuses" '
+  value.ok === false && value.error.reason === "host-policy-invalid" &&
+  value.error.message.includes("IPC root must be nonempty")'
+
+POLICY_OUT="$(env -u CODEX_IPC_ROOT -u CODEX_IPC_AUTOLOAD -u CODEX_IPC_INTENDED_HOST \
+  -u USERPROFILE -u HOME \
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$POLICYWIN" \
+    -Purpose configuration 2>&1)"; POLICY_RC=$?
+assert_policy 1 "P8 unresolved standalone root refuses" '
+  value.ok === false && value.error.reason === "host-policy-invalid" &&
+  value.error.message.includes("HOME or USERPROFILE")'
 
 echo "== Q. shared policy configuration resolution =="
 cat > "$POLICY_ROOT/host-policy.json" <<'JSON'
@@ -689,47 +778,101 @@ run(){
         -MockRegistrationJson "$registration" 2>&1)"; rc=$?
     # PowerShell may wrap formatted diagnostics according to host width and invocation-path
     # length. Collapse whitespace so the assertion checks message content, not display layout.
-    if [[ $rc -eq $want_rc ]] && printf '%s' "$out" | tr -s '[:space:]' ' ' | grep -qF -- "$want_tok"; then
-        ok "$label (rc=$rc, token found)"
+    local reached_activation=0
+    if [[ $want_rc -ne 0 ]] && printf '%s' "$out" | grep -Eq 'action=(switch-deeplink|deeplink-snapback)'; then
+        reached_activation=1
+    fi
+    if [[ $rc -eq $want_rc && $reached_activation -eq 0 ]] \
+      && printf '%s' "$out" | tr -s '[:space:]' ' ' | grep -qF -- "$want_tok"; then
+        ok "$label (rc=$rc, token found, refusal/defer did not reach an activation action)"
     else
-        no "$label (rc=$rc want=$want_rc; out: $(printf '%s' "$out" | head -c 300))"
+        no "$label (rc=$rc want=$want_rc activation=$reached_activation; out: $(printf '%s' "$out" | head -c 300))"
     fi
 }
 
-echo "== A. default policy (defer) x identity =="
-run 2 "action=defer" "A1 legacy Codex name defers" -- \
-    -ConversationId "$UUID" -DryRun -MockForegroundProcess Codex
-run 2 "action=defer" "A2 merged host (ChatGPT under OpenAI.Codex_*) defers" -- \
-    -ConversationId "$UUID" -DryRun -MockForegroundProcess ChatGPT -MockForegroundPath "$CODEX_PATH"
-RUN_MOCK_INVENTORY="$MOCK_OTHER" run 6 "other-desktop-host-running" "A3 undeclared other-ChatGPT refuses before activation" -- \
-    -ConversationId "$UUID" -DryRun -MockForegroundProcess ChatGPT -MockForegroundPath "$CLASSIC_PATH"
-run 2 "action=defer" "A4 ambiguous ChatGPT (no path) fails closed: defers" -- \
-    -ConversationId "$UUID" -DryRun -MockForegroundProcess ChatGPT
-run 2 "action=defer" "A5 unidentifiable foreground defers" -- \
-    -ConversationId "$UUID" -DryRun -MockForegroundProcess unknown
-run 0 "action=deeplink-snapback" "A6 known non-Codex (notepad) keeps deeplink+snapback" -- \
-    -ConversationId "$UUID" -DryRun -MockForegroundProcess notepad
+echo "== A. required 28-run DryRun foreground-policy matrix =="
+# Row (a): a readable ChatGPT executable outside the intended package inventory.
+run 6 "foreground-alternate-host" "M01 alternate/defer refuses immediately" -- \
+    -ConversationId "$UUID" -DryRun -MockForegroundProcess ChatGPT -MockForegroundPath "$ALT_PATH"
+run 6 "foreground-alternate-host" "M02 alternate/switch-no-ack refuses immediately" -- \
+    -ConversationId "$UUID" -DryRun -ForegroundPolicy switch -MockForegroundProcess ChatGPT -MockForegroundPath "$ALT_PATH"
+run 6 "foreground-alternate-host" "M03 alternate/switch-ack refuses immediately" -- \
+    -ConversationId "$UUID" -DryRun -ForegroundPolicy switch -AckForegroundSwitch -MockForegroundProcess ChatGPT -MockForegroundPath "$ALT_PATH"
+run 6 "foreground-alternate-host" "M04 alternate/restore refuses immediately" -- \
+    -ConversationId "$UUID" -DryRun -ForegroundPolicy restore-if-known -MockForegroundProcess ChatGPT -MockForegroundPath "$ALT_PATH"
 
-echo "== B. switch policy x identity =="
-run 5 "switch-refused" "B1 switch without ack refuses (legacy Codex)" -- \
-    -ConversationId "$UUID" -DryRun -ForegroundPolicy switch -MockForegroundProcess Codex
-run 5 "switch-refused" "B2 switch without ack refuses (merged host)" -- \
+# Row (b): the exact intended package GUI.
+run 2 "action=defer" "M05 package/defer" -- \
+    -ConversationId "$UUID" -DryRun -MockForegroundProcess ChatGPT -MockForegroundPath "$CODEX_PATH"
+run 5 "switch-refused" "M06 package/switch-no-ack" -- \
     -ConversationId "$UUID" -DryRun -ForegroundPolicy switch -MockForegroundProcess ChatGPT -MockForegroundPath "$CODEX_PATH"
-run 0 "action=switch-deeplink" "B3 switch+ack navigates (legacy Codex, backward compat)" -- \
+run 0 "action=switch-deeplink" "M07 package/switch-ack" -- \
+    -ConversationId "$UUID" -DryRun -ForegroundPolicy switch -AckForegroundSwitch -MockForegroundProcess ChatGPT -MockForegroundPath "$CODEX_PATH"
+run 4 "restore-refused" "M08 package/restore" -- \
+    -ConversationId "$UUID" -DryRun -ForegroundPolicy restore-if-known -MockForegroundProcess ChatGPT -MockForegroundPath "$CODEX_PATH"
+
+# Row (c1): a known non-Desktop foreground.
+run 0 "action=deeplink-snapback" "M09 claude/defer" -- \
+    -ConversationId "$UUID" -DryRun -MockForegroundProcess claude -MockForegroundPath "$CLAUDE_PATH"
+run 0 "action=deeplink-snapback" "M10 claude/switch-no-ack" -- \
+    -ConversationId "$UUID" -DryRun -ForegroundPolicy switch -MockForegroundProcess claude -MockForegroundPath "$CLAUDE_PATH"
+run 0 "action=deeplink-snapback" "M11 claude/switch-ack" -- \
+    -ConversationId "$UUID" -DryRun -ForegroundPolicy switch -AckForegroundSwitch -MockForegroundProcess claude -MockForegroundPath "$CLAUDE_PATH"
+run 0 "action=deeplink-snapback" "M12 claude/restore" -- \
+    -ConversationId "$UUID" -DryRun -ForegroundPolicy restore-if-known -MockForegroundProcess claude -MockForegroundPath "$CLAUDE_PATH"
+
+# Row (c2): Explorer, another known non-Desktop foreground.
+run 0 "action=deeplink-snapback" "M13 explorer/defer" -- \
+    -ConversationId "$UUID" -DryRun -MockForegroundProcess explorer -MockForegroundPath "$EXPLORER_PATH"
+run 0 "action=deeplink-snapback" "M14 explorer/switch-no-ack" -- \
+    -ConversationId "$UUID" -DryRun -ForegroundPolicy switch -MockForegroundProcess explorer -MockForegroundPath "$EXPLORER_PATH"
+run 0 "action=deeplink-snapback" "M15 explorer/switch-ack" -- \
+    -ConversationId "$UUID" -DryRun -ForegroundPolicy switch -AckForegroundSwitch -MockForegroundProcess explorer -MockForegroundPath "$EXPLORER_PATH"
+run 0 "action=deeplink-snapback" "M16 explorer/restore" -- \
+    -ConversationId "$UUID" -DryRun -ForegroundPolicy restore-if-known -MockForegroundProcess explorer -MockForegroundPath "$EXPLORER_PATH"
+
+# Row (d1): an unidentifiable foreground.
+run 2 "action=defer" "M17 unknown/defer" -- \
+    -ConversationId "$UUID" -DryRun -MockForegroundProcess unknown
+run 5 "switch-refused" "M18 unknown/switch-no-ack" -- \
+    -ConversationId "$UUID" -DryRun -ForegroundPolicy switch -MockForegroundProcess unknown
+run 2 "foreground-unidentified" "M19 unknown/switch-ack" -- \
+    -ConversationId "$UUID" -DryRun -ForegroundPolicy switch -AckForegroundSwitch -MockForegroundProcess unknown
+run 4 "restore-refused" "M20 unknown/restore" -- \
+    -ConversationId "$UUID" -DryRun -ForegroundPolicy restore-if-known -MockForegroundProcess unknown
+
+# Row (d2): a whitespace-only name.
+run 2 "action=defer" "M21 blank/defer" -- \
+    -ConversationId "$UUID" -DryRun -MockForegroundProcess ' '
+run 5 "switch-refused" "M22 blank/switch-no-ack" -- \
+    -ConversationId "$UUID" -DryRun -ForegroundPolicy switch -MockForegroundProcess ' '
+run 2 "foreground-unidentified" "M23 blank/switch-ack" -- \
+    -ConversationId "$UUID" -DryRun -ForegroundPolicy switch -AckForegroundSwitch -MockForegroundProcess ' '
+run 4 "restore-refused" "M24 blank/restore" -- \
+    -ConversationId "$UUID" -DryRun -ForegroundPolicy restore-if-known -MockForegroundProcess ' '
+
+# Row (d3): GUI-like name with no readable path.
+run 2 "action=defer" "M25 pathless-ChatGPT/defer" -- \
+    -ConversationId "$UUID" -DryRun -MockForegroundProcess ChatGPT
+run 5 "switch-refused" "M26 pathless-ChatGPT/switch-no-ack" -- \
+    -ConversationId "$UUID" -DryRun -ForegroundPolicy switch -MockForegroundProcess ChatGPT
+run 2 "foreground-unidentified" "M27 pathless-ChatGPT/switch-ack" -- \
+    -ConversationId "$UUID" -DryRun -ForegroundPolicy switch -AckForegroundSwitch -MockForegroundProcess ChatGPT
+run 4 "restore-refused" "M28 pathless-ChatGPT/restore" -- \
+    -ConversationId "$UUID" -DryRun -ForegroundPolicy restore-if-known -MockForegroundProcess ChatGPT
+
+echo "== B. added host/inventory matrix cases =="
+run 0 "action=switch-deeplink" "B1 legacy Codex name at intended executable remains compatible" -- \
     -ConversationId "$UUID" -DryRun -ForegroundPolicy switch -AckForegroundSwitch \
     -MockForegroundProcess Codex -MockForegroundPath "$CODEX_PATH"
-run 0 "action=switch-deeplink" "B4 switch+ack navigates (merged host, positive identity)" -- \
-    -ConversationId "$UUID" -DryRun -ForegroundPolicy switch -AckForegroundSwitch -MockForegroundProcess ChatGPT -MockForegroundPath "$CODEX_PATH"
-run 2 "foreground-unidentified" "B5 switch+ack on ambiguous ChatGPT still defers (never auto-switch on ambiguity)" -- \
-    -ConversationId "$UUID" -DryRun -ForegroundPolicy switch -AckForegroundSwitch -MockForegroundProcess ChatGPT
-RUN_MOCK_INVENTORY="$MOCK_OTHER" run 6 "other-desktop-host-running" "B6 switch+ack cannot bypass undeclared other-ChatGPT gate" -- \
-    -ConversationId "$UUID" -DryRun -ForegroundPolicy switch -AckForegroundSwitch -MockForegroundProcess ChatGPT -MockForegroundPath "$CLASSIC_PATH"
-
-echo "== C. restore-if-known stays fail-closed x identity =="
-run 4 "restore-refused" "C1 restore-if-known refused (legacy Codex)" -- \
-    -ConversationId "$UUID" -DryRun -ForegroundPolicy restore-if-known -MockForegroundProcess Codex
-run 4 "restore-refused" "C2 restore-if-known refused (merged host)" -- \
-    -ConversationId "$UUID" -DryRun -ForegroundPolicy restore-if-known -MockForegroundProcess ChatGPT -MockForegroundPath "$CODEX_PATH"
+RUN_MOCK_INVENTORY="$MOCK_OTHER" run 6 "send-ineligible" "B2 other-host inventory refuses before activation" -- \
+    -ConversationId "$UUID" -DryRun -MockForegroundProcess explorer -MockForegroundPath "$EXPLORER_PATH"
+RUN_MOCK_INVENTORY="$MOCK_EMPTY" run 6 "send-ineligible" "B3 empty inventory refuses before activation" -- \
+    -ConversationId "$UUID" -DryRun -MockForegroundProcess explorer -MockForegroundPath "$EXPLORER_PATH"
+RUN_MOCK_INVENTORY="$MOCK_ALTERNATE" RUN_MOCK_PACKAGE="$PKG_UNKNOWN" RUN_MOCK_REGISTRATION="$REG_UNKNOWN" \
+  run 6 "protocol-host-not-package" "B4 declared alternate is never protocol activated" -- \
+    -ConversationId "$UUID" -DryRun -IntendedHost "$ALT_PATH" \
+    -MockForegroundProcess ChatGPT -MockForegroundPath "$ALT_PATH"
 
 echo "== D. argument validation =="
 run 1 "must be a UUID" "D1 non-UUID conversation id rejected" -- \
@@ -745,34 +888,75 @@ RUN_MOCK_REGISTRATION="$REG_CONFLICT" run 6 "protocol-registration-unproven" "D5
 RUN_MOCK_REGISTRATION="$REG_UNKNOWN" run 6 "protocol-registration-unproven" "D6 unknown registration refuses helper activation" -- \
     -ConversationId "$UUID" -DryRun -MockForegroundProcess notepad
 
-HELPER_OUT="$(powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$PS1WIN" \
-    -ConversationId "$UUID" -MockForegroundProcess notepad \
-    -IpcRoot "$POLICY_ROOT" -Autoload codex-uri \
+printf '%s\n' '{"schemaVersion":1,' > "$DEFAULT_ROOT/host-policy.json"
+HELPER_OUT="$(env -u CODEX_IPC_ROOT -u CODEX_IPC_AUTOLOAD -u CODEX_IPC_INTENDED_HOST \
+  USERPROFILE="$DEFAULT_HOME_WIN" HOME="$HOME_ONLY_WIN" \
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$PS1WIN" \
+    -ConversationId "$UUID" -DryRun -Autoload codex-uri -MockForegroundProcess notepad \
     -MockInventoryJson "$MOCK_PACKAGE" -MockPackageJson "$PKG_CLEAR" \
     -MockRegistrationJson "$REG_MATCHES" 2>&1)"; HELPER_RC=$?
-if [[ $HELPER_RC -eq 6 ]] \
-    && printf '%s' "$HELPER_OUT" | grep -qF 'reason=host-policy-invalid' \
-    && ! printf '%s' "$HELPER_OUT" | grep -qF "$MOCK_PACKAGE"; then
-    ok "D7 helper rejects mocks without DryRun using a redacted reason token"
+if [[ $HELPER_RC -eq 6 ]] && printf '%s' "$HELPER_OUT" | grep -qF 'reason=host-policy-invalid'; then
+    ok "D7 helper reads and refuses a malformed default descriptor under DryRun"
 else
-    no "D7 helper rejects mocks without DryRun (rc=$HELPER_RC; out: $(printf '%s' "$HELPER_OUT" | head -c 300))"
+    no "D7 helper default descriptor refusal (rc=$HELPER_RC; out: $(printf '%s' "$HELPER_OUT" | head -c 300))"
 fi
+cat > "$DEFAULT_ROOT/host-policy.json" <<'JSON'
+{"schemaVersion":1,"autoload":"codex-uri"}
+JSON
 
-HELPER_OUT="$(powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$PS1WIN" \
-    -ConversationId "$UUID" -MockForegroundProcess notepad 2>&1)"; HELPER_RC=$?
-if [[ $HELPER_RC -eq 6 ]] && printf '%s' "$HELPER_OUT" | grep -qF 'mock-inputs-require-dry-run'; then
-    ok "D8 foreground-process mock alone is rejected without DryRun"
+GUARD_CHECK_PS1="$POLICY_ROOT/mock-guard-ast.ps1"
+cat > "$GUARD_CHECK_PS1" <<'POWERSHELL'
+param([Parameter(Mandatory = $true)][string]$HelperPath)
+$tokens = $null
+$errors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile(
+    $HelperPath,
+    [ref]$tokens,
+    [ref]$errors
+)
+if ($errors.Count -ne 0) { throw 'helper parser errors' }
+$source = [System.IO.File]::ReadAllText($HelperPath)
+$guards = @($ast.FindAll({
+    param($node)
+    if ($node -isnot [System.Management.Automation.Language.IfStatementAst]) { return $false }
+    $guardText = $node.Extent.Text
+    return $guardText.Contains('MOCK_FOREGROUND_PROCESS_BOUND') -and
+        $guardText.Contains('MOCK_FOREGROUND_PATH_BOUND') -and
+        $guardText.Contains('mock-inputs-require-dry-run')
+}, $true))
+$guardText = if ($guards.Count -eq 1) { $guards[0].Extent.Text } else { '' }
+$policyOffset = $source.IndexOf('$HOST_POLICY_SCRIPT =')
+$nativeOffset = $source.IndexOf('Add-Type @"')
+$activationOffset = $source.IndexOf('Start-Process -FilePath')
+[pscustomobject][ordered]@{
+    guardCount = $guards.Count
+    processBinding = $source.Contains("`$MOCK_FOREGROUND_PROCESS_BOUND = `$PSBoundParameters.ContainsKey('MockForegroundProcess')")
+    pathBinding = $source.Contains("`$MOCK_FOREGROUND_PATH_BOUND = `$PSBoundParameters.ContainsKey('MockForegroundPath')")
+    checksDryRun = $guardText.Contains('-not $DryRun')
+    fixedDiagnostic = $guardText.Contains('mock-inputs-require-dry-run')
+    exitsSix = $guardText.Contains('exit 6')
+    beforePolicyLoad = $guards.Count -eq 1 -and $guards[0].Extent.StartOffset -lt $policyOffset
+    beforeNativeLoad = $guards.Count -eq 1 -and $guards[0].Extent.StartOffset -lt $nativeOffset
+    beforeActivationSite = $guards.Count -eq 1 -and $guards[0].Extent.StartOffset -lt $activationOffset
+    guardHasNoNativeEffect = $guardText -notmatch 'Start-Process|Invoke-CodexIpcProtocolActivation|SetForegroundWindow|keybd_event'
+    soleActivationSite = ([regex]::Matches($source, 'Start-Process\s+-FilePath')).Count -eq 1
+} | ConvertTo-Json -Compress
+POWERSHELL
+if command -v cygpath >/dev/null 2>&1; then
+    GUARD_CHECK_WIN="$(cygpath -w "$GUARD_CHECK_PS1")"
 else
-    no "D8 foreground-process mock alone is rejected without DryRun (rc=$HELPER_RC; out: $(printf '%s' "$HELPER_OUT" | head -c 300))"
+    GUARD_CHECK_WIN="$GUARD_CHECK_PS1"
 fi
-
-HELPER_OUT="$(powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$PS1WIN" \
-    -ConversationId "$UUID" -MockForegroundPath 'C:\Alt\Foreground.exe' 2>&1)"; HELPER_RC=$?
-if [[ $HELPER_RC -eq 6 ]] && printf '%s' "$HELPER_OUT" | grep -qF 'mock-inputs-require-dry-run'; then
-    ok "D9 foreground-path mock alone is rejected without DryRun"
-else
-    no "D9 foreground-path mock alone is rejected without DryRun (rc=$HELPER_RC; out: $(printf '%s' "$HELPER_OUT" | head -c 300))"
-fi
+POLICY_OUT="$(powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$GUARD_CHECK_WIN" \
+    -HelperPath "$PS1WIN" 2>&1)"; POLICY_RC=$?
+assert_policy 0 "D8 foreground mock bindings use explicit PSBoundParameters presence" '
+  value.guardCount === 1 && value.processBinding === true && value.pathBinding === true'
+assert_policy 0 "D9 early mock guard pins DryRun, redacted diagnostic, and exit 6" '
+  value.checksDryRun === true && value.fixedDiagnostic === true && value.exitsSix === true'
+assert_policy 0 "D10 mock guard precedes policy/native/activation code and contains no native effect" '
+  value.beforePolicyLoad === true && value.beforeNativeLoad === true &&
+  value.beforeActivationSite === true && value.guardHasNoNativeEffect === true &&
+  value.soleActivationSite === true'
 
 echo "== E. process hygiene =="
 # Suite-scoped leak check. Every helper invocation above is synchronous, and under

@@ -12,9 +12,10 @@
 #                    authority exists, so in-app thread restoration cannot be proven. A
 #                    syntactically valid -RestoreConversationId is NOT proof.
 #
-# Host policy is shared with the wrapper. Configuration resolves per field as explicit
-# parameter > environment > ${CODEX_IPC_ROOT}/host-policy.json > defaults. Every present
-# layer is validated even when overridden. Before foreground handling and again immediately
+# Host policy is shared with the wrapper. Its transport root resolves as explicit IpcRoot,
+# then nonempty CODEX_IPC_ROOT, then USERPROFILE/HOME/.claude/ipc. Configuration resolves
+# per field as explicit parameter > environment > root/host-policy.json > defaults. Every
+# present layer is validated even when overridden. Before foreground handling and again immediately
 # before Start-Process, activation requires a complete single-host inventory, the package
 # intended host, explicit codex-uri opt-in, qualified package-update clearance, and a
 # qualified effective protocol handler. Any unknown or conflicting evidence refuses.
@@ -164,6 +165,13 @@ function Test-CodexCertain($fg) {
     return $false
 }
 
+function Test-CodexAlternateForeground($fg) {
+    if ($fg.Name -notmatch '^(?i)(codex|chatgpt)$' -or [string]::IsNullOrWhiteSpace($fg.Path)) {
+        return $false
+    }
+    return -not (Test-CodexCertain $fg)
+}
+
 function Test-CodexLike($fg) {
     # Provably intended host, or unidentifiable, or a GUI-like name whose path does
     # not match the shared inventory (conservative: gate as if Codex).
@@ -185,6 +193,11 @@ function Invoke-CodexIpcProtocolActivation {
 
 $fg = Get-FgIdentity
 $fgName = $fg.Name
+
+if (Test-CodexAlternateForeground $fg) {
+    Write-Error "ACTION: host-policy-refused phase=pre-foreground reason=foreground-alternate-host"
+    exit 6
+}
 
 if (Test-CodexLike $fg) {
     switch ($ForegroundPolicy) {

@@ -990,7 +990,21 @@ function Invoke-CodexIpcHostPolicyCli {
 
     if (-not $ipcRootPresent) {
         $environmentRoot = [Environment]::GetEnvironmentVariable('CODEX_IPC_ROOT')
-        if ($null -ne $environmentRoot) { $ipcRoot = $environmentRoot }
+        if (-not [string]::IsNullOrEmpty($environmentRoot)) {
+            $ipcRoot = $environmentRoot
+        } else {
+            $userHome = [Environment]::GetEnvironmentVariable('USERPROFILE')
+            if ([string]::IsNullOrEmpty($userHome)) {
+                $userHome = [Environment]::GetEnvironmentVariable('HOME')
+            }
+            if ([string]::IsNullOrWhiteSpace($userHome)) {
+                throw 'IPC root cannot be resolved without HOME or USERPROFILE'
+            }
+            $ipcRoot = Join-Path (Join-Path $userHome '.claude') 'ipc'
+        }
+    }
+    if ([string]::IsNullOrWhiteSpace($ipcRoot)) {
+        throw 'IPC root must be nonempty'
     }
     $configuration = Resolve-CodexIpcHostConfiguration `
         -IpcRoot $ipcRoot `

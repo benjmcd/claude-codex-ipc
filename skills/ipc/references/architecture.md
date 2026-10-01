@@ -210,11 +210,12 @@ Every live `--ipc` send reports exactly one result:
 - `gui-delivered` — the Desktop renderer accepted the turn. Silent and instant when the target
   thread is already loaded in the app. The shared host gate runs before the initial attempt and
   before every retry, so ownership alone never bypasses host identity.
-- `gui-unowned` — the exact router response proved that no renderer admitted the follower. With the
-  default `autoload=off`, or with an alternate intended host, the wrapper returns immediately and
-  prints the file-drop pickup line. A package activation request may also return this category when
-  host inventory or activation evidence refuses, foreground handling defers, or a permitted
-  activation does not establish ownership in time.
+- `gui-unowned` — structured policy or router evidence established non-admission and the wrapper
+  returns with `confirmation=not-attempted` plus the file-drop pickup line. The category can arise
+  before router contact from host-policy refusal, or after an exact `no-client-found` followed by
+  refused/incomplete recovery; it is not a general claim about current ownership. The default
+  `autoload=off`, alternate-host no-activation rule, foreground deferral, and incomplete package
+  activation all use this category.
 - `failed-closed` — target inspection or local argument validation refuses, or a router/pipe attempt
   has an ambiguous outcome. Actual bounded diagnostics are printed.
 
@@ -245,8 +246,11 @@ suppressed and resending is forbidden.
 
 #### Foreground policy (`--foreground-policy`, EXPERIMENTAL)
 
-When a package activation request reaches foreground handling, the wrapper applies one of three
-policies (flag overrides the `CODEX_IPC_FOREGROUND_POLICY` env default of `defer`):
+When a package activation request reaches foreground handling, a readable foreground `Codex` or
+`ChatGPT` executable that does not match the intended inventory refuses immediately as
+`foreground-alternate-host`. It never enters a defer wait or reaches protocol activation. Other
+foregrounds use one of three policies (flag overrides the `CODEX_IPC_FOREGROUND_POLICY` env default
+of `defer`):
 
 - `defer` (default): never navigate the visible Codex app. The helper waits up to ~2 min for the
   operator to switch away, then reports `gui-unowned -- reason=codex-foreground-deferred`.

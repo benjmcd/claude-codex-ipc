@@ -726,7 +726,10 @@ function main() {
         ok:
           contains("scripts/codex_ipc_host_policy.ps1", "$autoloadValue = 'off'") &&
           contains("scripts/codex_ipc_host_policy.ps1", "-Value 'package' -Source 'default'") &&
-          contains("scripts/codex_ipc_host_policy.ps1", "host-policy.json"),
+          contains("scripts/codex_ipc_host_policy.ps1", "host-policy.json") &&
+          contains("scripts/codex_ipc_host_policy.ps1", "GetEnvironmentVariable('USERPROFILE')") &&
+          contains("scripts/codex_ipc_host_policy.ps1", "GetEnvironmentVariable('HOME')") &&
+          contains("scripts/codex_ipc_host_policy.ps1", "IPC root must be nonempty"),
       },
       {
         label: "host policy refuses incomplete, absent, mixed, or duplicate GUI identity evidence",
@@ -765,7 +768,9 @@ function main() {
           contains("scripts/codex_ipc_autoload.ps1", "exit 6") &&
           contains("scripts/codex_ipc_autoload.ps1", "MOCK_FOREGROUND_PROCESS_BOUND") &&
           contains("scripts/codex_ipc_autoload.ps1", "MOCK_FOREGROUND_PATH_BOUND") &&
-          contains("scripts/codex_ipc_autoload.ps1", "mock-inputs-require-dry-run"),
+          contains("scripts/codex_ipc_autoload.ps1", "mock-inputs-require-dry-run") &&
+          contains("scripts/codex_ipc_autoload.ps1", "Test-CodexAlternateForeground") &&
+          contains("scripts/codex_ipc_autoload.ps1", "foreground-alternate-host"),
       },
       {
         label: "wrapper pins the complete host and activation refusal vocabulary and the multi-cause no-client observation",
@@ -798,6 +803,8 @@ function main() {
           contains("SKILL.md", "wrapper flag, environment") &&
           contains("SKILL.md", "`${CODEX_IPC_ROOT}/host-policy.json`, then defaults") &&
           contains("SKILL.md", "The defaults are `autoload=off` and") &&
+          contains("SKILL.md", "For standalone policy or helper use") &&
+          contains("SKILL.md", "foreground-alternate-host") &&
           contains("SKILL.md", "Alternate intended hosts are never protocol-activated") &&
           contains("SKILL.md", "currently refuses with `autoload-policy-refused`"),
       },

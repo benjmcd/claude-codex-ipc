@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- Made standalone host-policy and activation-helper calls honor the public `~/.claude/ipc`
+  descriptor default when no root flag or environment override is present. Empty environment roots
+  fall back consistently, explicit blank roots refuse, and the matrix now proves the early mock
+  guard structurally without ever invoking the real helper outside `-DryRun`.
 - Tightened alternate-host classification so an external `codex.exe app-server` counts only when
   its direct parent is the intended GUI, its readable executable matches the command prefix, and
   `app-server` is the immediate subcommand. Foreground mocks now require `-DryRun`; host-policy and

@@ -65,9 +65,11 @@ page before issuing any new dispatch.
    completion or reply-file success. Read the rollout confirmation and use the printed
    `codex_ipc_wait.mjs` command. If the task still does not appear and the target may have been
    mid-turn, re-inspect the authoritative rollout before taking any recovery action.
-2. `RESULT: gui-unowned` — no renderer owns the thread and activation was disabled, inapplicable,
-   deferred, or incomplete. Use the printed file-drop pickup line in the intended host. Do not open
-   the protocol URI manually to bypass the gate or automatically rerun `/ipc`.
+2. `RESULT: gui-unowned` — structured policy or router evidence established non-admission, so the
+   live path stopped with `confirmation=not-attempted`. This category does not by itself prove the
+   thread's current owner: policy can refuse before router contact, or an exact `no-client-found`
+   can be followed by a refused recovery. Use the printed file-drop pickup line in the intended
+   host. Do not open the protocol URI manually to bypass the gate or automatically rerun `/ipc`.
 3. `RESULT: failed-closed` with `confirmation=not-attempted` — structured evidence proves that no
    follower was admitted (target missing/archived, invalid arguments, refused policy, or exact
    `no-client-found` followed by a later refusal). A router request may have occurred, but no turn

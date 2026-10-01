@@ -247,13 +247,20 @@ malformed, unreadable, incomplete, mixed-host, missing-host, or duplicate-host e
 before the follower client runs. An alternate intended host is an absolute executable path: it can
 receive an explicitly targeted IPC send when it is the sole proven GUI host, but the package
 `codex://` protocol is never used to activate it. Wrapper output prints only the effective host kind
-and configuration source; it does not print executable paths or process command lines.
+and configuration source; it does not print executable paths or process command lines. A readable
+foreground `Codex` or `ChatGPT` path that does not match the intended inventory refuses immediately
+as `foreground-alternate-host`; it never enters the defer wait or reaches protocol activation.
 
 Minimal descriptor:
 
 ```json
 {"schemaVersion":1,"autoload":"off","intendedHost":{"kind":"package"}}
 ```
+
+For standalone policy or helper use, the descriptor root resolves as explicit `-IpcRoot`, then a
+nonempty `CODEX_IPC_ROOT`, then `.claude/ipc` under `USERPROFILE` or `HOME`. An explicitly blank
+root refuses instead of silently skipping the descriptor. The wrapper always passes its already
+resolved transport root.
 
 The wrapper's one pre-send inspection must report a trusted read-only DB open, one exact active row,
 a `root` or warned `legacy-root-assumed` classification, and a nonempty stored model. Missing,
