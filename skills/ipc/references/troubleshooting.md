@@ -50,6 +50,11 @@ infer non-delivery), or `rollout-unavailable` (observation could not determine a
 triggers an automatic resend. Thread-tail inspection can inform diagnosis, but negative bounded
 evidence cannot prove non-admission or authorize a resend.
 
+For a goal-driven target, leave `--request-goal` off and use manual delivery: generate the
+file-drop envelope, then have the operator paste its pickup line into the intended thread. Do not
+wait for a closed-turn gap before the paste. `pending` is expected until the named dispatch has its
+own completion evidence; never call `turn/interrupt` or resend merely to manufacture an idle gap.
+
 1. `RESULT: gui-delivered` — the router accepted exactly one target follower; this is not task
    completion or reply-file success. Read the rollout confirmation and use the printed
    `codex_ipc_wait.mjs` command. If the task still does not appear and the target may have been

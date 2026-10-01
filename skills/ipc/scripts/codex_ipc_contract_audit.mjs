@@ -797,6 +797,50 @@ function main() {
           contains("SKILL.md", "requires a nonempty trimmed value plus `--ack-thread-settings-change`"),
       },
     ], "Static client/caller evidence only. The hermetic router-contract suite exercises missing acknowledgements, whitespace values, acknowledged values, and acknowledgement-only omission without contacting the pipe."),
+    check("REQ-022", "Goal setup is explicit and agent-facing Desktop delivery guidance preserves operator authority.", [
+      {
+        label: "goal setup defaults off and the wrapper restores the exact request only behind --request-goal",
+        file: "scripts/handoff_to_codex.sh",
+        ok:
+          contains("scripts/handoff_to_codex.sh", "REQUEST_GOAL=0") &&
+          contains("scripts/handoff_to_codex.sh", "--request-goal)") &&
+          contains("scripts/handoff_to_codex.sh", 'if [[ "$REQUEST_GOAL" -eq 1 ]]') &&
+          contains(
+            "scripts/handoff_to_codex.sh",
+            "set your \\`/goal\\` to a concise summary of it",
+          ),
+      },
+      {
+        label: "SKILL.md assigns host lifecycle and direct sending to the operator boundary",
+        file: "SKILL.md",
+        ok:
+          contains(
+            "SKILL.md",
+            "The dispatching agent never closes, restarts, launches, or signals a Desktop host, and never opens `codex://` itself. Host lifecycle belongs to the operator.",
+          ) &&
+          contains(
+            "SKILL.md",
+            "Agents never run `codex_ipc_client.mjs` with `--send` directly. The maintained wrapper and write-proof harness are its only permitted sending callers.",
+          ) &&
+          contains(
+            "SKILL.md",
+            "A `--model` or `--effort` override changes stored thread settings and requires the operator's explicit intent.",
+          ),
+      },
+      {
+        label: "wrapper assigns manual pickup to the intended Desktop host without a codex:// instruction",
+        file: "scripts/handoff_to_codex.sh",
+        ok:
+          contains(
+            "scripts/handoff_to_codex.sh",
+            "Open the thread in your intended Desktop host's window, then paste:",
+          ) &&
+          !contains(
+            "scripts/handoff_to_codex.sh",
+            /\b(?:open|visit)\b[^\n]*codex:\/\/threads/i,
+          ),
+      },
+    ], "Static instruction checks only: they prove the required guidance bytes are present, not that an agent obeyed them. Hermetic wrapper and payload-parity suites prove default-off and explicit opt-in rendering without live IPC."),
   ];
 
   const ok = Object.values(files).every((item) => item.ok) &&

@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- Made payload goal setup explicit. Ordinary file-drop and live-wrapper payloads no longer ask the
+  receiver to set `/goal`; `--request-goal` restores the former instruction for an operator who
+  deliberately wants it. The committed payload example and both carrier tests cover the default
+  and opt-in forms. Agent guidance now assigns Desktop host lifecycle to the operator, prohibits
+  agent-opened protocol links and direct client sends, and documents manual pickup for a
+  goal-driven thread without waiting for a closed-turn gap.
 - Added a shared, read-only Desktop host policy for the maintained wrapper. Every initial send and
   retry now requires a complete inventory with exactly one intended GUI host and no other GUI host;
   configuration resolves per field as wrapper flag, environment, transport-root descriptor, then

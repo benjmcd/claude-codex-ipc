@@ -201,6 +201,16 @@ Codex. Use the maintained wrapper, not raw IPC:
 
 On Windows PowerShell, run the `.sh` wrapper through Git Bash.
 
+Goal setup is off by default. Add `--request-goal` before the task only when the operator
+explicitly wants the receiving thread to set a goal for this dispatch. The flag restores the
+payload's goal-setting request; it does not inspect, replace, or otherwise change an existing goal.
+
+For a known goal-driven target, use manual delivery: generate the file-drop envelope without
+`--request-goal`, then ask the operator to paste the printed pickup line into the intended thread.
+A closed turn is not a precondition for that paste. Expect `pending` until the named dispatch has
+its own completion evidence. Never call `turn/interrupt`, and never resend merely because pickup or
+completion remains pending.
+
 `--allow-any-thread` is a **client** flag (`codex_ipc_client.mjs`) that the wrapper sets
 **internally** on the explicit-thread path; it is NOT a `handoff_to_codex.sh` argument. The wrapper's
 supported policy flags go after the conversationId and before `--` and the task. A positional task
@@ -438,9 +448,9 @@ Prefer an explicit path or project name in the command. If absent, infer from th
 current conversation context. If it is genuinely ambiguous, ask one concise question before
 creating/opening the wrong context.
 
-To open a project in Codex Desktop, open the Codex Desktop app yourself and select (or create) the
-intended workspace/thread. v0.1.8 removed the CLI-backed `--app`/`--open`/`--exec` modes, so the
-wrapper no longer opens the app for you.
+To open a project in Codex Desktop, ask the operator to open the intended Desktop host and select
+(or create) the intended workspace/thread. v0.1.8 removed the CLI-backed
+`--app`/`--open`/`--exec` modes, so the wrapper does not open the app.
 
 After the Desktop project/session exists, obtain a concrete conversationId before using `--ipc`.
 Use the read-only locator to discover candidates from Codex Desktop's local thread index:
@@ -467,9 +477,9 @@ version-2 `params.turnStart` payload the app does read `request.model` and `requ
 writes them back as the thread's stored model and reasoning effort. The wrapper and the write-proof
 harness pass neither, and the client omits both unless an operator explicitly supplies
 `--model`/`--effort` — which is a thread-settings change, not a per-turn override. Do not attempt
-to override these through the delivery route. Direct client use requires the operator's explicit
-intent and `--ack-thread-settings-change`; values must be nonempty after trimming and persist as
-the stored thread settings. Consistent with the advisory rule above, do NOT treat a stored
+to override these through the delivery route. An operator-run direct client settings change
+requires `--ack-thread-settings-change`; values must be nonempty after trimming and persist as the
+stored thread settings. Consistent with the advisory rule above, do NOT treat a stored
 `sandboxPolicy` or
 `approvalMode` as a prediction that the reply write will fail: a stored `managed` sandbox is not a
 reason to pick a different thread. A blocked reply write is expected, not an error, and is
@@ -517,6 +527,9 @@ stderr only; stdout and the exit code are unchanged, and neither is ever a refus
 - Inspect existing sessions before sending.
 - Use exactly one explicit UUID per IPC send.
 - Keep file-drop as default/fallback.
+- The dispatching agent never closes, restarts, launches, or signals a Desktop host, and never opens `codex://` itself. Host lifecycle belongs to the operator.
+- Agents never run `codex_ipc_client.mjs` with `--send` directly. The maintained wrapper and write-proof harness are its only permitted sending callers.
+- A `--model` or `--effort` override changes stored thread settings and requires the operator's explicit intent.
 - `/ipc` success is strictly GUI delivery into the renderer-owned Desktop thread. Never treat any
   non-GUI execution as an `/ipc` fallback or `/ipc` success. (The CLI-backed `--exec`/`--open`/`--app`
   modes were removed in v0.1.8; there is no headless execution path in this tool.)

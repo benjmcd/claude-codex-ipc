@@ -5,10 +5,12 @@
 # transport file, then you paste one line into your live Codex session (Desktop app
 # or TUI) to pick it up.
 #   ./scripts/handoff_to_codex.sh "task for Codex"
+#   ./scripts/handoff_to_codex.sh --request-goal "task for a new Codex goal"
 #
 # Live mode:
 #   ./scripts/handoff_to_codex.sh --ipc <conversationId> "task"  # inject into a live Desktop GUI thread
 #   ./scripts/handoff_to_codex.sh --ipc <conversationId> \
+#       [--request-goal] \
 #       [--autoload off|codex-uri] [--intended-host package|ABSOLUTE-EXE] \
 #       [--foreground-policy defer|switch|restore-if-known] [--ack-foreground-switch] [--] "task"
 #
@@ -74,8 +76,9 @@ case "${1:-}" in
             '' \
             'USAGE:' \
             '  handoff_to_codex.sh "<task>"                       file-drop (writes an envelope; prints a pickup line)' \
+            '  handoff_to_codex.sh --request-goal [--] "<task>"  file-drop with an explicit goal-setup request' \
             '  handoff_to_codex.sh --ipc <conversationId> "<task>" live delivery into an existing Desktop thread' \
-            '  handoff_to_codex.sh --ipc <conversationId> [--autoload off|codex-uri] [--intended-host package|ABSOLUTE-EXE] [--foreground-policy defer|switch|restore-if-known] [--ack-foreground-switch] -- "<task>"' \
+            '  handoff_to_codex.sh --ipc <conversationId> [--request-goal] [--autoload off|codex-uri] [--intended-host package|ABSOLUTE-EXE] [--foreground-policy defer|switch|restore-if-known] [--ack-foreground-switch] -- "<task>"' \
             '  handoff_to_codex.sh -h | --help | -v | --version' \
             '' \
             'NOTES:' \
@@ -86,6 +89,8 @@ case "${1:-}" in
             '  > ${CODEX_IPC_ROOT}/host-policy.json > defaults (autoload=off, intended-host=package).' \
             '  Malformed settings at any present layer fail closed. Alternate hosts may receive sends but' \
             '  are never activated through codex://. Every send/retry rechecks the running host inventory.' \
+            '  --request-goal adds a goal-setup request to the payload. It is off by default and does not' \
+            '  inspect, replace, or otherwise change an existing goal.' \
             '  Transport root: ${CODEX_IPC_ROOT:-~/.claude/ipc}. Envelopes are kept by default.' \
             '  --app/--open/--exec were removed in v0.1.8 (No Codex CLI).' \
             '' \
@@ -275,6 +280,7 @@ fi
 MODE="filedrop"
 IPC_CID=""
 TASK=""
+REQUEST_GOAL=0
 
 # --- Foreground policy for live Desktop IPC (--ipc only; see SKILL.md) ---
 # defer (default): never navigate the visible Codex app; switch: navigate it to the
@@ -300,8 +306,8 @@ TASK_AFTER_DASHDASH=0
 guard_task() {
     if [[ "$TASK" == --* ]]; then
         echo "ERROR: the task looks like a flag ('$TASK') -- the real task was likely dropped." >&2
-        echo "Note: --allow-any-thread is a CLIENT flag set internally by this wrapper; do NOT pass" >&2
-        echo "it (or any flag) as a wrapper argument. Usage: $0 --ipc <conversationId> \"<task>\"" >&2
+        echo "Note: --allow-any-thread is a CLIENT flag set internally by this wrapper; do NOT pass it." >&2
+        echo "Supported wrapper flags must appear in the positions shown by --help." >&2
         exit 1
     fi
 }
@@ -318,7 +324,8 @@ case "${1:-}" in
         fi
         IPC_CID="${1,,}"; shift
         # Foreground-policy argument loop. Canonical grammar:
-        #   --ipc <uuid> [--foreground-policy defer|switch|restore-if-known]
+        #   --ipc <uuid> [--request-goal]
+        #                [--foreground-policy defer|switch|restore-if-known]
         #                [--ack-foreground-switch] [--autoload off|codex-uri]
         #                [--intended-host package|ABSOLUTE-EXE] [--] "<task>"
         # Legacy `--ipc <uuid> "<task>"` is preserved; the historical client-only
@@ -329,6 +336,8 @@ case "${1:-}" in
                 --allow-any-thread)
                     # Client flag set internally by this wrapper; absorbed, never forwarded.
                     shift;;
+                --request-goal)
+                    REQUEST_GOAL=1; shift;;
                 --foreground-policy)
                     if [[ -z "${2:-}" ]]; then
                         echo "ERROR: --foreground-policy requires a value (defer|switch|restore-if-known)." >&2
@@ -353,7 +362,7 @@ case "${1:-}" in
                     TASK_AFTER_DASHDASH=1; shift; break;;
                 --*)
                     echo "ERROR: unknown --ipc flag '$1'." >&2
-                    echo "Usage: $0 --ipc <conversationId> [--autoload off|codex-uri] [--intended-host package|ABSOLUTE-EXE] [--foreground-policy defer|switch|restore-if-known] [--ack-foreground-switch] [--] \"<task>\"" >&2
+                    echo "Usage: $0 --ipc <conversationId> [--request-goal] [--autoload off|codex-uri] [--intended-host package|ABSOLUTE-EXE] [--foreground-policy defer|switch|restore-if-known] [--ack-foreground-switch] [--] \"<task>\"" >&2
                     exit 1;;
                 *)
                     break;;
@@ -366,6 +375,23 @@ case "${1:-}" in
         TASK="${1}"; shift
         # After an explicit `--`, a dash-leading task is intentional; otherwise a
         # flag-shaped task means the real task was dropped (fail closed).
+        [[ "$TASK_AFTER_DASHDASH" -eq 1 ]] || guard_task
+        if [[ $# -gt 0 ]]; then
+            echo "ERROR: unexpected trailing argument(s) after the task: $*" >&2
+            echo "(The task must be the final argument; quote it as one string.)" >&2
+            exit 1
+        fi
+        ;;
+    --request-goal)
+        REQUEST_GOAL=1; shift
+        if [[ "${1:-}" == "--" ]]; then
+            TASK_AFTER_DASHDASH=1; shift
+        fi
+        if [[ -z "${1:-}" ]]; then
+            echo "ERROR: --request-goal requires a task: $0 --request-goal [--] \"task\"" >&2
+            exit 1
+        fi
+        TASK="${1}"; shift
         [[ "$TASK_AFTER_DASHDASH" -eq 1 ]] || guard_task
         if [[ $# -gt 0 ]]; then
             echo "ERROR: unexpected trailing argument(s) after the task: $*" >&2
@@ -514,6 +540,10 @@ EFFORT_NOTE=""
 [[ -n "${CODEX_REASONING_EFFORT:-}" ]] && EFFORT_NOTE="
 ## Suggested reasoning effort
 ${CODEX_REASONING_EFFORT}"
+GOAL_REQUEST_CLAUSE=""
+if [[ "$REQUEST_GOAL" -eq 1 ]]; then
+    GOAL_REQUEST_CLAUSE=", set your \`/goal\` to a concise summary of it"
+fi
 
 # --- Resolve Claude's own session transcript (OPT-IN orientation aid) ---
 # Transcript paths expose the full local session context, so they are included only
@@ -544,7 +574,7 @@ Generated: ${STAMP} on branch \`${BRANCH}\` (dispatch ${DISPATCH_ID})
 
 ## How to use this file
 You (Codex) have been handed follow-up work from a Claude Code session.
-Read the **Task** below, set your \`/goal\` to a concise summary of it, then complete it
+Read the **Task** below${GOAL_REQUEST_CLAUSE}, then complete it
 in the associated workspace at:
   ${WORKDIR}
 When finished, write your reply/result to this per-dispatch reply file (create it):
@@ -667,7 +697,8 @@ if [[ "$MODE" == "ipc" ]]; then
     # occurred; the token describes non-admission, not absence of every wire attempt.
     fallback() {
         echo "" >&2
-        echo "FALLBACK -- file-drop is ready. In your Codex session, paste:" >&2
+        echo "FALLBACK -- file-drop is ready." >&2
+        echo "Open the thread in your intended Desktop host's window, then paste:" >&2
         echo "    read \"${OUTBOUND}\" and proceed" >&2
     }
     # Ambiguous terminal: a send was attempted and its outcome is UNKNOWN. The client

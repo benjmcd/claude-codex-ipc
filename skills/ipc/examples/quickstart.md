@@ -28,6 +28,12 @@ The first dispatch command below uses handoff_to_codex.sh.
 Paste the printed pickup line (`read "<task path>" and proceed`) into your Codex session. Codex
 writes its reply to the printed per-dispatch `.reply.md` path.
 
+Goal setup is omitted by default. When the operator explicitly wants this dispatch to create a
+goal, add `--request-goal` before the task. For a thread that already runs a goal, leave the flag
+off and use the file-drop pickup line as manual delivery; the operator may paste it while a turn is
+open. Expect `pending` until the named dispatch has its own completion evidence. Do not use
+`turn/interrupt` or resend to create an idle gap.
+
 ## 2. Explicit Codex Desktop conversation handoff (optional, EXPERIMENTAL)
 
 ```bash

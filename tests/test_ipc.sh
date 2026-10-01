@@ -609,6 +609,7 @@ fgrun --ipc "$UUIDF" "t14 defer"
 [[ $RC -ne 0 ]] && printf '%s' "$OUT" | grep -q "RESULT: gui-unowned -- reason=codex-foreground-deferred -- confirmation=not-attempted" && ok "defer -> gui-unowned/codex-foreground-deferred" || no "defer subreason wrong (rc=$RC)"
 printf '%s' "$OUT" | grep -q "POLICY: foreground=defer (source: default) ack=none" && ok "active policy printed" || no "policy line missing"
 ! printf '%s' "$OUT" | grep -q 'codex://threads/' && ok "deferral output gives no manual protocol-activation instruction" || no "deferral output recommends manual protocol activation"
+printf '%s' "$OUT" | grep -Fq "Open the thread in your intended Desktop host's window, then paste:" && ok "deferral assigns thread opening to the operator's intended host" || no "deferral omits the operator-owned thread-opening instruction"
 [[ -n "$(find "$IPCROOT/fgsess/$UUIDF" -name '*.task.md' 2>/dev/null)" ]] && ok "envelope written before deferral" || no "envelope missing on deferral"
 assert_tax "t14"
 
@@ -618,7 +619,9 @@ fgrun --ipc "$UUIDF" --foreground-policy switch -- "t15 switch no ack"
 [[ $RC -ne 0 ]] && printf '%s' "$OUT" | grep -q "reason=foreground-switch-unacknowledged" && ok "switch-no-ack fails closed" || no "switch-no-ack (rc=$RC)"
 [[ ! -f "$FGDIR/nodeargs.log" ]] && ok "no live send attempted" || no "live send attempted despite missing ack"
 [[ ! -f "$FGDIR/pslog" ]] && ok "no autoload attempted" || no "autoload attempted despite missing ack"
-printf '%s' "$OUT" | grep -qx 'FALLBACK -- file-drop is ready. In your Codex session, paste:' && ok "fallback preserved" || no "fallback line missing"
+printf '%s' "$OUT" | grep -qx 'FALLBACK -- file-drop is ready.' \
+  && printf '%s' "$OUT" | grep -Fqx "Open the thread in your intended Desktop host's window, then paste:" \
+  && ok "operator-owned fallback preserved" || no "operator-owned fallback lines missing"
 assert_tax "t15"
 
 echo "== 16. switch with ack: autoload gets policy args; delivery reports foreground-switched =="
@@ -942,6 +945,29 @@ assert_recovery_guidance(){ # $1 payload, $2 carrier label
   fi
 }
 
+assert_default_goal_free(){ # $1 payload, $2 carrier label
+  local payload="$1" carrier="$2"
+  if [[ -n "$payload" ]] \
+    && grep -Fq 'Read the **Task** below, then complete it' "$payload" \
+    && ! grep -Fq 'set your `/goal`' "$payload"; then
+    ok "$carrier payload leaves goal setup off by default"
+  else
+    no "$carrier payload still requests goal setup by default"
+  fi
+}
+
+assert_requested_goal(){ # $1 payload, $2 carrier label
+  local payload="$1" carrier="$2" count
+  count=0
+  [[ -n "$payload" ]] && count="$(grep -Fc 'set your `/goal` to a concise summary of it' "$payload")"
+  if [[ "$count" == "1" ]] \
+    && grep -Fq 'Read the **Task** below, set your `/goal` to a concise summary of it, then complete it' "$payload"; then
+    ok "$carrier payload carries exactly one explicit goal request"
+  else
+    no "$carrier payload goal-request count/content wrong (count=$count)"
+  fi
+}
+
 run "$REPO" "sessE1" "review the sandboxed change and reply"
 E1_FD=$(find "$IPCROOT/sessE1/filedrop" -name '*.task.md' 2>/dev/null | head -1)
 if [[ -n "$E1_FD" ]] \
@@ -954,6 +980,7 @@ else
   no "filedrop payload missing the denied-reply protocol"
 fi
 assert_recovery_guidance "$E1_FD" "filedrop"
+assert_default_goal_free "$E1_FD" "filedrop"
 
 : > "$TMP/nodeargs.log"
 run "$REPO" "sessE1ipc" --ipc "$UUID" --allow-any-thread "review the sandboxed change and reply"
@@ -967,6 +994,41 @@ else
   no "--ipc payload missing the denied-reply protocol"
 fi
 assert_recovery_guidance "$E1_IPC" "--ipc"
+assert_default_goal_free "$E1_IPC" "--ipc"
+
+run "$REPO" "sessGoalFd" --request-goal "review the sandboxed change and reply"
+GOAL_FD=$(find "$IPCROOT/sessGoalFd/filedrop" -name '*.task.md' 2>/dev/null | head -1)
+if [[ $RC -eq 0 && -n "$GOAL_FD" ]] \
+  && grep -q "attempt to write the printed reply path exactly once" "$GOAL_FD" \
+  && grep -q "the full substantive result" "$GOAL_FD"; then
+  ok "goal-request filedrop payload retains the denied-reply protocol"
+else
+  no "goal-request filedrop payload missing or changed the denied-reply protocol"
+fi
+assert_recovery_guidance "$GOAL_FD" "goal-request filedrop"
+assert_requested_goal "$GOAL_FD" "goal-request filedrop"
+
+: > "$TMP/nodeargs.log"
+run "$REPO" "sessGoalIpc" --ipc "$UUID" --request-goal -- "review the sandboxed change and reply"
+GOAL_IPC=$(find "$IPCROOT/sessGoalIpc/$UUID" -name '*.task.md' 2>/dev/null | head -1)
+if [[ $RC -eq 0 && -n "$GOAL_IPC" ]] \
+  && grep -q "attempt to write the printed reply path exactly once" "$GOAL_IPC" \
+  && grep -q "the full substantive result" "$GOAL_IPC"; then
+  ok "goal-request --ipc payload retains the denied-reply protocol"
+else
+  no "goal-request --ipc payload missing or changed the denied-reply protocol"
+fi
+assert_recovery_guidance "$GOAL_IPC" "goal-request --ipc"
+assert_requested_goal "$GOAL_IPC" "goal-request --ipc"
+
+run "$REPO" "sessGoalMissing" --request-goal
+if [[ $RC -ne 0 ]] \
+  && printf '%s\n' "$OUT" | grep -Fq -- '--request-goal requires a task' \
+  && [[ -z "$(find "$IPCROOT/sessGoalMissing" -name '*.task.md' 2>/dev/null)" ]]; then
+  ok "--request-goal without a task fails before envelope publication"
+else
+  no "--request-goal missing-task handling is absent or published an envelope"
+fi
 
 assert_no_codex_cli
 

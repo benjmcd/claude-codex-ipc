@@ -60,6 +60,7 @@ The repository-relative Quickstart block below runs from the repository root.
 ```bash
 # 1. File-drop (stable): paste the printed pickup line into your Codex session
 skills/ipc/scripts/handoff_to_codex.sh "review src/parser.js for edge cases"
+# Goal setup is off by default; add --request-goal before the task only on explicit operator intent.
 
 # 2. Live Desktop delivery (experimental): explicit UUID only — preview, then send.
 #    The wrapper repeats one read-only root/model inspection and a fresh host gate before contact;
@@ -74,6 +75,11 @@ skills/ipc/scripts/codex_ipc_replies.sh
 node skills/ipc/scripts/codex_ipc_wait.mjs --thread <conversation-id> --dispatch <dispatchId> \
   --reply-path <printed .reply.md path> --accept-rollout-fallback --budget-ms 1800000 --interval-ms 1000
 ```
+
+For a goal-driven target, keep `--request-goal` off and use manual delivery: generate the
+file-drop envelope, then have the operator paste its pickup line into the intended thread. A closed
+turn is not a precondition. Expect `pending` until the named dispatch has its own completion
+evidence; never call `turn/interrupt` or resend merely to manufacture an idle gap.
 
 `codex_ipc_wait` prints exactly one of six tokens on stdout — `done`, `aborted`, `superseded`,
 `reply-missing`, `pending`, `unavailable`. `done` certifies that the **named dispatch's own turn**
