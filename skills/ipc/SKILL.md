@@ -191,12 +191,31 @@ Codex. Use the maintained wrapper, not raw IPC:
 On Windows PowerShell, run the `.sh` wrapper through Git Bash.
 
 `--allow-any-thread` is a **client** flag (`codex_ipc_client.mjs`) that the wrapper sets
-**internally** on the explicit-thread path; it is NOT a `handoff_to_codex.sh` argument. Do not pass
-it — or any flag — to the wrapper after the conversationId; the wrapper reads the next argument as
-the task. (The wrapper gracefully absorbs a mistakenly-forwarded `--allow-any-thread` and fails
-closed on any other stray flag.) It is accepted on the client because production `--ipc` requires
-a caller-supplied UUID, the router is conversation-scoped, and the script writes a file-drop
-fallback first. Keep the invariant: one explicit conversationId per send.
+**internally** on the explicit-thread path; it is NOT a `handoff_to_codex.sh` argument. The wrapper's
+supported policy flags go after the conversationId and before `--` and the task. A positional task
+may still follow the UUID directly when no policy flag is needed. The wrapper gracefully absorbs a
+mistakenly-forwarded `--allow-any-thread` and fails closed on unsupported flags. The client accepts
+`--allow-any-thread` because production `--ipc` requires a caller-supplied UUID, the router is
+conversation-scoped, and the script writes a file-drop fallback first. Keep the invariant: one
+explicit conversationId per send.
+
+The wrapper applies one shared **Desktop host policy** before every initial send and every retry.
+It requires a complete read-only process/package inventory with exactly one running intended GUI
+host and no other GUI host identity. Configuration resolves independently per field in this order:
+wrapper flag, environment (`CODEX_IPC_AUTOLOAD`, `CODEX_IPC_INTENDED_HOST`),
+`${CODEX_IPC_ROOT}/host-policy.json`, then defaults. The defaults are `autoload=off` and
+`intendedHost=package`. Every present layer is validated even when a higher-priority value wins;
+malformed, unreadable, incomplete, mixed-host, missing-host, or duplicate-host evidence refuses
+before the follower client runs. An alternate intended host is an absolute executable path: it can
+receive an explicitly targeted IPC send when it is the sole proven GUI host, but the package
+`codex://` protocol is never used to activate it. Wrapper output prints only the effective host kind
+and configuration source; it does not print executable paths or process command lines.
+
+Minimal descriptor:
+
+```json
+{"schemaVersion":1,"autoload":"off","intendedHost":{"kind":"package"}}
+```
 
 The wrapper treats `no-client-found` as authority to consider auto-load only when the parsed client
 result is structurally exact: failed result for this target, the exact router error, and exactly
@@ -231,8 +250,8 @@ After router acceptance, confirmation is:
 
 All three preserve `gui-delivered` and exit 0 after an accepted send. Observer failure maps to
 `rollout-unavailable`; pending/unavailable never cause an automatic resend.
-See [references/architecture.md](references/architecture.md) for the full taxonomy, the auto-load
-/focus-snapback behavior (experimental, Windows-only), and their disclosed residues. The file-drop
+See [references/architecture.md](references/architecture.md) for the full taxonomy, the gated
+activation/focus behavior (experimental, Windows-only), and its disclosed residues. The file-drop
 **envelope** is preserved in every outcome; the **pickup line** is printed only when the failure is
 structurally proven not to have admitted a follower. `confirmation=not-attempted` names that
 non-admission state; an exact `no-client-found` router request may still have occurred. After an
@@ -243,13 +262,23 @@ When the target is unowned and Codex itself is the operator's foreground window,
 policy** applies (default `defer` — never navigate the visible app). Canonical grammar:
 
 ```bash
-"${CLAUDE_SKILL_DIR}/scripts/handoff_to_codex.sh" --ipc <conversationId> --foreground-policy switch --ack-foreground-switch -- "<task>"
+"${CLAUDE_SKILL_DIR}/scripts/handoff_to_codex.sh" --ipc <conversationId> --autoload codex-uri --foreground-policy switch --ack-foreground-switch -- "<task>"
 ```
 
-`switch` requires the explicit acknowledgement (it visibly navigates the Codex app and leaves it
-on the target thread); `restore-if-known` is fail-closed until in-app thread restoration can be
-proven by a read-only authority. The active policy and acknowledgement source are printed on every
-send. Valid UUID/task invocations always write the file-drop envelope before any policy refusal.
+`--autoload codex-uri` is a separate explicit request for package-protocol activation; it does not
+bypass the shared host gate. `switch` requires the explicit acknowledgement (it visibly navigates
+the Codex app and leaves it on the target thread); `restore-if-known` is fail-closed until in-app
+thread restoration can be proven by a read-only authority. The active host settings, their sources,
+the foreground policy, and the acknowledgement source are printed without exposing host paths.
+Valid UUID/task invocations always write the file-drop envelope before any policy refusal.
+
+The shipped real-machine activation evidence readers are intentionally stricter than candidate
+registration or deployment-history presence. They currently do not establish either a complete
+negative package-update state or the effective Shell protocol handler. Consequently, a real
+unowned-thread `codex-uri` request currently refuses with `autoload-policy-refused`; mocked dry-run
+tests exercise the positive decision path without granting real activation authority. A future
+qualified current-state package reader and effective-handler resolver must land before real
+activation can become eligible. Revalidation and historical live proof do not waive these gates.
 
 Do not send while the target appears mid-turn unless the user explicitly asked to interrupt,
 continue, or manage that active state. Router acceptance alone does not prove pickup. Use the
@@ -468,12 +497,12 @@ stderr only; stdout and the exit code are unchanged, and neither is ever a refus
 - `/ipc` success is strictly GUI delivery into the renderer-owned Desktop thread. Never treat any
   non-GUI execution as an `/ipc` fallback or `/ipc` success. (The CLI-backed `--exec`/`--open`/`--app`
   modes were removed in v0.1.8; there is no headless execution path in this tool.)
-- Unowned threads are recovered by the wrapper's automatic `codex://threads/<conversationId>` load
-  with focus snapback (experimental, Windows-only) — never by asking the operator to click, and
-  never by navigating while Codex is the operator's foreground window **unless** the operator
-  explicitly authorized it (`--foreground-policy switch --ack-foreground-switch`, or the standing
-  approval env var, which is printed on every send). Default policy is `defer`;
-  `restore-if-known` is fail-closed until thread-level restoration is proven.
+- Unowned threads remain file-drop recoverable. Package-protocol activation is Windows-only,
+  default-off, and requires explicit `--autoload codex-uri` plus fresh host, package-update, protocol,
+  target, and foreground-policy gates. Alternate intended hosts are never protocol-activated.
+  Current real-machine package/handler evidence is insufficient, so activation refuses safely.
+  Default foreground policy is `defer`; `restore-if-known` is fail-closed until thread-level
+  restoration is proven.
 - A missing conversationId is missing target authority, not authorization to create a fresh Codex
   thread/session. Create/open new sessions only on an explicit new-session request, resolving the
   intended project/folder first.
@@ -505,7 +534,7 @@ stderr only; stdout and the exit code are unchanged, and neither is ever a refus
 ## Further reading
 
 - [references/architecture.md](references/architecture.md) — transport model, delivery result
-  taxonomy, auto-load behavior, reply viewer.
+  taxonomy, host policy and gated activation, reply viewer.
 - [references/security-model.md](references/security-model.md) — threat model and safety gates.
 - [references/troubleshooting.md](references/troubleshooting.md) — dependency and failure-mode
   triage.

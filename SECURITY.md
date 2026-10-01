@@ -58,6 +58,13 @@ A live Desktop send starts a real model turn in a real thread. Gates, all fail-c
   `CODEX_IPC_AUTHORIZED_TEST_THREAD` env var. **No authorized thread id ships in the code.**
 - The wrapper refuses to deep-link missing or archived threads and writes the file-drop fallback
   before any live attempt.
+- Before every maintained-wrapper send or retry, a shared read-only policy requires a complete
+  inventory with exactly one intended GUI host and no other GUI host. Configuration resolves per
+  field as flag > environment > `${CODEX_IPC_ROOT}/host-policy.json` > defaults; malformed present
+  inputs fail closed even when overridden.
+- Activation defaults off. Alternate intended hosts can be send targets but are never package
+  protocol activation targets. Package activation additionally requires positive package-update
+  clearance and an effective-handler binding; unknown or conflicting evidence refuses.
 - Completeness note: selecting `--ipc <uuid>` is itself the live-delivery acknowledgement;
   inspect-before-send is the `/ipc` agent's own preflight step, not a wrapper gate. The
   `handoff_to_codex.sh --ipc <uuid>` wrapper internally supplies

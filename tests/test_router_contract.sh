@@ -570,9 +570,22 @@ case "$name" in
 esac
 EOF
 [[ $? -eq 0 ]] || fatal "could not materialize router-contract node stub"
+POLICY_LOG="$TMP/router-policy.log"
+: > "$POLICY_LOG"
 cat > "$STUB_BIN/powershell.exe" <<'EOF'
 #!/usr/bin/env bash
-printf 'powershell.exe invoked\n' >> "$TOOL_LOG"
+script=""
+previous=""
+for argument in "$@"; do
+  if [[ "$previous" == "-File" ]]; then script="${argument//\\//}"; break; fi
+  previous="$argument"
+done
+if [[ "${script##*/}" == "codex_ipc_host_policy.ps1" ]]; then
+  printf '%s\n' "$*" >> "$POLICY_LOG"
+  echo '{"schemaVersion":1,"ok":true,"purpose":"send","configuration":{"valid":true,"autoload":{"value":"codex-uri","source":"environment"},"intendedHost":{"kind":"package","executable":null,"source":"default"}},"inventory":{"complete":true,"guiHosts":[{"matchesIntended":true}],"appServers":[]},"sendEligible":true,"sendReasons":[],"activationEligible":false,"activationReasons":["not-checked"]}'
+  exit 0
+fi
+printf 'powershell.exe invoked: %s\n' "$*" >> "$TOOL_LOG"
 exit 99
 EOF
 [[ $? -eq 0 ]] || fatal "could not materialize router-contract PowerShell tripwire"
@@ -603,9 +616,11 @@ run_wrapper_case(){
     REAL_NODE="$NODE_BIN" \
     ROUTER_CASE="$scenario" \
     TOOL_LOG="$TOOL_LOG" \
+    POLICY_LOG="$POLICY_LOG" \
     HOME="$case_root/home" \
     CLAUDE_SESSION_ID="33333333-3333-4333-8333-333333333333" \
     CODEX_IPC_ROOT="$case_root/ipc" \
+    CODEX_IPC_AUTOLOAD=codex-uri \
     CODEX_IPC_RETENTION_DAYS=0 \
     bash "$WRAPPER" --ipc "$target" "$TASK_TEXT" 2>&1)"
   rc=$?
@@ -669,8 +684,196 @@ run_wrapper_case malformed 1 \
   "malformed client failure fails closed as router-pipe-failure" \
   "FALLBACK -- file-drop is ready"
 
-if [[ ! -s "$TOOL_LOG" ]]; then
-  ok "sentinel invoked no Desktop, PowerShell, or Codex transport helper"
+echo "== revalidator host-policy authority =="
+REVALIDATOR="$(dirname "$CLIENT")/codex_ipc_revalidate.mjs"
+[[ -f "$REVALIDATOR" ]] || fatal "revalidator is missing"
+REVALIDATE_HOME="$TMP/revalidate-home"
+REVALIDATE_ROOT="$REVALIDATE_HOME/transport"
+REVALIDATE_LOG="$TMP/revalidate-spawns.log"
+REVALIDATE_LIVE="$TMP/revalidate-live.log"
+REVALIDATE_PRELOAD="$TMP/revalidate-preload.cjs"
+mkdir -p "$REVALIDATE_HOME/.codex/sessions" "$REVALIDATE_ROOT" \
+  || fatal "could not create revalidator fixture state"
+: > "$REVALIDATE_HOME/.codex/config.toml"
+: > "$REVALIDATE_HOME/.codex/state_5.sqlite"
+cat > "$REVALIDATE_PRELOAD" <<'REVALIDATOR_PRELOAD'
+const childProcess = require("node:child_process");
+const fs = require("node:fs");
+const path = require("node:path");
+const { syncBuiltinESMExports } = require("node:module");
+
+const originalExistsSync = fs.existsSync;
+const originalReaddirSync = fs.readdirSync;
+fs.existsSync = function (value) {
+  const text = String(value);
+  if (/^C:\\Program Files\\Git\\(?:bin|usr\\bin)\\bash\.exe$/i.test(text)) return true;
+  return originalExistsSync(value);
+};
+fs.readdirSync = function (value, ...rest) {
+  if (String(value) === "\\\\.\\pipe\\") return ["codex-ipc"];
+  return originalReaddirSync(value, ...rest);
+};
+
+function result(status, stdout = "", stderr = "", error = null) {
+  return { status, signal: null, stdout, stderr, error };
+}
+function policyDocument(mode) {
+  const eligible = {
+    schemaVersion: 1,
+    ok: true,
+    purpose: "send",
+    configuration: {
+      valid: true,
+      autoload: { value: "off", source: "default" },
+      intendedHost: { kind: "package", executable: null, source: "default" },
+      descriptor: { path: "x".repeat(3000), status: "absent" },
+    },
+    inventory: {
+      complete: true,
+      coverage: "synthetic",
+      errors: [],
+      packageRootsComplete: true,
+      packageRoots: [],
+      guiHosts: [{ pid: 10, matchesIntended: true, classification: "package" }],
+      appServers: [],
+    },
+    sendEligible: true,
+    sendReasons: [],
+    activationEligible: false,
+    activationReasons: ["autoload-disabled"],
+  };
+  if (mode === "refuse-other") {
+    eligible.inventory.guiHosts = [{ pid: 10, matchesIntended: false, classification: "other" }];
+    eligible.sendEligible = false;
+    eligible.sendReasons = ["other-desktop-host-running"];
+  } else if (mode === "incomplete") {
+    eligible.inventory.complete = false;
+    eligible.inventory.guiHosts = [];
+    eligible.sendEligible = false;
+    eligible.sendReasons = ["host-inventory-incomplete", "intended-host-not-running"];
+  }
+  return JSON.stringify(eligible);
+}
+
+childProcess.spawnSync = function (command, args = []) {
+  const commandText = String(command);
+  const argv = Array.from(args, String);
+  fs.appendFileSync(process.env.REVALIDATE_LOG, `${commandText}\t${argv.join("\t")}\n`);
+
+  if (/bash(?:\.exe)?$/i.test(commandText)) {
+    if (process.env.REVALIDATE_BASH_MODE === "path-bad" && commandText.toLowerCase() === "bash") {
+      return result(1, "", "synthetic WSL shim failure");
+    }
+    return result(0);
+  }
+  if (/powershell\.exe$/i.test(commandText)) {
+    const fileIndex = argv.findIndex((item) => item === "-File");
+    const script = fileIndex >= 0 ? argv[fileIndex + 1] : "";
+    if (path.basename(script).toLowerCase() === "codex_ipc_host_policy.ps1") {
+      const purposeIndex = argv.indexOf("-Purpose");
+      const rootIndex = argv.indexOf("-IpcRoot");
+      const policyArgsOk =
+        purposeIndex >= 0 && argv[purposeIndex + 1] === "send" &&
+        rootIndex >= 0 && argv[rootIndex + 1] === process.env.CODEX_IPC_ROOT;
+      fs.appendFileSync(process.env.REVALIDATE_LOG, "host-policy-args-ok=" + policyArgsOk + "\n");
+      const mode = process.env.REVALIDATE_POLICY_MODE || "eligible-long";
+      if (mode === "malformed") return result(0, "{bad");
+      if (mode === "empty") return result(0, "");
+      if (mode === "nonzero-ok") return result(7, policyDocument("eligible-long"));
+      return result(0, policyDocument(mode));
+    }
+    const commandBody = argv.join(" ");
+    if (commandBody.includes("PSParser")) return result(0, "PARSE-OK\n");
+    if (commandBody.includes("Get-AppxPackage")) {
+      return result(0, '{"packageInstalled":true,"guiIdentified":true}\n');
+    }
+    return result(97, "", "unexpected PowerShell command");
+  }
+  if (commandText === process.execPath) {
+    if (argv[0] === "--check") return result(0);
+    if (argv[0] === "-e" && argv.join(" ").includes("node:sqlite")) {
+      return result(0, "node:sqlite ok\n");
+    }
+    if (path.basename(argv[0] || "") === "codex_ipc_probe.mjs") {
+      fs.appendFileSync(process.env.REVALIDATE_LIVE, "live-probe\n");
+      return result(0, '{"ok":true}\n');
+    }
+  }
+  return result(null, "", "", Object.assign(new Error(`unexpected spawn: ${commandText}`), { code: "ENOENT" }));
+};
+
+syncBuiltinESMExports();
+REVALIDATOR_PRELOAD
+
+revalidate_case(){ # mode expected-rc predicate [extra args...]
+  local mode="$1" expected_rc="$2" predicate="$3"; shift 3
+  local output rc
+  : > "$REVALIDATE_LOG"
+  : > "$REVALIDATE_LIVE"
+  output="$(env \
+    HOME="$REVALIDATE_HOME" USERPROFILE="$REVALIDATE_HOME" \
+    CODEX_HOME="$REVALIDATE_HOME/.codex" CODEX_IPC_ROOT="$REVALIDATE_ROOT" \
+    REVALIDATE_POLICY_MODE="$mode" REVALIDATE_BASH_MODE="${REVALIDATE_BASH_MODE:-normal}" \
+    REVALIDATE_LOG="$REVALIDATE_LOG" REVALIDATE_LIVE="$REVALIDATE_LIVE" \
+    NODE_OPTIONS="--require=$REVALIDATE_PRELOAD" \
+    "$NODE_BIN" "$REVALIDATOR" "$@" 2>&1)"
+  rc=$?
+  if [[ "$rc" -eq "$expected_rc" ]] && REVALIDATE_PREDICATE="$predicate" \
+    printf '%s' "$output" | REVALIDATE_PREDICATE="$predicate" "$NODE_BIN" -e '
+let text = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => { text += chunk; });
+process.stdin.on("end", () => {
+  try {
+    const value = JSON.parse(text);
+    const predicate = new Function("value", `return Boolean(${process.env.REVALIDATE_PREDICATE});`);
+    process.exit(predicate(value) ? 0 : 1);
+  } catch { process.exit(1); }
+});
+'; then
+    ok "revalidator mode=$mode"
+  else
+    no "revalidator mode=$mode (rc=$rc, expected=$expected_rc)"
+    printf '%s\n' "$output" | sed -n '1,24p'
+  fi
+}
+
+REVALIDATE_BASH_MODE=path-bad revalidate_case eligible-long 0 '
+  value.ok === true && value.checks.hostPolicy.ok === true &&
+  value.checks.hostPolicy.sendEligible === true &&
+  value.summary.failed.length === 0'
+first_bash="$(awk -F '\t' 'tolower($1) ~ /bash(\.exe)?$/ { print $1; exit }' "$REVALIDATE_LOG")"
+if [[ "$("$NODE_BIN" -p 'process.platform')" == "win32" ]]; then
+  [[ "$first_bash" == 'C:\Program Files\Git\bin\bash.exe' ]] \
+    && ok "Windows revalidator prefers pinned Git Bash before a failing PATH shim" \
+    || no "revalidator selected the wrong Bash first: $first_bash"
+else
+  ok "pinned Git Bash ordering is Windows-only"
+fi
+grep -Fqx 'host-policy-args-ok=true' "$REVALIDATE_LOG" \
+  && ok "revalidator passes send purpose and the resolved IPC root to host policy" \
+  || no "revalidator omitted host-policy purpose/root"
+
+REVALIDATE_BASH_MODE=normal revalidate_case refuse-other 1 '
+  value.ok === false && value.checks.hostPolicy.ok === false &&
+  value.checks.hostPolicy.sendEligible === false &&
+  value.summary.failed.includes("hostPolicy")'
+for mode in malformed empty nonzero-ok incomplete; do
+  revalidate_case "$mode" 1 '
+    value.ok === false && value.checks.hostPolicy.ok === false &&
+    value.summary.failed.includes("hostPolicy")'
+done
+
+revalidate_case refuse-other 1 '
+  value.ok === false && value.checks.hostPolicy.ok === false &&
+  value.checks.liveIpcReadProbe.skipped === true' \
+  --allow-live-ipc-read
+[[ ! -s "$REVALIDATE_LIVE" ]] \
+  && ok "host-policy refusal suppresses the optional live probe" \
+  || no "live probe ran after host-policy refusal"
+
+if [[ ! -s "$TOOL_LOG" && -s "$POLICY_LOG" ]]; then
+  ok "sentinel invoked only the read-only host policy, no Desktop, activation, or Codex helper"
 else
   no "unexpected external helper invocation"
   cat "$TOOL_LOG"

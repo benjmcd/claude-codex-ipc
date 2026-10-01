@@ -67,7 +67,12 @@ EOF
 [[ $? -eq 0 ]] || fatal "could not materialize codex tripwire"
 cat > "$BIN/powershell.exe" <<'EOF'
 #!/usr/bin/env bash
-exit 0
+case "$*" in
+  *codex_ipc_host_policy.ps1*)
+    echo '{"schemaVersion":1,"ok":true,"purpose":"send","configuration":{"valid":true,"autoload":{"value":"off","source":"default"},"intendedHost":{"kind":"package","executable":null,"source":"default"}},"inventory":{"complete":true,"guiHosts":[{"matchesIntended":true}],"appServers":[]},"sendEligible":true,"sendReasons":[],"activationEligible":false,"activationReasons":["autoload-disabled"]}'
+    exit 0;;
+  *) exit 0;;
+esac
 EOF
 [[ $? -eq 0 ]] || fatal "could not materialize PowerShell stub"
 chmod +x "$BIN"/* || fatal "could not make IPC stubs executable"
@@ -330,6 +335,7 @@ deep_error(){
 case "\$*" in
   *codex_ipc_client.mjs*)
     printf '%s\n' "\$*" >> "\$FG/nodeargs.log"
+    printf '%s\n' client >> "\$FG/eventlog"
     n=\$(cat "\$FG/send_count" 2>/dev/null || echo 0); n=\$((n+1)); echo "\$n" > "\$FG/send_count"
     mode=\$(cat "\$FG/client_mode" 2>/dev/null || echo always-ok)
     case "\$mode" in
@@ -382,11 +388,60 @@ case "\$*" in
 esac
 EOF
 [[ $? -eq 0 ]] || fatal "could not materialize foreground-policy node stub"
-cat > "$BIN2/powershell.exe" <<EOF
+cat > "$BIN2/powershell.exe" <<'EOF'
 #!/usr/bin/env bash
-printf '%s\n' "\$*" >> "$FGDIR/pslog"
-exit "\$(cat "$FGDIR/pscode" 2>/dev/null || echo 0)"
+FG="__FGDIR__"
+script=""
+previous=""
+for argument in "$@"; do
+  if [[ "$previous" == "-File" ]]; then script="${argument//\\//}"; break; fi
+  previous="$argument"
+done
+base="${script##*/}"
+case "$base" in
+  codex_ipc_host_policy.ps1)
+    printf '%s\n' "$*" >> "$FG/policylog"
+    printf '%s\n' policy >> "$FG/eventlog"
+    [[ ! -f "$FG/policy_stderr" ]] || cat "$FG/policy_stderr" >&2
+    n=$(cat "$FG/policy_count" 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > "$FG/policy_count"
+    mode=$(cat "$FG/policy_mode" 2>/dev/null || echo eligible-codex-uri)
+    case "$mode" in
+      eligible-codex-uri)
+        echo '{"schemaVersion":1,"ok":true,"purpose":"send","configuration":{"valid":true,"autoload":{"value":"codex-uri","source":"environment"},"intendedHost":{"kind":"package","executable":null,"source":"default"}},"inventory":{"complete":true,"guiHosts":[{"matchesIntended":true}],"appServers":[]},"sendEligible":true,"sendReasons":[],"activationEligible":false,"activationReasons":["not-checked"]}'; exit 0;;
+      eligible-off)
+        echo '{"schemaVersion":1,"ok":true,"purpose":"send","configuration":{"valid":true,"autoload":{"value":"off","source":"default"},"intendedHost":{"kind":"package","executable":null,"source":"default"}},"inventory":{"complete":true,"guiHosts":[{"matchesIntended":true}],"appServers":[]},"sendEligible":true,"sendReasons":[],"activationEligible":false,"activationReasons":["autoload-disabled"]}'; exit 0;;
+      eligible-alt-off)
+        echo '{"schemaVersion":1,"ok":true,"purpose":"send","configuration":{"valid":true,"autoload":{"value":"off","source":"flag"},"intendedHost":{"kind":"alternate","executable":"C:\\Alt\\Host\\ChatGPT.exe","source":"flag"}},"inventory":{"complete":true,"guiHosts":[{"matchesIntended":true}],"appServers":[]},"sendEligible":true,"sendReasons":[],"activationEligible":false,"activationReasons":["autoload-disabled","protocol-host-not-package"]}'; exit 0;;
+      eligible-alt-uri)
+        echo '{"schemaVersion":1,"ok":true,"purpose":"send","configuration":{"valid":true,"autoload":{"value":"codex-uri","source":"flag"},"intendedHost":{"kind":"alternate","executable":"C:\\Alt\\Host\\ChatGPT.exe","source":"flag"}},"inventory":{"complete":true,"guiHosts":[{"matchesIntended":true}],"appServers":[]},"sendEligible":true,"sendReasons":[],"activationEligible":false,"activationReasons":["protocol-host-not-package"]}'; exit 0;;
+      refuse-other)
+        echo '{"schemaVersion":1,"ok":true,"purpose":"send","configuration":{"valid":true,"autoload":{"value":"off","source":"default"},"intendedHost":{"kind":"package","executable":null,"source":"default"}},"inventory":{"complete":true,"guiHosts":[{"matchesIntended":false}],"appServers":[]},"sendEligible":false,"sendReasons":["intended-host-not-running","other-desktop-host-running"],"activationEligible":false,"activationReasons":["send-ineligible"]}'; exit 0;;
+      refuse-missing)
+        echo '{"schemaVersion":1,"ok":true,"purpose":"send","configuration":{"valid":true,"autoload":{"value":"off","source":"default"},"intendedHost":{"kind":"package","executable":null,"source":"default"}},"inventory":{"complete":true,"guiHosts":[],"appServers":[]},"sendEligible":false,"sendReasons":["intended-host-not-running"],"activationEligible":false,"activationReasons":["send-ineligible"]}'; exit 0;;
+      change-on-retry)
+        if [[ "$n" -eq 1 ]]; then
+          echo '{"schemaVersion":1,"ok":true,"purpose":"send","configuration":{"valid":true,"autoload":{"value":"codex-uri","source":"environment"},"intendedHost":{"kind":"package","executable":null,"source":"default"}},"inventory":{"complete":true,"guiHosts":[{"matchesIntended":true}],"appServers":[]},"sendEligible":true,"sendReasons":[],"activationEligible":false,"activationReasons":["not-checked"]}'
+        else
+          echo '{"schemaVersion":1,"ok":true,"purpose":"send","configuration":{"valid":true,"autoload":{"value":"codex-uri","source":"environment"},"intendedHost":{"kind":"package","executable":null,"source":"default"}},"inventory":{"complete":true,"guiHosts":[{"matchesIntended":false}],"appServers":[]},"sendEligible":false,"sendReasons":["other-desktop-host-running"],"activationEligible":false,"activationReasons":["send-ineligible"]}'
+        fi
+        exit 0;;
+      malformed) echo '{bad'; exit 0;;
+      empty) exit 0;;
+      invalid-report) echo '{"schemaVersion":1,"ok":true,"purpose":"send"}'; exit 0;;
+      nonzero-ok)
+        echo '{"schemaVersion":1,"ok":true,"purpose":"send","configuration":{"valid":true,"autoload":{"value":"off","source":"default"},"intendedHost":{"kind":"package","executable":null,"source":"default"}},"inventory":{"complete":true,"guiHosts":[{"matchesIntended":true}],"appServers":[]},"sendEligible":true,"sendReasons":[],"activationEligible":false,"activationReasons":[]}'
+        exit 7;;
+      *) echo "unknown policy mode: $mode" >&2; exit 98;;
+    esac;;
+  codex_ipc_autoload.ps1)
+    printf '%s\n' "$*" >> "$FG/pslog"
+    printf '%s\n' helper >> "$FG/eventlog"
+    [[ ! -f "$FG/helper_stderr" ]] || cat "$FG/helper_stderr" >&2
+    exit "$(cat "$FG/pscode" 2>/dev/null || echo 0)";;
+  *) echo "unexpected PowerShell script: $base" >&2; exit 97;;
+esac
 EOF
+sed -i "s|__FGDIR__|$FGDIR|g" "$BIN2/powershell.exe"
 [[ $? -eq 0 ]] || fatal "could not materialize foreground-policy PowerShell stub"
 cat > "$BIN2/codex" <<EOF
 #!/usr/bin/env bash
@@ -397,13 +452,16 @@ EOF
 chmod +x "$BIN2"/* || fatal "could not make foreground-policy stubs executable"
 assert_stub_resolution "$BIN2"
 
-fgreset(){ # fgreset <client_mode> [inspect_mode] [pscode]
+fgreset(){ # fgreset <client_mode> [inspect_mode] [pscode] [observe_mode] [policy_mode]
   rm -f "$FGDIR"/send_count "$FGDIR"/nodeargs.log "$FGDIR"/pslog \
-        "$FGDIR"/observe_count "$FGDIR"/observe_args.log
+        "$FGDIR"/observe_count "$FGDIR"/observe_args.log "$FGDIR"/policy_count \
+        "$FGDIR"/policylog "$FGDIR"/eventlog "$FGDIR"/policy_stderr \
+        "$FGDIR"/helper_stderr
   echo "${1}" > "$FGDIR/client_mode"
   echo "${2:-ok}" > "$FGDIR/inspect_mode"
   echo "${3:-0}" > "$FGDIR/pscode"
   echo "${4:-rollout-hit}" > "$FGDIR/observe_mode"
+  echo "${5:-eligible-codex-uri}" > "$FGDIR/policy_mode"
 }
 fgrun(){ # fgrun <wrapper args...> -> OUT/RC (fast poll knobs; hermetic PATH)
   OUT="$( cd "$REPO" && CODEX_IPC_ROOT="$IPCROOT" CLAUDE_CODE_SESSION_ID="fgsess" \
@@ -425,11 +483,106 @@ assert_no_codex_cli(){
     || { no "a wrapper path invoked the Codex CLI"; printf '%s\n' "$bad"; }
 }
 
+echo "== 13b. shared host policy gates every live send =="
+fgreset always-ok ok 0 rollout-hit refuse-other
+fgrun --ipc "$UUIDF" "t13b initial host refusal"
+[[ $RC -ne 0 ]] \
+  && printf '%s' "$OUT" | grep -q 'HOST-WARNING:' \
+  && printf '%s' "$OUT" | grep -q 'RESULT: failed-closed -- reason=other-desktop-host-running -- confirmation=not-attempted' \
+  && [[ "$(cat "$FGDIR/policy_count" 2>/dev/null || echo 0)" == "1" ]] \
+  && [[ ! -f "$FGDIR/send_count" && ! -f "$FGDIR/pslog" ]] \
+  && ok "initial host refusal happens after envelope publication and before client/helper contact" \
+  || no "initial host refusal escaped the pre-send gate (rc=$RC)"
+t13b=""; while IFS= read -r f; do grep -qx 't13b initial host refusal' "$f" && { t13b="$f"; break; }; done < <(find "$IPCROOT/fgsess" -name '*.task.md' 2>/dev/null)
+[[ -n "$t13b" ]] && ok "host-refused send retains its envelope" || no "host-refused send lost its envelope"
+assert_tax "t13b-refusal"
+
+fgreset always-fail ok 0 rollout-hit eligible-off
+fgrun --ipc "$UUIDF" "t13b default off"
+[[ $RC -ne 0 ]] \
+  && printf '%s' "$OUT" | grep -q 'RESULT: gui-unowned -- reason=autoload-disabled -- confirmation=not-attempted' \
+  && [[ "$(cat "$FGDIR/policy_count" 2>/dev/null || echo 0)" == "1" ]] \
+  && [[ "$(cat "$FGDIR/send_count" 2>/dev/null || echo 0)" == "1" ]] \
+  && [[ ! -f "$FGDIR/pslog" ]] \
+  && ok "default-off exact no-client stops without inspection, activation, or retry" \
+  || no "default-off no-client path activated or retried (rc=$RC)"
+assert_tax "t13b-default-off"
+
+fgreset fail-then-ok ok 0 rollout-hit change-on-retry
+fgrun --ipc "$UUIDF" "t13b retry recheck"
+[[ $RC -ne 0 ]] \
+  && printf '%s' "$OUT" | grep -q 'RESULT: failed-closed -- reason=other-desktop-host-running -- confirmation=not-attempted' \
+  && [[ "$(cat "$FGDIR/policy_count" 2>/dev/null || echo 0)" == "2" ]] \
+  && [[ "$(cat "$FGDIR/send_count" 2>/dev/null || echo 0)" == "1" ]] \
+  && [[ "$(grep -c '^helper$' "$FGDIR/eventlog" 2>/dev/null || echo 0)" == "1" ]] \
+  && [[ "$(tr '\n' ' ' < "$FGDIR/eventlog")" == 'policy client helper policy ' ]] \
+  && ok "retry rechecks host policy and cannot reuse stale no-client output" \
+  || no "retry used stale policy/router state (rc=$RC; events=$(tr '\n' ' ' < "$FGDIR/eventlog" 2>/dev/null))"
+assert_tax "t13b-retry-refusal"
+
+for policy_case in malformed empty invalid-report nonzero-ok; do
+  fgreset always-ok ok 0 rollout-hit "$policy_case"
+  fgrun --ipc "$UUIDF" "t13b $policy_case"
+  want_reason=host-policy-invalid
+  [[ "$policy_case" == nonzero-ok ]] && want_reason=host-policy-unavailable
+  [[ $RC -ne 0 ]] \
+    && printf '%s' "$OUT" | grep -q "reason=${want_reason}" \
+    && [[ ! -f "$FGDIR/send_count" && ! -f "$FGDIR/pslog" ]] \
+    && ok "$policy_case policy output refuses before contact" \
+    || no "$policy_case policy output reached client/helper (rc=$RC)"
+  assert_tax "t13b-$policy_case"
+done
+
+PRIVATE_DIAGNOSTIC='PRIVATE-DIAGNOSTIC-C:\PrivateFixture\RenamedDesktop.exe'
+fgreset always-ok ok 0 rollout-hit eligible-off
+printf '%s\n' "$PRIVATE_DIAGNOSTIC" > "$FGDIR/policy_stderr"
+fgrun --ipc "$UUIDF" "t13b policy diagnostic privacy"
+[[ $RC -eq 0 ]] \
+  && printf '%s' "$OUT" | grep -q 'HOST-WARNING: host policy diagnostics were suppressed' \
+  && ! printf '%s' "$OUT" | grep -Fq "$PRIVATE_DIAGNOSTIC" \
+  && ok "policy diagnostics cannot disclose a private executable path" \
+  || no "policy diagnostics exposed private content (rc=$RC)"
+assert_tax "t13b-policy-privacy"
+
+fgreset always-fail ok 6 rollout-hit eligible-codex-uri
+printf '%s\n' "$PRIVATE_DIAGNOSTIC" > "$FGDIR/helper_stderr"
+fgrun --ipc "$UUIDF" "t13b helper diagnostic privacy"
+[[ $RC -ne 0 ]] \
+  && printf '%s' "$OUT" | grep -q 'RESULT: failed-closed -- reason=autoload-policy-refused -- confirmation=not-attempted' \
+  && ! printf '%s' "$OUT" | grep -Fq "$PRIVATE_DIAGNOSTIC" \
+  && ok "helper diagnostics cannot disclose a private executable path" \
+  || no "helper diagnostics exposed private content (rc=$RC)"
+assert_tax "t13b-helper-privacy"
+
+fgreset always-ok ok 0 rollout-hit eligible-alt-uri
+fgrun --ipc "$UUIDF" --autoload codex-uri --intended-host 'C:\Alt\Host\ChatGPT.exe' -- "t13b explicit host flags"
+[[ $RC -eq 0 ]] \
+  && printf '%s' "$OUT" | grep -q 'POLICY: autoload=codex-uri (source: flag) intended-host=alternate (source: flag)' \
+  && grep -Fq -- '-Autoload codex-uri' "$FGDIR/policylog" \
+  && grep -Fq -- '-IntendedHost C:\Alt\Host\ChatGPT.exe' "$FGDIR/policylog" \
+  && grep -Fq -- '-IpcRoot ' "$FGDIR/policylog" \
+  && ok "explicit host flags and IPC root reach the shared policy with sources disclosed" \
+  || no "host configuration plumbing/source disclosure failed (rc=$RC)"
+[[ "$(cat "$FGDIR/send_count" 2>/dev/null || echo 0)" == "1" ]] \
+  && [[ ! -f "$FGDIR/pslog" ]] \
+  && ok "activation-only alternate-host uncertainty does not block an owned-thread send" \
+  || no "alternate-host owned send was blocked by activation-only evidence"
+assert_tax "t13b-explicit-flags"
+
+fgreset fail-then-ok ok 0 rollout-hit eligible-codex-uri
+fgrun --ipc "$UUIDF" --autoload codex-uri -- "t13b fresh allowed retry"
+[[ $RC -eq 0 ]] \
+  && [[ "$(tr '\n' ' ' < "$FGDIR/eventlog")" == 'policy client helper policy client ' ]] \
+  && ok "allowed retry order is policy, client, helper, fresh policy, client" \
+  || no "allowed retry lacks an immediately preceding fresh policy (rc=$RC; events=$(tr '\n' ' ' < "$FGDIR/eventlog" 2>/dev/null))"
+assert_tax "t13b-fresh-retry"
+
 echo "== 14. default policy defer: foreground-Codex deferral is explicit =="
 fgreset always-fail ok 2
 fgrun --ipc "$UUIDF" "t14 defer"
 [[ $RC -ne 0 ]] && printf '%s' "$OUT" | grep -q "RESULT: gui-unowned -- reason=codex-foreground-deferred -- confirmation=not-attempted" && ok "defer -> gui-unowned/codex-foreground-deferred" || no "defer subreason wrong (rc=$RC)"
 printf '%s' "$OUT" | grep -q "POLICY: foreground=defer (source: default) ack=none" && ok "active policy printed" || no "policy line missing"
+! printf '%s' "$OUT" | grep -q 'codex://threads/' && ok "deferral output gives no manual protocol-activation instruction" || no "deferral output recommends manual protocol activation"
 [[ -n "$(find "$IPCROOT/fgsess/$UUIDF" -name '*.task.md' 2>/dev/null)" ]] && ok "envelope written before deferral" || no "envelope missing on deferral"
 assert_tax "t14"
 

@@ -1,5 +1,6 @@
-# codex_ipc_autoload.ps1 -- load a Codex Desktop thread via the app's own deep link,
-# with automatic focus snapback so the operator is never left displaced.
+# codex_ipc_autoload.ps1 -- request a gated Codex Desktop thread activation through
+# the package protocol, with focus handling after the shared host policy authorizes it.
+# Activation is off by default and alternate intended hosts are never protocol-activated.
 #
 # Foreground policy (EXPERIMENTAL, wrapper-controlled):
 #   defer            (default) never navigate while Codex itself is the foreground window;
@@ -11,18 +12,12 @@
 #                    authority exists, so in-app thread restoration cannot be proven. A
 #                    syntactically valid -RestoreConversationId is NOT proof.
 #
-# Conservative foreground detection (positive identity, fail closed). Since the
-# 2026-07-09 host merge the Codex Desktop GUI runs as ChatGPT.exe under the unchanged
-# OpenAI.Codex package family, so name-only matching is insufficient in both directions:
-#   provably-Codex  : process name 'codex' (pre-merge GUI, kept for backward compat), or
-#                     process name 'chatgpt' whose executable path lies under
-#                     WindowsApps\OpenAI.Codex_* (the merged host).
-#   gated-as-Codex  : unknown/empty foreground names, or a 'chatgpt' process whose path is
-#                     unreadable (elevated/protected) — ambiguous identity defers and never
-#                     auto-switches (displacing an unidentified app is worse than deferring).
-#   known non-Codex : everything else, including a 'chatgpt' process with a readable path
-#                     outside OpenAI.Codex_* (e.g. a distinct ChatGPT-family app) — keeps
-#                     the original deep-link + focus-snapback behavior unchanged.
+# Host policy is shared with the wrapper. Configuration resolves per field as explicit
+# parameter > environment > ${CODEX_IPC_ROOT}/host-policy.json > defaults. Every present
+# layer is validated even when overridden. Before foreground handling and again immediately
+# before Start-Process, activation requires a complete single-host inventory, the package
+# intended host, explicit codex-uri opt-in, qualified package-update clearance, and a
+# qualified effective protocol handler. Any unknown or conflicting evidence refuses.
 #
 # -DryRun prints a compact machine-readable action record and never calls Start-Process,
 # SetForegroundWindow, or keybd_event. -MockForegroundProcess / -MockForegroundPath
@@ -34,6 +29,7 @@
 #   2 = foreground Codex (or unidentifiable foreground) deferred; nothing was fired
 #   4 = restore-if-known requested but selected-thread restore authority is unproven
 #   5 = switch requested without acknowledgement
+#   6 = shared host/activation policy refused or was unavailable
 param(
     [Parameter(Mandatory)][string]$ConversationId,
     [ValidateSet("defer", "restore-if-known", "switch")]
@@ -43,6 +39,12 @@ param(
     [switch]$DryRun,
     [string]$MockForegroundProcess = "",
     [string]$MockForegroundPath = "",
+    [string]$IpcRoot = "",
+    [string]$Autoload = "",
+    [string]$IntendedHost = "",
+    [string]$MockInventoryJson = "",
+    [string]$MockPackageJson = "",
+    [string]$MockRegistrationJson = "",
     [int]$DeferSeconds = 120
 )
 
@@ -57,6 +59,62 @@ if ($RestoreConversationId -ne "" -and $RestoreConversationId -notmatch $UUID_RE
     exit 1
 }
 
+$AUTOLOAD_BOUND = $PSBoundParameters.ContainsKey('Autoload')
+$INTENDED_HOST_BOUND = $PSBoundParameters.ContainsKey('IntendedHost')
+$IPC_ROOT_BOUND = $PSBoundParameters.ContainsKey('IpcRoot')
+$MOCK_INVENTORY_BOUND = $PSBoundParameters.ContainsKey('MockInventoryJson')
+$MOCK_PACKAGE_BOUND = $PSBoundParameters.ContainsKey('MockPackageJson')
+$MOCK_REGISTRATION_BOUND = $PSBoundParameters.ContainsKey('MockRegistrationJson')
+
+$HOST_POLICY_SCRIPT = Join-Path $PSScriptRoot 'codex_ipc_host_policy.ps1'
+if (-not (Test-Path -LiteralPath $HOST_POLICY_SCRIPT -PathType Leaf)) {
+    Write-Error 'ACTION: host-policy-refused reason=host-policy-unavailable detail=policy-script-missing'
+    exit 6
+}
+try {
+    . $HOST_POLICY_SCRIPT
+} catch {
+    Write-Error 'ACTION: host-policy-refused reason=host-policy-unavailable detail=policy-load-failed'
+    exit 6
+}
+
+function Get-CodexIpcActivationPolicyArguments {
+    $policyArguments = @('-Purpose', 'activation')
+    if ($IPC_ROOT_BOUND) { $policyArguments += @('-IpcRoot', $IpcRoot) }
+    if ($AUTOLOAD_BOUND) { $policyArguments += @('-Autoload', $Autoload) }
+    if ($INTENDED_HOST_BOUND) { $policyArguments += @('-IntendedHost', $IntendedHost) }
+    if ($DryRun) { $policyArguments += '-DryRun' }
+    if ($MOCK_INVENTORY_BOUND) { $policyArguments += @('-MockInventoryJson', $MockInventoryJson) }
+    if ($MOCK_PACKAGE_BOUND) { $policyArguments += @('-MockPackageJson', $MockPackageJson) }
+    if ($MOCK_REGISTRATION_BOUND) { $policyArguments += @('-MockRegistrationJson', $MockRegistrationJson) }
+    return $policyArguments
+}
+
+function Invoke-CodexIpcActivationGate {
+    param([string]$Phase)
+
+    try {
+        $report = Invoke-CodexIpcHostPolicyCli -Arguments (Get-CodexIpcActivationPolicyArguments)
+    } catch {
+        Write-Error "ACTION: host-policy-refused phase=$Phase reason=host-policy-invalid detail=configuration-or-inventory-rejected"
+        return $null
+    }
+    if ($null -eq $report -or -not $report.ok) {
+        Write-Error "ACTION: host-policy-refused phase=$Phase reason=host-policy-unavailable"
+        return $null
+    }
+    if (-not $report.activationEligible) {
+        $reasonTokens = @($report.activationReasons) + @($report.sendReasons)
+        $reason = if ($reasonTokens.Count -gt 0) { [string]$reasonTokens[0] } else { 'host-policy-unavailable' }
+        Write-Error "ACTION: host-policy-refused phase=$Phase reason=$reason reasons=$($reasonTokens -join ',')"
+        return $null
+    }
+    return $report
+}
+
+$INITIAL_HOST_POLICY = Invoke-CodexIpcActivationGate -Phase 'pre-foreground'
+if ($null -eq $INITIAL_HOST_POLICY) { exit 6 }
+
 Add-Type @"
 using System;
 using System.Runtime.InteropServices;
@@ -67,11 +125,6 @@ public class W {
   [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
 }
 "@
-
-# Package-path identity for the merged host. WindowsApps package directories are
-# ACL-protected (a same-user process cannot fabricate one), so a path prefix under
-# WindowsApps\OpenAI.Codex_* is positive identity, not a spoofable name.
-$CODEX_PKG_PATH_RE = '(?i)[\\/]WindowsApps[\\/]OpenAI\.Codex_[^\\/]+[\\/]'
 
 function Get-FgIdentity {
     if ($MockForegroundProcess -ne "") {
@@ -88,17 +141,39 @@ function Get-FgIdentity {
 }
 
 function Test-CodexCertain($fg) {
-    if ($fg.Name -match '^(?i)codex$') { return $true }
-    return ($fg.Name -match '^(?i)chatgpt$') -and
-           (-not [string]::IsNullOrWhiteSpace($fg.Path)) -and
-           ($fg.Path -match $CODEX_PKG_PATH_RE)
+    if ($fg.Name -notmatch '^(?i)(codex|chatgpt)$' -or [string]::IsNullOrWhiteSpace($fg.Path)) {
+        return $false
+    }
+    $foregroundPath = ConvertTo-CodexIpcNormalizedPath -Value $fg.Path
+    foreach ($hostEntry in @($INITIAL_HOST_POLICY.inventory.guiHosts | Where-Object { $_.matchesIntended })) {
+        if ([string]::Equals(
+            $foregroundPath,
+            [string]$hostEntry.executable,
+            [System.StringComparison]::OrdinalIgnoreCase
+        )) {
+            return $true
+        }
+    }
+    return $false
 }
 
 function Test-CodexLike($fg) {
-    # Provably Codex, or unidentifiable, or ambiguous ChatGPT (conservative: gate as if Codex).
+    # Provably intended host, or unidentifiable, or a GUI-like name whose path does
+    # not match the shared inventory (conservative: gate as if Codex).
     if (Test-CodexCertain $fg) { return $true }
     if ([string]::IsNullOrWhiteSpace($fg.Name) -or ($fg.Name -eq 'unknown')) { return $true }
-    return ($fg.Name -match '^(?i)chatgpt$') -and [string]::IsNullOrWhiteSpace($fg.Path)
+    return ($fg.Name -match '^(?i)(codex|chatgpt)$')
+}
+
+function Invoke-CodexIpcProtocolActivation {
+    $freshPolicy = Invoke-CodexIpcActivationGate -Phase 'pre-activation'
+    if ($null -eq $freshPolicy) { return $false }
+    if ($DryRun) { return $true }
+
+    # This is the sole executable protocol-activation site. Every caller passes
+    # through a fresh shared-policy gate immediately before this statement.
+    Start-Process -FilePath "codex://threads/$ConversationId"
+    return $true
 }
 
 $fg = Get-FgIdentity
@@ -117,13 +192,14 @@ if (Test-CodexLike $fg) {
                 exit 2
             }
             if ($DryRun) {
+                if (-not (Invoke-CodexIpcProtocolActivation)) { exit 6 }
                 Write-Output "DRYRUN: action=switch-deeplink policy=switch foreground=$fgName target=$ConversationId"
                 exit 0
             }
             # Navigate the visible Codex app to the target thread. No snapback: Codex is
             # already the foreground app; the disclosed residue is that it now shows the
             # target thread.
-            Start-Process "codex://threads/$ConversationId"
+            if (-not (Invoke-CodexIpcProtocolActivation)) { exit 6 }
             exit 0
         }
         "restore-if-known" {
@@ -154,14 +230,15 @@ if (Test-CodexLike $fg) {
     }
 }
 
-# Known non-Codex foreground: original behavior — save focus, fire deep link, snap back.
+# Non-Codex foreground: save focus, request the freshly gated deep link, then snap back.
 if ($DryRun) {
+    if (-not (Invoke-CodexIpcProtocolActivation)) { exit 6 }
     Write-Output "DRYRUN: action=deeplink-snapback policy=$ForegroundPolicy foreground=$fgName target=$ConversationId"
     exit 0
 }
 
 $fg = [W]::GetForegroundWindow()
-Start-Process "codex://threads/$ConversationId"
+if (-not (Invoke-CodexIpcProtocolActivation)) { exit 6 }
 
 # Wait for activation to steal focus (it may not, if the app absorbs it silently).
 $sw = [System.Diagnostics.Stopwatch]::StartNew()

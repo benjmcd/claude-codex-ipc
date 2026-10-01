@@ -22,6 +22,8 @@ const REQUIRED_FILES = [
   "scripts/codex_ipc_client.mjs",
   "scripts/codex_ipc_owner_probe.mjs",
   "scripts/codex_ipc_probe.mjs",
+  "scripts/codex_ipc_autoload.ps1",
+  "scripts/codex_ipc_host_policy.ps1",
   "scripts/codex_ipc_revalidate.mjs",
   "scripts/codex_ipc_session_inspect.mjs",
   "scripts/codex_ipc_snapshot.mjs",
@@ -616,6 +618,70 @@ function main() {
           contains("scripts/handoff_to_codex.sh", "--accept-rollout-fallback --budget-ms 1800000 --interval-ms 1000"),
       },
     ], "Static easy-path/reference lock only: it proves the wait references and OQ-4 caveat bytes are present, not their runtime effect."),
+    check("REQ-020", "Every live attempt is bound to one intended running Desktop host; activation is separately opt-in and fail-closed.", [
+      {
+        label: "shared host policy defaults to autoload off and the package intended host",
+        file: "scripts/codex_ipc_host_policy.ps1",
+        ok:
+          contains("scripts/codex_ipc_host_policy.ps1", "$autoloadValue = 'off'") &&
+          contains("scripts/codex_ipc_host_policy.ps1", "-Value 'package' -Source 'default'") &&
+          contains("scripts/codex_ipc_host_policy.ps1", "host-policy.json"),
+      },
+      {
+        label: "host policy refuses incomplete, absent, mixed, or duplicate GUI identity evidence",
+        file: "scripts/codex_ipc_host_policy.ps1",
+        ok:
+          contains("scripts/codex_ipc_host_policy.ps1", "host-inventory-incomplete") &&
+          contains("scripts/codex_ipc_host_policy.ps1", "intended-host-not-running") &&
+          contains("scripts/codex_ipc_host_policy.ps1", "other-desktop-host-running") &&
+          contains("scripts/codex_ipc_host_policy.ps1", /eligible\s*=\s*\(\$Inventory\.complete\s+-and\s+\$intendedCount\s+-eq\s+1\s+-and\s+\$otherCount\s+-eq\s+0\)/),
+      },
+      {
+        label: "wrapper invokes the send gate inside every live attempt and never activates an alternate host",
+        file: "scripts/handoff_to_codex.sh",
+        ok:
+          contains("scripts/handoff_to_codex.sh", "host_policy_send()") &&
+          contains("scripts/handoff_to_codex.sh", /send_live\(\)[\s\S]{0,1200}?if ! host_policy_send; then[\s\S]{0,500}?codex_ipc_client\.mjs/) &&
+          contains("scripts/handoff_to_codex.sh", "-Purpose send") &&
+          contains("scripts/handoff_to_codex.sh", 'if [[ "$HOST_AUTOLOAD_EFFECTIVE" == "off" ]]') &&
+          contains("scripts/handoff_to_codex.sh", 'if [[ "$HOST_INTENDED_KIND_EFFECTIVE" != "package" ]]'),
+      },
+      {
+        label: "real activation requires fresh qualified package and effective-handler evidence",
+        file: "scripts/codex_ipc_host_policy.ps1",
+        ok:
+          contains("scripts/codex_ipc_host_policy.ps1", "no event-history-only path may return 'clear'") &&
+          contains("scripts/codex_ipc_host_policy.ps1", "effective-handler-unqualified") &&
+          contains("scripts/codex_ipc_host_policy.ps1", "protocol-registration-unproven") &&
+          contains("scripts/codex_ipc_host_policy.ps1", "package-update-unknown"),
+      },
+      {
+        label: "autoload helper runs a fresh activation gate before the sole protocol launch and exposes refusal exit 6",
+        file: "scripts/codex_ipc_autoload.ps1",
+        ok:
+          contains("scripts/codex_ipc_autoload.ps1", "Invoke-CodexIpcActivationGate -Phase 'pre-foreground'") &&
+          contains("scripts/codex_ipc_autoload.ps1", /Invoke-CodexIpcProtocolActivation[\s\S]*?Invoke-CodexIpcActivationGate -Phase 'pre-activation'[\s\S]*?Start-Process -FilePath "codex:\/\/threads\/\$ConversationId"/) &&
+          contains("scripts/codex_ipc_autoload.ps1", "exit 6"),
+      },
+      {
+        label: "bundled operator contract documents defaults, precedence, alternate-host containment, and current activation refusal",
+        file: "SKILL.md",
+        ok:
+          contains("SKILL.md", "wrapper flag, environment") &&
+          contains("SKILL.md", "`${CODEX_IPC_ROOT}/host-policy.json`, then defaults") &&
+          contains("SKILL.md", "The defaults are `autoload=off` and") &&
+          contains("SKILL.md", "Alternate intended hosts are never protocol-activated") &&
+          contains("SKILL.md", "currently refuses with `autoload-policy-refused`"),
+      },
+      {
+        label: "revalidation syntax-checks and executes the policy before any optional live read probe",
+        file: "scripts/codex_ipc_revalidate.mjs",
+        ok:
+          contains("scripts/codex_ipc_revalidate.mjs", "scripts/codex_ipc_host_policy.ps1") &&
+          contains("scripts/codex_ipc_revalidate.mjs", "host policy syntax validation failed; policy was not executed") &&
+          contains("scripts/codex_ipc_revalidate.mjs", "optional live IPC read probe suppressed"),
+      },
+    ], "Static source evidence only. Hermetic policy and wrapper suites exercise configuration precedence, host-cardinality refusal, alternate-host containment, activation evidence, and fresh retry gates; no live Desktop activation is performed."),
   ];
 
   const ok = Object.values(files).every((item) => item.ok) &&

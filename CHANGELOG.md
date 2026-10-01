@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- Added a shared, read-only Desktop host policy for the maintained wrapper. Every initial send and
+  retry now requires a complete inventory with exactly one intended GUI host and no other GUI host;
+  configuration resolves per field as wrapper flag, environment, transport-root descriptor, then
+  default (`autoload=off`, intended host `package`), while every present layer is still validated.
+  Alternate hosts can receive an eligible explicit send but are never package-protocol activated.
+  Package activation is separately opt-in and rechecked immediately before launch. The current
+  real-machine package-update and effective-handler readers intentionally remain unqualified, so
+  real activation refuses until positive authorities replace those unknowns; hermetic DryRun tests
+  cover the decision matrix without opening the protocol or changing application state.
 - Hardened the hermetic test and release harness: top-level temporary roots now
   fail closed before derived writes, wrapper fixtures resolve only their owned
   Node/PowerShell/Codex stubs, inherited Git routing and trace variables are

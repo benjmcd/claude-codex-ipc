@@ -22,8 +22,12 @@ Before force replacement, run the matching preview: `./install.sh --dry-run --fo
 | `node:sqlite is unavailable` | Inspection tools need Node.js with `node:sqlite` support (≥ 22.5; older 22.x/23.x lines may require `--experimental-sqlite`). Upgrade Node, or skip inspection — file-drop works without it. |
 | `ERROR: --app/--open/--exec was removed in v0.1.8` | These CLI-backed modes were removed. Use the default file-drop handoff, or `--ipc <conversationId>` for live delivery — neither invokes the Codex CLI. |
 | `mapfile: command not found` | The reply viewer needs bash ≥ 4; stock macOS bash is 3.2. `brew install bash` and run the script with the newer bash. |
-| `--ipc` → `failed-closed` with pipe/connect errors | Codex Desktop is not running, or the private router protocol drifted after an update. Start the app; run `codex_ipc_revalidate.mjs`; suspect drift before suspecting the target. |
-| `--ipc` → `gui-unowned` repeatedly | No renderer owns the thread and auto-load could not complete (or you are actively working in Codex — the helper defers on purpose). The wrapper's bounded autoload/control logic already runs inside the existing invocation; do not disable or duplicate it. `gui-unowned` alone never authorizes a retry. Before any new authorized invocation, require the original result's structured proof of non-admission (`confirmation=not-attempted` with a printed pickup line) and confirm the current target state. Then open `codex://threads/<conversationId>` manually as preparation, or use the printed file-drop line within the authorized handoff. |
+| `reason=intended-host-not-running` | The read-only inventory did not find exactly one intended GUI host. The follower client did not run. Start or select the intended host outside this tool, or use the printed file-drop line there. |
+| `reason=host-inventory-incomplete` / `other-desktop-host-running` | Identity evidence was unreadable, mixed, or duplicated. Close the unintended GUI host or restore readable process/package evidence; do not bypass the gate. |
+| `--ipc` → `failed-closed` with pipe/connect errors | The host gate passed, but the private router attempt failed or drifted. Run `codex_ipc_revalidate.mjs`; suspect drift before suspecting the target. This is post-attempt ambiguity, so do not resend. |
+| `reason=autoload-disabled` / `protocol-host-not-package` | No renderer owns the thread and activation is off (the default), or the intended host is alternate and therefore never package-activated. Use the printed file-drop line in the intended host. |
+| `reason=autoload-policy-refused` | The helper's fresh activation gate refused. Current real-machine readers do not qualify package-update clearance or the effective protocol handler, so this is the expected result for an unowned real package thread even with `--autoload codex-uri`. Revalidation or historical proof does not override it. |
+| `--ipc` → `gui-unowned` repeatedly | `gui-unowned` alone never authorizes a retry. Require the original structured proof of non-admission (`confirmation=not-attempted` with a printed pickup line), confirm current target/host state, and use that file-drop line if delivery is still required. Do not open the protocol URI manually to bypass the policy. |
 | `confirmation=rollout-hit` | The exact dispatch pickup was observed in a rollout user message. This confirms admission only; inspect completion/reply state separately. |
 | `confirmation=rollout-pending` | At least one authoritative rollout candidate was readable/parseable, but no pickup was observed within the bounded budget. Do not infer non-delivery or resend automatically; inspect current thread state first. |
 | `confirmation=rollout-unavailable` | Observation could not make a determination because no authoritative candidate was usable or ambiguity/schema drift intervened. The accepted send remains `gui-delivered`; inspect current state without automatic resend. |
@@ -108,15 +112,19 @@ Preserve intentional Unicode; do not normalize or auto-convert it.
 ## After a Codex Desktop update
 
 1. `node skills/ipc/scripts/codex_ipc_revalidate.mjs --thread <conversation-id>` (validate-only).
-2. If drift is suspected: `--allow-live-ipc-read --timeout-ms 1500` re-proves router framing
-   (sends `initialize` only).
+2. Inspect `checks.hostPolicy`: it is the current send-eligibility authority. A refusal suppresses
+   the optional live read. If it passes and drift is suspected, `--allow-live-ipc-read --timeout-ms
+   1500` re-proves router framing (sends `initialize` only).
 3. Only with explicit operator approval: controlled live re-proof via
    `codex_ipc_write_proof.mjs --thread <id> --marker <unique> --send --ack-live-write
    --allow-any-thread` against a thread you own.
-4. Check **host identity** explicitly: an update may change the GUI process/executable name
+4. `desktopVersionHint` is diagnostic only; it does not grant host or activation eligibility.
+   Check **host identity** explicitly: an update may change the GUI process/executable name
    without changing the package family. Known case (2026-07-09): the GUI became `ChatGPT.exe`
    under the unchanged `OpenAI.Codex` package family, which broke name-only foreground
    detection until the identity check became path/package based. `revalidate`'s
    `desktopVersionHint` reports the package identity and the positively-identified GUI
    (`guiIdentified:false` means the GUI could not be identified — treat foreground safety as
-   unproven, keep to file-drop, and run the hermetic matrix `tests/test_autoload_matrix.sh`).
+   unproven, keep to file-drop, and run the hermetic matrix `tests/test_autoload_matrix.sh`). Even a
+   green revalidation or controlled write proof does not qualify package-update clearance or the
+   effective protocol handler for activation.

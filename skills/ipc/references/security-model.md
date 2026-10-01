@@ -32,6 +32,14 @@ summary bundled with the skill.
 - The wrapper writes the file-drop fallback before attempting any live delivery, refuses to
   deep-link missing, archived, or AMBIGUOUSLY-inspected threads (empty/malformed/schema-drifted
   inspector output is not permission to navigate), and prints real diagnostics on failure.
+- The maintained wrapper runs a fresh shared read-only host gate before every initial send and
+  retry. It requires exactly one intended GUI host, no other GUI host, and complete identity
+  evidence. Per-field precedence is flag > environment > `${CODEX_IPC_ROOT}/host-policy.json` >
+  defaults; every present layer must be valid even when overridden.
+- Activation defaults off. An alternate intended host can receive an eligible send but is never
+  package-protocol activated. A package activation request also needs qualified update clearance
+  and an effective Shell-handler binding; unknown/conflicting evidence refuses, and historical
+  proof or revalidation does not waive that gate.
 - Navigating the operator's VISIBLE Codex app (`--foreground-policy switch`) requires an explicit
   per-invocation acknowledgement or a standing-approval env var that is printed on every send —
   standing approval can never act silently, and it should be scoped (set per shell/session, not

@@ -74,6 +74,6 @@ Rollback means installing from that preserved or known source, not an automatic 
 | File-drop handoff, primary reply-file viewing | bash + coreutils (Git Bash on Windows). Nothing else. |
 | Bounded rollout confirmation and rollout-derived reply fallback | Node.js (built-ins only). Optional: primary reply-file viewing remains available without Node. |
 | Read-only inspection (inspector/locator/snapshot) | Node.js with `node:sqlite` support (≥ 22.5; older 22.x/23.x lines may require `--experimental-sqlite`) |
-| Live Desktop IPC (`--ipc`) | Windows, Node.js, Codex Desktop running; PowerShell for auto-load |
+| Live Desktop IPC (`--ipc`) | Windows, Node.js, Codex Desktop running, and PowerShell for the mandatory shared host-policy check; package activation is a separate default-off request |
 
 See [COMPATIBILITY.md](COMPATIBILITY.md) for the full matrix.

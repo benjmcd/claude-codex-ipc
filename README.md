@@ -17,7 +17,7 @@ pipe; no queueing guarantees, no multi-user security model).
 |---|---|---|
 | Desktop-independent file transport | File-backed dispatch/reply and the file-primary viewer | Run the hermetic repository gates; these surfaces do not depend on private Desktop schema or live routing. |
 | Read-only private-schema-dependent | Inspector, locator, snapshot, and rollout-derived fallback | Re-run validate-only checks after a Desktop update because private schema and rollout layout may drift. |
-| Experimental live Desktop | Named-pipe delivery, `codex://` autoload, focus handling, and write proof | Assume drift until validate-only revalidation; run live proof only with separate explicit authorization. |
+| Experimental live Desktop | Named-pipe delivery, gated `codex://` activation, focus handling, and write proof | Assume drift until validate-only revalidation; activation is separately opt-in and fail-closed; run live proof only with separate explicit authorization. |
 
 Historical proof is point-in-time evidence, not current certification. Live Desktop IPC was
 observed on 2026-07-08 with the write-proof harness, `defer` and `switch`+ack paths, and the reply
@@ -61,7 +61,8 @@ The repository-relative Quickstart block below runs from the repository root.
 # 1. File-drop (stable): paste the printed pickup line into your Codex session
 skills/ipc/scripts/handoff_to_codex.sh "review src/parser.js for edge cases"
 
-# 2. Live Desktop delivery (experimental): explicit UUID only — inspect first, then send
+# 2. Live Desktop delivery (experimental): explicit UUID only — inspect first, then send.
+#    This can reach only an already renderer-owned thread; Desktop activation stays off by default.
 node skills/ipc/scripts/codex_ipc_session_inspect.mjs --thread <conversation-id> --tail-events 20 --summary
 skills/ipc/scripts/handoff_to_codex.sh --ipc <conversation-id> "run the failing test and fix it"
 
@@ -119,6 +120,8 @@ Component-specific options are documented by each tool's --help and [bundled ref
 | `CODEX_IPC_INCLUDE_TRANSCRIPT` | unset | `1` includes the Claude transcript path (default: omitted) |
 | `CODEX_IPC_GIT_CONTEXT` | `bounded` | `bounded` caps the payload's git-context sections (commits 4096 B, diffstat 4096 B, uncommitted 8192 B) at a line boundary with a truncation notice; `full` restores the pre-0.1.11 unbounded sections. Unrecognized values resolve to `bounded` with a stderr note |
 | `CODEX_IPC_AUTHORIZED_TEST_THREAD` | unset | Operator-owned test thread UUID exempt from `--allow-any-thread` |
+| `CODEX_IPC_AUTOLOAD` | `off` | `off` or explicit package-protocol request `codex-uri`; wrapper flag overrides |
+| `CODEX_IPC_INTENDED_HOST` | `package` | `package` or one absolute alternate GUI executable path; wrapper flag overrides |
 | `CODEX_IPC_FOREGROUND_POLICY` | `defer` | `--ipc` foreground policy: `defer`\|`switch`\|`restore-if-known` |
 | `CODEX_IPC_FOREGROUND_SWITCH_STANDING_APPROVAL` | unset | `1` = standing `switch` ack (printed every send; prefer the per-send flag) |
 | `CODEX_IPC_POLL_DEADLINE_S` / `_INTERVAL_S` | `30` / `2` | Auto-load retry poll (test knobs) |
@@ -133,7 +136,7 @@ Component-specific options are documented by each tool's --help and [bundled ref
 | File-drop handoff | ✅ | ✅ | Stable |
 | Reply viewer | ✅ | ✅ (bash ≥ 4 + GNU coreutils; Node optional for rollout fallback) | Stable |
 | Inspector / locator / snapshot | ✅ | ✅ (Node with `node:sqlite`, ≥ 22.5) | Stable, read-only |
-| Desktop pipe IPC + `codex://` autoload | ✅ | ❌ | **Experimental**, touches live Desktop |
+| Desktop pipe IPC + gated `codex://` activation | ✅ | ❌ | **Experimental**; send gate always applies, activation defaults off |
 
 Dependencies and fallbacks per feature: [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md).
 
@@ -144,6 +147,12 @@ live writes need `--send --ack-live-write` (+`--allow-any-thread`) — except th
 `handoff_to_codex.sh --ipc <uuid>` wrapper, where selecting the explicit UUID is itself the
 acknowledgement and the wrapper supplies those client flags internally (see SECURITY.md
 "Completeness note"); no authorized thread id ships.
+The wrapper rechecks a complete, single-intended-host inventory before every send or retry.
+Host settings resolve per field as flag > environment > `${CODEX_IPC_ROOT}/host-policy.json` >
+defaults (`autoload=off`, intended host `package`); every present layer must be valid. Alternate
+hosts can be targeted but are never protocol-activated. The current real-machine readers do not
+qualify package-update clearance or the effective protocol handler, so an unowned-thread
+`codex-uri` activation request fails closed; hermetic mocks do not grant live authority.
 All SQLite access `readOnly:true`; no config/account mutation; no HTTP listener; transcript
 disclosure opt-in. Threat model: [SECURITY.md](SECURITY.md). Failure triage:
 [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
@@ -194,5 +203,6 @@ machine (any same-user process can read and modify them).
 ## Status
 
 v0.1.14 · [MIT](LICENSE.md) · [benjmcd/claude-codex-ipc](https://github.com/benjmcd/claude-codex-ipc).
-Re-run `codex_ipc_revalidate.mjs` after any Codex Desktop update. The live route and its bounded
-rollout observation remain experimental; `restore-if-known` remains fail-closed/unvalidated.
+Re-run `codex_ipc_revalidate.mjs` after any Codex Desktop update. Revalidation does not waive the
+activation gates. The live route and its bounded rollout observation remain experimental;
+`restore-if-known` remains fail-closed/unvalidated.

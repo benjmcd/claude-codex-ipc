@@ -11,7 +11,7 @@ claude-codex-ipc/
   .claude-plugin/plugin.json     plugin manifest (plugin name: codex-ipc)
   skills/ipc/                    CANONICAL skill source (skill name: ipc)
     SKILL.md                     operational contract (manual-trigger only)
-    scripts/                     the toolkit (bash wrapper + Node tools + PS1 autoload helper)
+    scripts/                     the toolkit (bash wrapper + Node tools + PS1 host policy/activation)
     references/                  bundled deep docs (architecture, security model, troubleshooting,
                                  handoff template)
     examples/                    synthetic payload example + quickstart commands
@@ -70,9 +70,12 @@ is not another exact occurrence, and discloses that uncertainty rather than eras
 1. **File-drop (default, stable):** operator pastes one printed pickup line into their Codex
    session. Zero dependencies beyond bash; zero effect on other sessions.
 2. **`--ipc` live injection (optional, EXPERIMENTAL, Windows):** after writing the file-drop, the
-   wrapper injects the pickup line into the renderer-owned Desktop thread over the app's private
-   named-pipe router; unowned threads are auto-loaded via the app's own `codex://threads/<id>`
-   deep link with focus snapback. Result taxonomy: `gui-delivered | gui-unowned | failed-closed`.
+   wrapper checks a read-only host inventory and injects the pickup line into the renderer-owned
+   Desktop thread over the app's private named-pipe router. The host check runs freshly before the
+   initial send and every retry. Activation of an unowned package thread is a separate, default-off
+   `--autoload codex-uri` request with package/update/protocol and foreground gates; alternate
+   intended hosts are never protocol-activated. Result taxonomy:
+   `gui-delivered | gui-unowned | failed-closed`.
    An accepted send then receives one bounded confirmation token: `rollout-hit`,
    `rollout-pending`, or `rollout-unavailable`. A hit proves only that the exact dispatch pickup
    reached a rollout user message; pending means an authoritative candidate was readable/parseable
@@ -80,6 +83,9 @@ is not another exact occurrence, and discloses that uncertainty rather than eras
    result. None proves completion or reply-file success, and no observation outcome causes an
    automatic resend. The observation budget includes rollout integrity hashing and revalidation;
    expiry cannot emit a hit from an uncertified partial read.
+   The current real-machine readers intentionally leave package-update clearance and the effective
+   protocol handler unqualified, so real activation refuses until qualified sources replace those
+   unknowns. Hermetic mocks exercise the positive decision without granting live authority.
    Built on private internals — revalidate after every Codex Desktop update. That includes
    host-identity drift: since 2026-07-09 the Codex Desktop GUI runs as `ChatGPT.exe` under the
    unchanged `OpenAI.Codex` package family, so foreground/GUI identification is positive
@@ -88,7 +94,10 @@ is not another exact occurrence, and discloses that uncertainty rather than eras
    (The CLI-backed `--exec`/`--app`/`--open` modes were removed in v0.1.8; there is no headless
    execution path.)
 
-The wrapper authorizes auto-load from parsed structure, not text matches. `no-client-found` must be
+Host configuration resolves per field as wrapper flag, environment, `${CODEX_IPC_ROOT}/host-policy.json`,
+then defaults (`autoload=off`, intended host `package`). Every present layer is validated even when
+overridden. The wrapper considers activation only from parsed structure, not text matches.
+`no-client-found` must be
 the exact failed response for the requested target with exactly one matching follower request; the
 pre-navigation inspector must then prove a successful read-only DB open and one exact active row for
 that same target. Rollout-only, missing, archived, malformed, or ambiguous state cannot authorize a
@@ -111,8 +120,9 @@ prevents heuristic retargeting, and ambiguous outcomes are not retried.
 - `codex_ipc_thread_locator.mjs` — candidate discovery for new-session mode (never send
   authority).
 - `codex_ipc_snapshot.mjs` — config/DB hashing for before/after isolation evidence.
-- `codex_ipc_revalidate.mjs` — post-update validate-only checks (pipe connect only with
-  `--allow-live-ipc-read`, sending `initialize` only).
+- `codex_ipc_revalidate.mjs` — post-update validate-only checks. It parses and runs the shared host
+  policy before the optional pipe read; a host refusal suppresses `--allow-live-ipc-read` rather
+  than contacting the pipe. A permitted live read sends `initialize` only.
 - `codex_ipc_contract_audit.mjs` — static requirement matrix over the bundled skill files.
 
 ## Authorized write proof

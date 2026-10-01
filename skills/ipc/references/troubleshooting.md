@@ -10,7 +10,7 @@ Repo-level triage lives in `docs/TROUBLESHOOTING.md`; this is the bundled quick 
 | `--app/--open/--exec was removed in v0.1.8` | CLI-backed modes removed | Use the default file-drop handoff or `--ipc <conversationId>`; neither invokes the Codex CLI |
 | `--ipc` says `node not found` | Node.js missing | Install Node; or use the printed file-drop pickup line (already written) |
 | Inspector says `State DB was not found` | No Codex Desktop state on this machine (or non-default path) | Pass `--db`/`--sessions-root`, or accept that inspection is unavailable |
-| `autoload helper unavailable` warning | Not Windows, or `powershell.exe` missing | Expected off-Windows: open `codex://threads/<id>` manually, or use file-drop |
+| `autoload helper unavailable` | Not Windows, `powershell.exe` missing, or helper missing | Use file-drop; do not launch the protocol manually to bypass the shared policy |
 
 ## Before first use
 
@@ -23,8 +23,13 @@ Backups, sync tools, snapshots, and filesystem recovery may retain deleted conte
 
 Results carry machine tokens: `RESULT: <top> -- reason=<token> -- confirmation=<token>`. Key
 reasons: `renderer-owned`/`auto-loaded`/`foreground-switched` (delivered),
-`codex-foreground-deferred` (use `--foreground-policy switch --ack-foreground-switch`, switch away
-from Codex, or paste the file-drop line), `foreground-unidentified` (foreground app not provably
+`intended-host-not-running`/`host-inventory-incomplete`/`other-desktop-host-running` (fresh send
+gate refusal), `autoload-disabled` (default; no package activation), `protocol-host-not-package`
+(alternate hosts are never package-activated), `autoload-policy-refused` (helper exit 6: fresh
+activation gate refused),
+`codex-foreground-deferred` (if every other activation gate later qualifies, use
+`--foreground-policy switch --ack-foreground-switch`; otherwise switch away or paste the file-drop
+line), `foreground-unidentified` (foreground app not provably
 Codex; never auto-switched), `foreground-restore-unproven` (restore-if-known is fail-closed),
 `autoload-incomplete` (poll window expired), `target-not-found`/`target-archived`/
 `target-inspection-ambiguous` (positive proof required before any deep link),
@@ -40,9 +45,9 @@ evidence cannot prove non-admission or authorize a resend.
    completion or reply-file success. Read the rollout confirmation and use the printed
    `codex_ipc_wait.mjs` command. If the task still does not appear and the target may have been
    mid-turn, re-inspect the authoritative rollout before taking any recovery action.
-2. `RESULT: gui-unowned` — no renderer owns the thread and auto-load did not complete. Open
-   `codex://threads/<conversationId>` in the app, then rerun `/ipc`; or paste the printed
-   file-drop pickup line.
+2. `RESULT: gui-unowned` — no renderer owns the thread and activation was disabled, inapplicable,
+   deferred, or incomplete. Use the printed file-drop pickup line in the intended host. Do not open
+   the protocol URI manually to bypass the gate or automatically rerun `/ipc`.
 3. `RESULT: failed-closed` with `confirmation=not-attempted` — structured evidence proves that no
    follower was admitted (target missing/archived, invalid arguments, refused policy, or exact
    `no-client-found` followed by a later refusal). A router request may have occurred, but no turn
@@ -60,6 +65,11 @@ evidence cannot prove non-admission or authorize a resend.
 node "${CLAUDE_SKILL_DIR}/scripts/codex_ipc_revalidate.mjs" --thread <conversationId>
 # add --allow-live-ipc-read --timeout-ms 1500 to re-prove router framing (initialize only)
 ```
+
+The revalidator parses the PowerShell helpers, validates the descriptor and current host inventory,
+and suppresses the optional initialize probe when `checks.hostPolicy` refuses. `desktopVersionHint`
+is diagnostic. Neither revalidation nor a separately authorized write proof qualifies or bypasses
+package-update/effective-handler evidence for activation.
 
 If drift is confirmed and a live re-proof is genuinely needed, use
 `codex_ipc_write_proof.mjs` dry-run first, then the live path only with explicit operator approval

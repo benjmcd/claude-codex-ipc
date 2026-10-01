@@ -106,11 +106,11 @@ The provenance and live observations below are dated records. The retained `Live
 | | |
 |---|---|
 | Supported OS | **Windows only** |
-| Dependencies | `powershell.exe`, Win32 foreground-window APIs, Codex Desktop's `codex://` protocol handler |
-| Stability | **Experimental** — UX-level automation over private behavior; foreground-policy-aware (default `defer` never navigates the visible Codex app; `switch` requires explicit acknowledgement; `restore-if-known` fail-closed; unidentifiable foreground defers). Foreground identity is positive (process name + `WindowsApps\OpenAI.Codex_*` executable path), covering the pre-merge `Codex.exe` GUI and the post-2026-07-09 `ChatGPT.exe` GUI; an ambiguous `ChatGPT`-named foreground (unreadable path) is gated as Codex and defers. Hermetic behavioral matrix: `tests/test_autoload_matrix.sh` |
-| Exit codes | `0` deep-link done (or dry-run), `1` focus restore unverified, `2` deferred, `4` restore unproven, `5` switch unacknowledged — wrapper maps all; unknown codes fail closed |
-| Touches live Desktop state | Yes — loads the target thread (background window on the default path; the VISIBLE window under authorized `switch` — disclosed residue) |
-| Fallback | Wrapper reports `gui-unowned`/`failed-closed` with reason token and manual `codex://threads/<id>` remediation. The file-drop pickup line is printed only when structured evidence proves no follower was admitted (`confirmation=not-attempted`; an exact `no-client-found` request may still have occurred). A post-autoload retry can end `failed-closed -- reason=retry-ambiguous-outcome -- confirmation=unknown`; there the envelope is preserved but no pickup line is printed — do not resend |
+| Dependencies | `powershell.exe`, shared host policy, Win32 foreground-window APIs, and a qualified effective `codex` protocol handler |
+| Stability | **Experimental and default-off.** `--autoload codex-uri` is only a request. Activation requires a sole intended package GUI, complete inventory, qualified package-update clearance, effective-handler proof, positive target inspection, and foreground-policy approval. Alternate intended hosts are never activated. The shipped real-machine update/handler readers currently remain unqualified, so real activation refuses; the hermetic matrix uses DryRun mocks to test the positive decision without granting authority. |
+| Exit codes | `0` protocol launch done (or dry-run), `1` focus restore unverified, `2` deferred, `4` restore unproven, `5` switch unacknowledged, `6` host/activation policy refused — wrapper maps all; unknown codes fail closed |
+| Touches live Desktop state | Only after every activation gate passes; DryRun mocks and current real-machine refusal do not launch the protocol |
+| Fallback | Wrapper reports `gui-unowned`/`failed-closed` with a reason token and the safe file-drop pickup line only when structured evidence proves no follower was admitted (`confirmation=not-attempted`; an exact `no-client-found` request may still have occurred). It never recommends a manual protocol launch. A post-activation retry can end `failed-closed -- reason=retry-ambiguous-outcome -- confirmation=unknown`; there the envelope is preserved but no pickup line is printed — do not resend |
 
 ## Removed in v0.1.8: `--app` / `--open` / `--exec`
 
@@ -169,6 +169,10 @@ The dispatch turn completed at 00:12:37.068Z. A receiver-created goal continuati
 This is one merged-primary wrapper observation. It is not normal installed `/ipc` acceptance, release or propagation proof, a general compatibility result, or repeatability evidence. The earlier candidate-only check and verified live write-proof registry remain unchanged.
 
 ### Verified live write-proof entries
+
+The entries below are preserved historical evidence. Their pre-policy auto-load and manual-protocol
+recovery instructions are superseded by the current default-off shared host policy above; they do
+not authorize bypassing present package-update or effective-handler gates.
 
 | Date | Build proven | What was proven | Notes |
 |---|---|---|---|
