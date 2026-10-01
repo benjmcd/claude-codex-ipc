@@ -794,8 +794,22 @@ function policyDocument(mode) {
       errors: [],
       packageRootsComplete: true,
       packageRoots: [],
-      guiHosts: [{ pid: 10, matchesIntended: true, classification: "package" }],
-      appServers: [],
+      guiHosts: [{
+        pid: 10,
+        parentPid: 1,
+        name: "ChatGPT.exe",
+        executable: "C:\\Program Files\\WindowsApps\\OpenAI.Codex_fixture\\app\\ChatGPT.exe",
+        matchesIntended: true,
+        classification: "package",
+      }],
+      appServers: [{
+        pid: 11,
+        parentPid: 10,
+        name: "codex.exe",
+        executable: "C:\\Program Files\\WindowsApps\\OpenAI.Codex_fixture\\app\\resources\\codex.exe",
+        matchesIntended: true,
+        classification: "package",
+      }],
     },
     sendEligible: true,
     sendReasons: [],
@@ -803,7 +817,14 @@ function policyDocument(mode) {
     activationReasons: ["autoload-disabled"],
   };
   if (mode === "refuse-other") {
-    eligible.inventory.guiHosts = [{ pid: 10, matchesIntended: false, classification: "other" }];
+    eligible.inventory.guiHosts = [{
+      pid: 10,
+      parentPid: 1,
+      name: "ChatGPT.exe",
+      executable: "C:\\Alt\\Host\\ChatGPT.exe",
+      matchesIntended: false,
+      classification: "other",
+    }];
     eligible.sendEligible = false;
     eligible.sendReasons = ["other-desktop-host-running"];
   } else if (mode === "incomplete") {
@@ -901,6 +922,11 @@ process.stdin.on("end", () => {
 REVALIDATE_BASH_MODE=path-bad revalidate_case eligible-long 0 '
   value.ok === true && value.checks.hostPolicy.ok === true &&
   value.checks.hostPolicy.sendEligible === true &&
+  value.checks.hostPolicy.inventory.guiHosts.length === 1 &&
+  value.checks.hostPolicy.inventory.guiHosts[0].executable.endsWith("ChatGPT.exe") &&
+  value.checks.hostPolicy.inventory.guiHosts[0].classification === "package" &&
+  value.checks.hostPolicy.inventory.appServers.length === 1 &&
+  !("commandLine" in value.checks.hostPolicy.inventory.appServers[0]) &&
   value.summary.failed.length === 0'
 first_bash="$(awk -F '\t' 'tolower($1) ~ /bash(\.exe)?$/ { print $1; exit }' "$REVALIDATE_LOG")"
 if [[ "$("$NODE_BIN" -p 'process.platform')" == "win32" ]]; then
@@ -917,6 +943,9 @@ grep -Fqx 'host-policy-args-ok=true' "$REVALIDATE_LOG" \
 REVALIDATE_BASH_MODE=normal revalidate_case refuse-other 1 '
   value.ok === false && value.checks.hostPolicy.ok === false &&
   value.checks.hostPolicy.sendEligible === false &&
+  value.checks.hostPolicy.inventory.guiHosts.length === 1 &&
+  value.checks.hostPolicy.inventory.guiHosts[0].executable === "C:\\Alt\\Host\\ChatGPT.exe" &&
+  value.checks.hostPolicy.inventory.guiHosts[0].classification === "other" &&
   value.summary.failed.includes("hostPolicy")'
 for mode in malformed empty nonzero-ok incomplete; do
   revalidate_case "$mode" 1 '

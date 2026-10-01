@@ -762,7 +762,34 @@ function main() {
         ok:
           contains("scripts/codex_ipc_autoload.ps1", "Invoke-CodexIpcActivationGate -Phase 'pre-foreground'") &&
           contains("scripts/codex_ipc_autoload.ps1", /Invoke-CodexIpcProtocolActivation[\s\S]*?Invoke-CodexIpcActivationGate -Phase 'pre-activation'[\s\S]*?Start-Process -FilePath "codex:\/\/threads\/\$ConversationId"/) &&
-          contains("scripts/codex_ipc_autoload.ps1", "exit 6"),
+          contains("scripts/codex_ipc_autoload.ps1", "exit 6") &&
+          contains("scripts/codex_ipc_autoload.ps1", "MOCK_FOREGROUND_PROCESS_BOUND") &&
+          contains("scripts/codex_ipc_autoload.ps1", "MOCK_FOREGROUND_PATH_BOUND") &&
+          contains("scripts/codex_ipc_autoload.ps1", "mock-inputs-require-dry-run"),
+      },
+      {
+        label: "wrapper pins the complete host and activation refusal vocabulary and the multi-cause no-client observation",
+        file: "scripts/handoff_to_codex.sh",
+        ok:
+          [
+            "host-policy-unavailable",
+            "host-policy-invalid",
+            "host-inventory-incomplete",
+            "intended-host-not-running",
+            "other-desktop-host-running",
+            "autoload-disabled",
+            "protocol-host-not-package",
+            "codex-foreground-deferred",
+            "foreground-unidentified",
+            "autoload-helper-unavailable",
+            "foreground-restore-unproven",
+            "foreground-switch-unacknowledged",
+            "autoload-policy-refused",
+            "autoload-unexpected-status",
+            "autoload-incomplete",
+          ].every((token) => handoffText.includes(token)) &&
+          handoffText.includes("Router answered no-client-found") &&
+          handoffText.includes("this token has several possible causes"),
       },
       {
         label: "bundled operator contract documents defaults, precedence, alternate-host containment, and current activation refusal",
@@ -780,7 +807,9 @@ function main() {
         ok:
           contains("scripts/codex_ipc_revalidate.mjs", "scripts/codex_ipc_host_policy.ps1") &&
           contains("scripts/codex_ipc_revalidate.mjs", "host policy syntax validation failed; policy was not executed") &&
-          contains("scripts/codex_ipc_revalidate.mjs", "optional live IPC read probe suppressed"),
+          contains("scripts/codex_ipc_revalidate.mjs", "optional live IPC read probe suppressed") &&
+          contains("scripts/codex_ipc_revalidate.mjs", "guiHosts: guiHosts.map(projectHost)") &&
+          contains("scripts/codex_ipc_revalidate.mjs", "appServers: appServers.map(projectHost)"),
       },
     ], "Static source evidence only. Hermetic policy and wrapper suites exercise configuration precedence, host-cardinality refusal, alternate-host containment, activation evidence, and fresh retry gates; no live Desktop activation is performed."),
     check("REQ-021", "Persistent client model or effort overrides require explicit acknowledgement and nonempty trimmed values.", [

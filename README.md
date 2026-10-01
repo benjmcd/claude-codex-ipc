@@ -170,6 +170,8 @@ defaults (`autoload=off`, intended host `package`); every present layer must be 
 hosts can be targeted but are never protocol-activated. The current real-machine readers do not
 qualify package-update clearance or the effective protocol handler, so an unowned-thread
 `codex-uri` activation request fails closed; hermetic mocks do not grant live authority.
+Validate-only revalidation lists the detected GUI/app-server paths and classifications without
+command lines; this inventory is host-safety evidence, not thread-ownership proof.
 All SQLite access `readOnly:true`; no config/account mutation; no HTTP listener; transcript
 disclosure opt-in. Threat model: [SECURITY.md](SECURITY.md). Failure triage:
 [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).

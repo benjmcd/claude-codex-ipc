@@ -142,7 +142,9 @@ prevents heuristic retargeting, and ambiguous outcomes are not retried.
 - `codex_ipc_snapshot.mjs` — config/DB hashing for before/after isolation evidence.
 - `codex_ipc_revalidate.mjs` — post-update validate-only checks. It parses and runs the shared host
   policy before the optional pipe read; a host refusal suppresses `--allow-live-ipc-read` rather
-  than contacting the pipe. A permitted live read sends `initialize` only.
+  than contacting the pipe. Its report lists each detected GUI host and app-server executable and
+  classification without command lines. A permitted live read sends `initialize` only; inventory
+  does not prove thread ownership.
 - `codex_ipc_contract_audit.mjs` — static requirement matrix over the bundled skill files.
 
 ## Authorized write proof

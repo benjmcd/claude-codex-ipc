@@ -383,6 +383,87 @@ assert_policy 0 "R17 unreadable same-name alternate candidate fails inventory cl
   value.inventory.guiHosts.some((item) => item.pid === 762 && item.classification === "unknown") &&
   value.sendReasons.includes("host-inventory-incomplete")'
 
+MOCK_EXTERNAL_APP_SERVER='{"complete":true,"packageRootsComplete":true,"packageRoots":[],"errors":[],"processes":[{"pid":771,"parentPid":1,"name":"ChatGPT.exe","executable":"C:\\Alt\\Host\\ChatGPT.exe","commandLine":"ChatGPT.exe"},{"pid":772,"parentPid":771,"name":"codex.exe","executable":"C:\\Alt Runtime\\codex.exe","commandLine":"\"C:\\Alt Runtime\\codex.exe\" app-server --analytics-default-enabled"}]}'
+POLICY_OUT="$(powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$POLICYWIN" \
+    -Purpose send -IpcRoot "$POLICY_ROOT" -IntendedHost 'C:\Alt\Host\ChatGPT.exe' \
+    -DryRun -MockInventoryJson "$MOCK_EXTERNAL_APP_SERVER" 2>&1)"; POLICY_RC=$?
+assert_policy 0 "R18 external app-server child is not counted as a second GUI" '
+  value.sendEligible === true && value.inventory.complete === true &&
+  value.inventory.guiHosts.length === 1 && value.inventory.guiHosts[0].pid === 771 &&
+  value.inventory.appServers.length === 1 && value.inventory.appServers[0].pid === 772'
+
+MOCK_PACKAGE_EXTERNAL_SERVER='{"complete":true,"packageRootsComplete":true,"packageRoots":["C:\\Program Files\\WindowsApps\\OpenAI.Codex_fixture"],"errors":[],"processes":[{"pid":775,"parentPid":1,"name":"ChatGPT.exe","executable":"C:\\Program Files\\WindowsApps\\OpenAI.Codex_fixture\\app\\ChatGPT.exe","commandLine":"ChatGPT.exe"},{"pid":776,"parentPid":775,"name":"codex.exe","executable":"C:\\Local\\Runtime\\codex.exe","commandLine":"codex.exe app-server"}]}'
+POLICY_OUT="$(powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$POLICYWIN" \
+    -Purpose send -IpcRoot "$POLICY_ROOT" -DryRun \
+    -MockInventoryJson "$MOCK_PACKAGE_EXTERNAL_SERVER" 2>&1)"; POLICY_RC=$?
+assert_policy 0 "R18b package GUI accepts its basename-bound external app-server child" '
+  value.sendEligible === true && value.inventory.complete === true &&
+  value.inventory.guiHosts.length === 1 && value.inventory.guiHosts[0].pid === 775 &&
+  value.inventory.appServers.length === 1 && value.inventory.appServers[0].pid === 776'
+
+MOCK_UNPROVEN_CODEX_CHILD='{"complete":true,"packageRootsComplete":true,"packageRoots":[],"errors":[],"processes":[{"pid":781,"parentPid":1,"name":"ChatGPT.exe","executable":"C:\\Alt\\Host\\ChatGPT.exe","commandLine":"ChatGPT.exe"},{"pid":782,"parentPid":781,"name":"codex.exe","executable":"C:\\Alt\\Other\\codex.exe","commandLine":"codex.exe serve"}]}'
+POLICY_OUT="$(powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$POLICYWIN" \
+    -Purpose send -IpcRoot "$POLICY_ROOT" -IntendedHost 'C:\Alt\Host\ChatGPT.exe' \
+    -DryRun -MockInventoryJson "$MOCK_UNPROVEN_CODEX_CHILD" 2>&1)"; POLICY_RC=$?
+assert_policy 0 "R19 unproven codex child remains a second GUI candidate" '
+  value.sendEligible === false && value.inventory.guiHosts.length === 2 &&
+  value.inventory.appServers.length === 0 &&
+  value.sendReasons.includes("other-desktop-host-running")'
+
+MOCK_ORPHAN_EXTERNAL_SERVER='{"complete":true,"packageRootsComplete":true,"packageRoots":[],"errors":[],"processes":[{"pid":791,"parentPid":1,"name":"codex.exe","executable":"C:\\Alt\\Runtime\\codex.exe","commandLine":"codex.exe app-server"}]}'
+POLICY_OUT="$(powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$POLICYWIN" \
+    -Purpose send -IpcRoot "$POLICY_ROOT" -IntendedHost 'C:\Alt\Host\ChatGPT.exe' \
+    -DryRun -MockInventoryJson "$MOCK_ORPHAN_EXTERNAL_SERVER" 2>&1)"; POLICY_RC=$?
+assert_policy 0 "R20 orphan external app-server claim cannot stand in for a GUI host" '
+  value.sendEligible === false && value.inventory.guiHosts.length === 1 &&
+  value.inventory.appServers.length === 0 &&
+  value.sendReasons.includes("intended-host-not-running")'
+
+MOCK_MISMATCHED_APP_SERVER='{"complete":true,"packageRootsComplete":true,"packageRoots":[],"errors":[],"processes":[{"pid":801,"parentPid":1,"name":"ChatGPT.exe","executable":"C:\\Alt\\Host\\ChatGPT.exe","commandLine":"ChatGPT.exe"},{"pid":802,"parentPid":801,"name":"codex.exe","executable":"C:\\Alt\\Runtime\\codex.exe","commandLine":"\"C:\\Other\\codex.exe\" app-server"}]}'
+POLICY_OUT="$(powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$POLICYWIN" \
+    -Purpose send -IpcRoot "$POLICY_ROOT" -IntendedHost 'C:\Alt\Host\ChatGPT.exe' \
+    -DryRun -MockInventoryJson "$MOCK_MISMATCHED_APP_SERVER" 2>&1)"; POLICY_RC=$?
+assert_policy 0 "R21 app-server command must name its own executable" '
+  value.sendEligible === false && value.inventory.guiHosts.length === 2 &&
+  value.inventory.appServers.length === 0 &&
+  value.sendReasons.includes("other-desktop-host-running")'
+
+MOCK_DELAYED_APP_SERVER='{"complete":true,"packageRootsComplete":true,"packageRoots":[],"errors":[],"processes":[{"pid":811,"parentPid":1,"name":"ChatGPT.exe","executable":"C:\\Alt\\Host\\ChatGPT.exe","commandLine":"ChatGPT.exe"},{"pid":812,"parentPid":811,"name":"codex.exe","executable":"C:\\Alt\\Runtime\\codex.exe","commandLine":"codex.exe exec app-server"}]}'
+POLICY_OUT="$(powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$POLICYWIN" \
+    -Purpose send -IpcRoot "$POLICY_ROOT" -IntendedHost 'C:\Alt\Host\ChatGPT.exe' \
+    -DryRun -MockInventoryJson "$MOCK_DELAYED_APP_SERVER" 2>&1)"; POLICY_RC=$?
+assert_policy 0 "R22 app-server must be the immediate subcommand" '
+  value.sendEligible === false && value.inventory.guiHosts.length === 2 &&
+  value.inventory.appServers.length === 0 &&
+  value.sendReasons.includes("other-desktop-host-running")'
+
+MOCK_ORPHAN_WITH_GUI='{"complete":true,"packageRootsComplete":true,"packageRoots":[],"errors":[],"processes":[{"pid":821,"parentPid":1,"name":"ChatGPT.exe","executable":"C:\\Alt\\Host\\ChatGPT.exe","commandLine":"ChatGPT.exe"},{"pid":822,"parentPid":1,"name":"codex.exe","executable":"C:\\Alt\\Runtime\\codex.exe","commandLine":"codex.exe app-server"}]}'
+POLICY_OUT="$(powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$POLICYWIN" \
+    -Purpose send -IpcRoot "$POLICY_ROOT" -IntendedHost 'C:\Alt\Host\ChatGPT.exe' \
+    -DryRun -MockInventoryJson "$MOCK_ORPHAN_WITH_GUI" 2>&1)"; POLICY_RC=$?
+assert_policy 0 "R23 orphan app-server claim remains a competing GUI candidate" '
+  value.sendEligible === false && value.inventory.guiHosts.length === 2 &&
+  value.inventory.appServers.length === 0 &&
+  value.sendReasons.includes("other-desktop-host-running")'
+
+MOCK_NULL_APP_SERVER_ROLE='{"complete":true,"packageRootsComplete":true,"packageRoots":[],"errors":[],"processes":[{"pid":831,"parentPid":1,"name":"ChatGPT.exe","executable":"C:\\Alt\\Host\\ChatGPT.exe","commandLine":"ChatGPT.exe"},{"pid":832,"parentPid":831,"name":"codex.exe","executable":"C:\\Alt\\Runtime\\codex.exe","commandLine":null}]}'
+POLICY_OUT="$(powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$POLICYWIN" \
+    -Purpose send -IpcRoot "$POLICY_ROOT" -IntendedHost 'C:\Alt\Host\ChatGPT.exe' \
+    -DryRun -MockInventoryJson "$MOCK_NULL_APP_SERVER_ROLE" 2>&1)"; POLICY_RC=$?
+assert_policy 0 "R24 unreadable external child role remains a competing GUI candidate" '
+  value.sendEligible === false && value.inventory.guiHosts.length === 2 &&
+  value.inventory.appServers.length === 0 &&
+  value.sendReasons.includes("other-desktop-host-running")'
+
+MOCK_WRAPPER_APP_SERVER='{"complete":true,"packageRootsComplete":true,"packageRoots":[],"errors":[],"processes":[{"pid":841,"parentPid":1,"name":"ChatGPT.exe","executable":"C:\\Alt\\Host\\ChatGPT.exe","commandLine":"ChatGPT.exe"},{"pid":842,"parentPid":841,"name":"codex.exe","executable":"C:\\Alt\\Runtime\\codex.exe","commandLine":"codex.exe app-server-wrapper"}]}'
+POLICY_OUT="$(powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$POLICYWIN" \
+    -Purpose send -IpcRoot "$POLICY_ROOT" -IntendedHost 'C:\Alt\Host\ChatGPT.exe' \
+    -DryRun -MockInventoryJson "$MOCK_WRAPPER_APP_SERVER" 2>&1)"; POLICY_RC=$?
+assert_policy 0 "R25 app-server prefix is not an exact role" '
+  value.sendEligible === false && value.inventory.guiHosts.length === 2 &&
+  value.inventory.appServers.length === 0 &&
+  value.sendReasons.includes("other-desktop-host-running")'
+
 echo "== S. shared policy activation decision =="
 PKG_CLEAR='{"state":"clear","runningPackageFullName":"OpenAI.Codex_26.707.3563.0_x64__2p2nqsd0c76g0","runningVersion":"26.707.3563.0","higherVersions":[],"evidence":"mock"}'
 PKG_STAGED='{"state":"staged","runningPackageFullName":"OpenAI.Codex_26.707.3563.0_x64__2p2nqsd0c76g0","runningVersion":"26.707.3563.0","higherVersions":["26.708.100.0"],"evidence":"mock"}'
@@ -675,6 +756,22 @@ if [[ $HELPER_RC -eq 6 ]] \
     ok "D7 helper rejects mocks without DryRun using a redacted reason token"
 else
     no "D7 helper rejects mocks without DryRun (rc=$HELPER_RC; out: $(printf '%s' "$HELPER_OUT" | head -c 300))"
+fi
+
+HELPER_OUT="$(powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$PS1WIN" \
+    -ConversationId "$UUID" -MockForegroundProcess notepad 2>&1)"; HELPER_RC=$?
+if [[ $HELPER_RC -eq 6 ]] && printf '%s' "$HELPER_OUT" | grep -qF 'mock-inputs-require-dry-run'; then
+    ok "D8 foreground-process mock alone is rejected without DryRun"
+else
+    no "D8 foreground-process mock alone is rejected without DryRun (rc=$HELPER_RC; out: $(printf '%s' "$HELPER_OUT" | head -c 300))"
+fi
+
+HELPER_OUT="$(powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$PS1WIN" \
+    -ConversationId "$UUID" -MockForegroundPath 'C:\Alt\Foreground.exe' 2>&1)"; HELPER_RC=$?
+if [[ $HELPER_RC -eq 6 ]] && printf '%s' "$HELPER_OUT" | grep -qF 'mock-inputs-require-dry-run'; then
+    ok "D9 foreground-path mock alone is rejected without DryRun"
+else
+    no "D9 foreground-path mock alone is rejected without DryRun (rc=$HELPER_RC; out: $(printf '%s' "$HELPER_OUT" | head -c 300))"
 fi
 
 echo "== E. process hygiene =="

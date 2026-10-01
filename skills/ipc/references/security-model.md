@@ -29,6 +29,13 @@ summary bundled with the skill.
 - **The Desktop pipe is a shared local surface.** Any local process running as the same user can
   connect to the same named pipe and files. This toolkit adds no privilege boundary and offers no
   guarantee against malicious local users or processes.
+- **Executable-path trust differs by host type.** A package-host executable beneath WindowsApps is
+  protected by the package directory's ACL. An operator-declared executable elsewhere has no
+  equivalent WindowsApps ACL assurance: the operator is trusting that exact path and same-user
+  processes able to replace or launch it. Inventory compares process names and executable paths
+  with known package roots and the declared alternate path; it does not query per-process package
+  identity. An undeclared renamed copy outside those roots can therefore be missed. Revalidation
+  lists detected GUI paths and classifications, but inventory alone never proves thread ownership.
 
 ## Write gates (fail-closed by design)
 

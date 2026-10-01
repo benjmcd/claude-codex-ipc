@@ -55,6 +55,14 @@ Desktop pipe (`\\.\pipe\codex-ipc`) this toolkit uses. This project adds **no gu
 malicious local users or processes** — it inherits the OS user boundary and nothing more. If your
 threat model includes hostile same-user processes, do not use this tool.
 
+The package-host path is trusted partly because its executable lives under the access-controlled
+WindowsApps package directory. An operator-declared executable elsewhere has no equivalent package
+ACL assurance; the operator is trusting that exact path and the same-user processes that can replace
+or launch it. The host inventory compares process names and executable paths against known package
+roots and the declared alternate path. It does not query per-process package identity, so an
+undeclared renamed copy outside those roots can be missed. Revalidation exposes the detected GUI
+paths and classifications, but that visibility does not prove thread ownership.
+
 ### Live writes are explicitly gated
 
 A live Desktop send starts a real model turn in a real thread. Gates, all fail-closed:

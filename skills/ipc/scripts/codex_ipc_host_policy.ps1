@@ -509,18 +509,42 @@ function Resolve-CodexIpcInventory {
         $isDescendant = Test-CodexIpcCandidateDescendant `
             -Process $process -ProcessById $processById -CandidateById $candidateById
         $isResourceServer = ($null -ne $path -and $path -match '(?i)\\resources\\codex(?:\.exe)?$')
+        $processName = ([string]$process.name).ToLowerInvariant()
+        $parentMatchesIntendedGui = $false
+        if ($candidateById.ContainsKey([string]$process.parentPid)) {
+            $parentClassification = Get-CodexIpcHostClassification `
+                -Process $candidateById[[string]$process.parentPid] `
+                -IntendedHost $IntendedHost `
+                -PackageRoots @($RawInventory.packageRoots) `
+                -PackageRootsComplete ([bool]$RawInventory.packageRootsComplete)
+            $parentMatchesIntendedGui = ($parentClassification -eq $IntendedHost.kind)
+        }
+        $appServerCommandMatches = $false
+        if ($null -ne $path -and $process.commandLine -is [string] -and
+            -not [string]::IsNullOrWhiteSpace([string]$process.commandLine)) {
+            $escapedExecutable = [regex]::Escape($path)
+            $escapedBasename = [regex]::Escape([System.IO.Path]::GetFileName($path))
+            $appServerPattern = '(?i)^(?:"(?:' + $escapedExecutable + '|' + $escapedBasename + ')"|' +
+                '(?:' + $escapedExecutable + '|' + $escapedBasename + '))\s+app-server(?:\s|$)'
+            $appServerCommandMatches = ([string]$process.commandLine -match $appServerPattern)
+        }
+        $hasProvenAppServerRole = (
+            $parentMatchesIntendedGui -and
+            ($processName -eq 'codex.exe' -or $processName -eq 'codex') -and
+            $appServerCommandMatches
+        )
         $hasProvenElectronRole = (
             $isDescendant -and
             $process.commandLine -is [string] -and
             -not [string]::IsNullOrWhiteSpace([string]$process.commandLine) -and
             [string]$process.commandLine -match '(?i)(^|\s)--type(?:=|\s)'
         )
-        if ($isResourceServer -or $hasProvenElectronRole) {
+        if ($isResourceServer -or $hasProvenAppServerRole -or $hasProvenElectronRole) {
             $appServers += $entry
         } else {
             $guiHosts += $entry
         }
-        if ($isDescendant -and -not $isResourceServer -and -not $hasProvenElectronRole -and
+        if ($isDescendant -and -not $isResourceServer -and -not $hasProvenAppServerRole -and -not $hasProvenElectronRole -and
             $null -eq $process.commandLine -and
             (Test-CodexIpcSameExecutableCandidateAncestor `
                 -Process $process -ProcessById $processById -CandidateById $candidateById)) {

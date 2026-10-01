@@ -213,9 +213,10 @@ Every live `--ipc` send reports exactly one result:
 - `gui-unowned` — the exact router response proved that no renderer admitted the follower. With the
   default `autoload=off`, or with an alternate intended host, the wrapper returns immediately and
   prints the file-drop pickup line. A package activation request may also return this category when
-  foreground handling defers or a permitted activation does not establish ownership in time.
-- `failed-closed` — the host inventory is incomplete/mixed, target is missing or archived, package
-  activation evidence refuses, or the router/pipe failed. Actual bounded diagnostics are printed.
+  host inventory or activation evidence refuses, foreground handling defers, or a permitted
+  activation does not establish ownership in time.
+- `failed-closed` — target inspection or local argument validation refuses, or a router/pipe attempt
+  has an ambiguous outcome. Actual bounded diagnostics are printed.
 
 Host configuration resolves independently per field as wrapper flag > environment
 (`CODEX_IPC_AUTOLOAD`, `CODEX_IPC_INTENDED_HOST`) >
@@ -416,7 +417,7 @@ Activation-helper exit codes: `0` protocol launch permitted/completed (or dry-ru
 launch fired but focus restore unverified, `2` foreground-Codex (or unidentifiable foreground)
 deferral, `4` restore authority unproven, `5` switch without acknowledgement, `6` fresh
 host/activation policy refusal. The wrapper maps exit 6 to
-`failed-closed -- reason=autoload-policy-refused -- confirmation=not-attempted`; unrecognized codes
+`gui-unowned -- reason=autoload-policy-refused -- confirmation=not-attempted`; unrecognized codes
 fail closed.
 
 The activation helper (`codex_ipc_autoload.ps1`) and focus handling are **Windows-only** and depend
@@ -451,7 +452,9 @@ live `--ipc` GUI injection.
   required-file contracts and to explain itself.
 - `codex_ipc_revalidate.mjs` — static/presence checks plus the shared runtime host policy. A host
   refusal suppresses the optional `--allow-live-ipc-read`; a permitted probe sends `initialize`
-  only. Revalidation does not waive or certify the separate activation gates.
+  only. Its bounded inventory projection lists each detected GUI host and app-server executable and
+  classification without command lines. Revalidation does not waive or certify the separate
+  activation gates and does not prove thread ownership.
 - `codex_ipc_contract_audit.mjs` — static requirement matrix from the bundled skill files.
 
 All of these send no prompts and write no SQLite. The orchestrating tools

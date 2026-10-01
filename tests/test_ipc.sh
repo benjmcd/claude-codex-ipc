@@ -510,7 +510,7 @@ fgreset always-ok ok 0 rollout-hit refuse-other
 fgrun --ipc "$UUIDF" "t13b initial host refusal"
 [[ $RC -ne 0 ]] \
   && printf '%s' "$OUT" | grep -q 'HOST-WARNING:' \
-  && printf '%s' "$OUT" | grep -q 'RESULT: failed-closed -- reason=other-desktop-host-running -- confirmation=not-attempted' \
+  && printf '%s' "$OUT" | grep -q 'RESULT: gui-unowned -- reason=other-desktop-host-running -- confirmation=not-attempted' \
   && [[ "$(cat "$FGDIR/inspect_count" 2>/dev/null || echo 0)" == "1" ]] \
   && [[ "$(cat "$FGDIR/policy_count" 2>/dev/null || echo 0)" == "1" ]] \
   && [[ ! -f "$FGDIR/send_count" && ! -f "$FGDIR/pslog" ]] \
@@ -537,7 +537,7 @@ assert_tax "t13b-default-off"
 fgreset fail-then-ok ok 0 rollout-hit change-on-retry
 fgrun --ipc "$UUIDF" "t13b retry recheck"
 [[ $RC -ne 0 ]] \
-  && printf '%s' "$OUT" | grep -q 'RESULT: failed-closed -- reason=other-desktop-host-running -- confirmation=not-attempted' \
+  && printf '%s' "$OUT" | grep -q 'RESULT: gui-unowned -- reason=other-desktop-host-running -- confirmation=not-attempted' \
   && [[ "$(cat "$FGDIR/policy_count" 2>/dev/null || echo 0)" == "2" ]] \
   && [[ "$(cat "$FGDIR/inspect_count" 2>/dev/null || echo 0)" == "1" ]] \
   && [[ "$(cat "$FGDIR/send_count" 2>/dev/null || echo 0)" == "1" ]] \
@@ -576,7 +576,7 @@ fgreset always-fail ok 6 rollout-hit eligible-codex-uri
 printf '%s\n' "$PRIVATE_DIAGNOSTIC" > "$FGDIR/helper_stderr"
 fgrun --ipc "$UUIDF" "t13b helper diagnostic privacy"
 [[ $RC -ne 0 ]] \
-  && printf '%s' "$OUT" | grep -q 'RESULT: failed-closed -- reason=autoload-policy-refused -- confirmation=not-attempted' \
+  && printf '%s' "$OUT" | grep -q 'RESULT: gui-unowned -- reason=autoload-policy-refused -- confirmation=not-attempted' \
   && ! printf '%s' "$OUT" | grep -Fq "$PRIVATE_DIAGNOSTIC" \
   && ok "helper diagnostics cannot disclose a private executable path" \
   || no "helper diagnostics exposed private content (rc=$RC)"
@@ -609,6 +609,10 @@ echo "== 14. default policy defer: foreground-Codex deferral is explicit =="
 fgreset always-fail ok 2
 fgrun --ipc "$UUIDF" "t14 defer"
 [[ $RC -ne 0 ]] && printf '%s' "$OUT" | grep -q "RESULT: gui-unowned -- reason=codex-foreground-deferred -- confirmation=not-attempted" && ok "defer -> gui-unowned/codex-foreground-deferred" || no "defer subreason wrong (rc=$RC)"
+printf '%s' "$OUT" | grep -q "Router answered no-client-found for thread ${UUIDF}; this token has several possible causes." \
+  && ! printf '%s' "$OUT" | grep -q 'is not loaded in Codex Desktop' \
+  && ok "no-client message reports the router token without inferring load state" \
+  || no "no-client message retained the rejected load-state inference"
 printf '%s' "$OUT" | grep -q "POLICY: foreground=defer (source: default) ack=none" && ok "active policy printed" || no "policy line missing"
 ! printf '%s' "$OUT" | grep -q 'codex://threads/' && ok "deferral output gives no manual protocol-activation instruction" || no "deferral output recommends manual protocol activation"
 printf '%s' "$OUT" | grep -Fq "Open the thread in your intended Desktop host's window, then paste:" && ok "deferral assigns thread opening to the operator's intended host" || no "deferral omits the operator-owned thread-opening instruction"
@@ -618,7 +622,7 @@ assert_tax "t14"
 echo "== 15. switch without ack: fails closed BEFORE any live IPC =="
 fgreset always-fail ok 0
 fgrun --ipc "$UUIDF" --foreground-policy switch -- "t15 switch no ack"
-[[ $RC -ne 0 ]] && printf '%s' "$OUT" | grep -q "reason=foreground-switch-unacknowledged" && ok "switch-no-ack fails closed" || no "switch-no-ack (rc=$RC)"
+[[ $RC -ne 0 ]] && printf '%s' "$OUT" | grep -q "RESULT: gui-unowned -- reason=foreground-switch-unacknowledged -- confirmation=not-attempted" && ok "switch-no-ack refuses as gui-unowned" || no "switch-no-ack (rc=$RC)"
 [[ ! -f "$FGDIR/nodeargs.log" ]] && ok "no live send attempted" || no "live send attempted despite missing ack"
 [[ ! -f "$FGDIR/pslog" ]] && ok "no autoload attempted" || no "autoload attempted despite missing ack"
 printf '%s' "$OUT" | grep -qx 'FALLBACK -- file-drop is ready.' \
@@ -827,9 +831,14 @@ for m in \
     fgreset always-ok "$imode" 0
     fgrun --ipc "$UUIDF" --deliver manual -- "$task"
     kept=""; while IFS= read -r f; do grep -qx "$task" "$f" && { kept="$f"; break; }; done < <(find "$IPCROOT/fgsess/$UUIDF" -name '*.task.md' 2>/dev/null)
+    parent_ok=1
+    if [[ "$imode" == child ]]; then
+      printf '%s' "$OUT" | grep -q 'Target parent thread: 22222222-2222-4222-8222-222222222222' || parent_ok=0
+    fi
     [[ $RC -ne 0 && -n "$kept" ]] \
       && printf '%s\n' "$OUT" | grep -Fxq "ERROR: manual delivery refused -- reason=${want}" \
       && ! printf '%s\n' "$OUT" | grep -Eq '^(POLICY:|RESULT:|WAIT:|    read |FALLBACK )' \
+      && [[ "$parent_ok" -eq 1 ]] \
       && [[ "$(cat "$FGDIR/inspect_count" 2>/dev/null || echo 0)" == "1" ]] \
       && [[ ! -f "$FGDIR/send_count" && ! -f "$FGDIR/powershell_count" \
             && ! -f "$FGDIR/observe_count" && ! -f "$FGDIR/pslog" ]] \
@@ -1189,7 +1198,7 @@ fgrun_stdout --ipc "$UUIDF" "t34 deferred failed"
 ! printf '%s\n' "$OUT" | grep -q '^WAIT:' && ok "a deferred (gui-unowned) send prints no WAIT hint" || no "failed send leaked a WAIT hint"
 fgreset always-fail ok 0 rollout-hit
 fgrun_stdout --ipc "$UUIDF" --foreground-policy switch -- "t34 switch no ack"
-! printf '%s\n' "$OUT" | grep -q '^WAIT:' && ok "a switch-no-ack failed-closed send prints no WAIT hint" || no "failed-closed leaked a WAIT hint"
+! printf '%s\n' "$OUT" | grep -q '^WAIT:' && ok "a switch-no-ack gui-unowned send prints no WAIT hint" || no "gui-unowned refusal leaked a WAIT hint"
 
 echo "== 35. A3 easy path: codex_ipc_wait + the verbatim OQ-4 caveat on every recovery surface =="
 OQ4='resuming the goal in a fresh, unmarked turn will NOT re-certify the original dispatch id; machine re-certification requires a NEW dispatch with a new marker.'

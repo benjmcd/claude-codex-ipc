@@ -353,6 +353,16 @@ function checkHostPolicy() {
   const guiHosts = inventory?.guiHosts;
   const appServers = inventory?.appServers;
   const sendReasons = report?.sendReasons;
+  const hostClassifications = new Set(["package", "alternate", "other", "unknown"]);
+  const hostEntryValid = (host) =>
+    host !== null &&
+    typeof host === "object" &&
+    Number.isSafeInteger(host.pid) &&
+    Number.isSafeInteger(host.parentPid) &&
+    typeof host.name === "string" &&
+    (host.executable === null || typeof host.executable === "string") &&
+    hostClassifications.has(host.classification) &&
+    typeof host.matchesIntended === "boolean";
   const reportShapeValid =
     report?.schemaVersion === 1 &&
     report?.ok === true &&
@@ -365,6 +375,8 @@ function checkHostPolicy() {
     typeof inventory?.complete === "boolean" &&
     Array.isArray(guiHosts) &&
     Array.isArray(appServers) &&
+    guiHosts.every(hostEntryValid) &&
+    appServers.every(hostEntryValid) &&
     typeof report?.sendEligible === "boolean" &&
     Array.isArray(sendReasons) &&
     sendReasons.every((reason) =>
@@ -389,6 +401,14 @@ function checkHostPolicy() {
   if (!eligibleConsistent && !refusalConsistent) {
     return { ...base, ok: false, reason: "host policy report is internally inconsistent" };
   }
+  const projectHost = (host) => ({
+    pid: host.pid,
+    parentPid: host.parentPid,
+    name: host.name,
+    executable: host.executable,
+    classification: host.classification,
+    matchesIntended: host.matchesIntended,
+  });
 
   return {
     ...base,
@@ -406,6 +426,8 @@ function checkHostPolicy() {
       coverage: typeof inventory.coverage === "string" ? inventory.coverage : null,
       guiHostCount: guiHosts.length,
       appServerCount: appServers.length,
+      guiHosts: guiHosts.map(projectHost),
+      appServers: appServers.map(projectHost),
       errorCount: Array.isArray(inventory.errors) ? inventory.errors.length : null,
     },
   };

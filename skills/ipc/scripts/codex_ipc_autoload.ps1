@@ -62,9 +62,16 @@ if ($RestoreConversationId -ne "" -and $RestoreConversationId -notmatch $UUID_RE
 $AUTOLOAD_BOUND = $PSBoundParameters.ContainsKey('Autoload')
 $INTENDED_HOST_BOUND = $PSBoundParameters.ContainsKey('IntendedHost')
 $IPC_ROOT_BOUND = $PSBoundParameters.ContainsKey('IpcRoot')
+$MOCK_FOREGROUND_PROCESS_BOUND = $PSBoundParameters.ContainsKey('MockForegroundProcess')
+$MOCK_FOREGROUND_PATH_BOUND = $PSBoundParameters.ContainsKey('MockForegroundPath')
 $MOCK_INVENTORY_BOUND = $PSBoundParameters.ContainsKey('MockInventoryJson')
 $MOCK_PACKAGE_BOUND = $PSBoundParameters.ContainsKey('MockPackageJson')
 $MOCK_REGISTRATION_BOUND = $PSBoundParameters.ContainsKey('MockRegistrationJson')
+
+if (($MOCK_FOREGROUND_PROCESS_BOUND -or $MOCK_FOREGROUND_PATH_BOUND) -and -not $DryRun) {
+    Write-Error 'ACTION: host-policy-refused reason=host-policy-invalid detail=mock-inputs-require-dry-run'
+    exit 6
+}
 
 $HOST_POLICY_SCRIPT = Join-Path $PSScriptRoot 'codex_ipc_host_policy.ps1'
 if (-not (Test-Path -LiteralPath $HOST_POLICY_SCRIPT -PathType Leaf)) {

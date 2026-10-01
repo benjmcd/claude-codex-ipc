@@ -761,7 +761,7 @@ if [[ "$MODE" == "ipc" ]]; then
                 exit 1;;
         esac
         if [[ "$FOREGROUND_POLICY" == "switch" && "$ACK_FOREGROUND_SWITCH" -ne 1 ]]; then
-            echo "RESULT: failed-closed -- reason=foreground-switch-unacknowledged -- confirmation=not-attempted" >&2
+            echo "RESULT: gui-unowned -- reason=foreground-switch-unacknowledged -- confirmation=not-attempted" >&2
             echo "(--foreground-policy switch requires --ack-foreground-switch or" >&2
             echo " CODEX_IPC_FOREGROUND_SWITCH_STANDING_APPROVAL=1; it visibly navigates the Codex app.)" >&2
             fallback
@@ -922,15 +922,15 @@ process.stdout.write([state, parent, legacy, rolloutPath].join("\t"));
             ;;
     esac
     if [[ -n "$TARGET_REFUSAL_REASON" ]]; then
+        if [[ "$INSPECT_CLASS" == "non-root" && "$INSPECT_PARENT" != "-" ]]; then
+            echo "Target parent thread: ${INSPECT_PARENT}" >&2
+        fi
         if [[ "$DELIVERY" == "manual" ]]; then
             echo "ERROR: manual delivery refused -- reason=${TARGET_REFUSAL_REASON}" >&2
             exit 1
         fi
         echo "RESULT: failed-closed -- reason=${TARGET_REFUSAL_REASON} -- confirmation=not-attempted" >&2
         echo "$TARGET_REFUSAL_DETAIL" >&2
-        if [[ "$INSPECT_CLASS" == "non-root" && "$INSPECT_PARENT" != "-" ]]; then
-            echo "Target parent thread: ${INSPECT_PARENT}" >&2
-        fi
         fallback
         exit 1
     fi
@@ -1082,11 +1082,7 @@ process.stdout.write([
     }
     report_host_policy_refusal() {
         echo "HOST-WARNING: live IPC refused by host policy (${HOST_POLICY_REASON_LIST:-$HOST_POLICY_REFUSAL_REASON})." >&2
-        if [[ "$HOST_POLICY_REFUSAL_REASON" == "intended-host-not-running" ]]; then
-            echo "RESULT: gui-unowned -- reason=${HOST_POLICY_REFUSAL_REASON} -- confirmation=not-attempted" >&2
-        else
-            echo "RESULT: failed-closed -- reason=${HOST_POLICY_REFUSAL_REASON} -- confirmation=not-attempted" >&2
-        fi
+        echo "RESULT: gui-unowned -- reason=${HOST_POLICY_REFUSAL_REASON} -- confirmation=not-attempted" >&2
         fallback
     }
     send_live() {
@@ -1263,7 +1259,7 @@ console.log(JSON.stringify({
         fallback
         exit 1
     fi
-    echo "Thread ${IPC_CID} is not loaded in Codex Desktop (no-client-found)."
+    echo "Router answered no-client-found for thread ${IPC_CID}; this token has several possible causes."
     echo "Requesting gated Desktop activation (foreground policy: ${FOREGROUND_POLICY})..."
     AUTOLOAD_PS1="${SCRIPT_DIR}/codex_ipc_autoload.ps1"
     AUTOLOAD_STATUS=0
@@ -1306,10 +1302,10 @@ console.log(JSON.stringify({
             echo "(restore-if-known is fail-closed until a read-only selected-thread authority is proven.)" >&2
             fallback
             exit 1 ;;
-        5)  echo "RESULT: failed-closed -- reason=foreground-switch-unacknowledged -- confirmation=not-attempted" >&2
+        5)  echo "RESULT: gui-unowned -- reason=foreground-switch-unacknowledged -- confirmation=not-attempted" >&2
             fallback
             exit 1 ;;
-        6)  echo "RESULT: failed-closed -- reason=autoload-policy-refused -- confirmation=not-attempted" >&2
+        6)  echo "RESULT: gui-unowned -- reason=autoload-policy-refused -- confirmation=not-attempted" >&2
             echo "HOST-WARNING: the activation helper refused its fresh safety gate; helper diagnostics were suppressed." >&2
             fallback
             exit 1 ;;

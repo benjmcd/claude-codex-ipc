@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- Tightened alternate-host classification so an external `codex.exe app-server` counts only when
+  its direct parent is the intended GUI, its readable executable matches the command prefix, and
+  `app-server` is the immediate subcommand. Foreground mocks now require `-DryRun`; host-policy and
+  activation refusals use the stable `gui-unowned` category; target parents and bounded host
+  inventory projections remain visible without command lines. Contract and hermetic matrix tests
+  pin the refusal vocabulary, revalidation projection, and known negative shapes.
 - Kept continuation turns isolated from the dispatch they follow: a marker inside an already-open
   turn retains that turn's boundary, and an immediate unmarked continuation cannot replace its
   terminal or supply its missing body. Added privacy-bounded `turn-error` and `turn-model-state`
