@@ -28,7 +28,7 @@ Before force replacement, run the matching preview: `./install.sh --dry-run --fo
 | `reason=target-model-empty` | The stored thread model is null, empty, or whitespace. No send was attempted and the toolkit does not repair settings. Select a healthy root thread or repair the target in its intended Desktop host, then issue a new dispatch. |
 | `reason=target-inspection-ambiguous` | Target existence, identity, archive state, root classification, or model safety could not be established from one trusted read-only snapshot. No send was attempted. Inspect the target; do not bypass or treat locator hints as authority. |
 | Client says `--model/--effort require --ack-thread-settings-change` | Those direct-client values persist as stored-thread settings. Supply the acknowledgement only when the operator explicitly intends the change. Values empty after trimming are always rejected. The maintained wrapper omits both fields. |
-| Goal-driven target already has an unfinished goal | Leave `--request-goal` off. Use manual delivery: generate the file-drop envelope and have the operator paste its pickup line into the intended thread. A closed turn is not a prerequisite; expect `pending` until the named dispatch has its own completion evidence. Never call `turn/interrupt` or resend merely to manufacture an idle gap. |
+| Goal-driven target already has an unfinished goal | Leave `--request-goal` off. Run `handoff_to_codex.sh --ipc <uuid> --deliver manual -- "<task>"` and have the operator paste its pickup line into the intended thread. A closed turn is not a prerequisite; expect `pending` until the named dispatch has its own completion evidence. Never call `turn/interrupt` or resend merely to manufacture an idle gap. |
 | `--ipc` → `failed-closed` with pipe/connect errors | The host gate passed, but the private router attempt failed or drifted. Run `codex_ipc_revalidate.mjs`; suspect drift before suspecting the target. This is post-attempt ambiguity, so do not resend. |
 | `reason=autoload-disabled` / `protocol-host-not-package` | No renderer owns the thread and activation is off (the default), or the intended host is alternate and therefore never package-activated. Use the printed file-drop line in the intended host. |
 | `reason=autoload-policy-refused` | The helper's fresh activation gate refused. Current real-machine readers do not qualify package-update clearance or the effective protocol handler, so this is the expected result for an unowned real package thread even with `--autoload codex-uri`. Revalidation or historical proof does not override it. |
@@ -42,6 +42,23 @@ Before force replacement, run the matching preview: `./install.sh --dry-run --fo
 | Reply viewer exit 1 on `--since` | Malformed `find -newermt` spec — the viewer fails closed rather than reporting a false "0 replies". |
 | Old envelopes disappeared | Retention pruning ran on a later dispatch. As of v0.1.8 pruning is OFF by default (`CODEX_IPC_RETENTION_DAYS` unset/empty/`0` = keep-only); it deletes only if you set an explicit positive integer. |
 | Reply file never written (permission/sandbox denial) | Expected only when the separate reply-write attempt actually returns a permission/sandbox error. The producer first completes and inspects the full result, then attempts the reply write exactly once as a separate final action. A calculation, command-construction, or parse failure is not a denied write and must be reported as its actual failure. On an actual denial, the producer states it accurately and retains the full substantive result in the final agent message. On a known-UUID `--ipc` dispatch, `codex_ipc_wait --accept-rollout-fallback` certifies named-dispatch completion and `replySource=rollout-fallback` but intentionally emits no body; retrieve and render the body with the existing read-only dual-source `scripts/codex_ipc_replies.sh` viewer. Display is capped at 4096 bytes by default; if truncation is reported, rerun with a sufficient `--max-bytes`. Flagless/filedrop do not auto-recover. The inspector's stored `sandboxPolicy`/`approvalMode` are advisory only (`permissionProfileAdvisory`) and never predict reply-writability. |
+
+## Sandboxed thread rollout fallback
+
+Thread-bound manual preparation keeps the ordinary UUID/reply correlation without contacting the
+Desktop pipe or PowerShell:
+
+```bash
+skills/ipc/scripts/handoff_to_codex.sh --ipc <uuid> --deliver manual -- "<task>"
+```
+
+Paste the printed pickup and run the printed `WAIT:` command. When the reply file is absent but the
+named dispatch has a certifiable final message, the waiter returns `done` with
+`replySource=rollout-fallback`; render it with
+`skills/ipc/scripts/codex_ipc_replies.sh --session <sid> -c <uuid> --rollout-path <inspector-page>`.
+The public root remains `~/.claude/ipc`. Pointing `CODEX_IPC_ROOT` at a directory the target can
+write is an operator configuration choice, and every participant must use that same explicit root;
+the tool never hard-codes a replacement or predicts writability from stored sandbox settings.
 
 ## Completion / wait triage (`codex_ipc_wait`)
 

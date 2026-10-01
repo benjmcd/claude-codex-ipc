@@ -33,8 +33,11 @@ const REQUIRED_FILES = [
   "scripts/codex_ipc_thread_locator.mjs",
   "scripts/codex_ipc_wait.mjs",
   "scripts/codex_ipc_write_proof.mjs",
+  "examples/quickstart.md",
   "references/architecture.md",
   "references/handoff-template.md",
+  "references/security-model.md",
+  "references/troubleshooting.md",
 ];
 
 function usage() {
@@ -115,8 +118,21 @@ function main() {
   const handoffText = readText("scripts/handoff_to_codex.sh");
   const inspectedTargetClassifier =
     handoffText.match(
-      /(?:^|\n)[ \t]*classify_inspected_target\(\)[ \t]*\{([\s\S]*?)(?=\n[ \t]*observe_rollout\(\)[ \t]*\{)/,
+      /(?:^|\n)[ \t]*classify_inspected_target\(\)[ \t]*\{([\s\S]*?)(?=\n[ \t]*# Safe manual preparation)/,
     )?.[1] || "";
+  const manualPreparationPath =
+    handoffText.match(
+      /if \[\[ "\$DELIVERY" == "manual" \]\]; then\n[ \t]*echo "MANUAL: thread-bound envelope is ready for operator pickup\."[\s\S]*?\n[ \t]*exit 0\n[ \t]*fi/,
+    )?.[0] || "";
+  const manualPreparationStart = handoffText.indexOf(
+    'echo "MANUAL: thread-bound envelope is ready for operator pickup."',
+  );
+  const firstLiveOnlyDefinitions = [
+    handoffText.indexOf("host_policy_send() {"),
+    handoffText.indexOf("send_live() {"),
+    handoffText.indexOf("observe_rollout() {"),
+    handoffText.indexOf('AUTOLOAD_PS1="${SCRIPT_DIR}/codex_ipc_autoload.ps1"'),
+  ];
   const authoritativeSuccessClassifier =
     handoffText.match(
       /(?:^|\n)[ \t]*authoritative_success\(\)[ \t]*\{([\s\S]*?)(?=\n[ \t]*authoritative_no_client\(\)[ \t]*\{)/,
@@ -225,13 +241,13 @@ function main() {
             "scripts/handoff_to_codex.sh",
             /INSPECT_OUTPUT=\$\(node[\s\S]*?codex_ipc_session_inspect\.mjs[\s\S]*?INSPECT_FIELDS=\$\(classify_inspected_target\)[\s\S]*?IFS=\$'\\t' read -r INSPECT_CLASS INSPECT_PARENT INSPECT_WARNING[\s\S]*?case "\$INSPECT_CLASS" in[\s\S]*?if send_live; then/,
           ) &&
-          contains("scripts/handoff_to_codex.sh", "is reused across auto-load"),
+          contains("scripts/handoff_to_codex.sh", "is reused across live auto-load recovery"),
       },
       {
         label: "SKILL.md documents the operator preview plus independent wrapper target gate",
         file: "SKILL.md",
         ok:
-          contains("SKILL.md", "live-delivery acknowledgement") &&
+          contains("SKILL.md", /live-delivery\s+acknowledgement/) &&
           contains("SKILL.md", "wrapper independently runs that inspector exactly once") &&
           contains("SKILL.md", "shared host policy still runs fresh immediately before every send or retry"),
       },
@@ -395,7 +411,7 @@ function main() {
             "scripts/handoff_to_codex.sh",
             "IFS=$'\\t' read -r INSPECT_CLASS INSPECT_PARENT INSPECT_WARNING",
           ) &&
-          contains("scripts/handoff_to_codex.sh", "reason=target-inspection-ambiguous"),
+          contains("scripts/handoff_to_codex.sh", 'TARGET_REFUSAL_REASON="target-inspection-ambiguous"'),
       },
       {
         label: "inspector derives root status from every available child and parent indicator",
@@ -449,10 +465,10 @@ function main() {
         label: "unsafe targets refuse with distinct pre-attempt reasons and parent or legacy diagnostics",
         file: "scripts/handoff_to_codex.sh",
         ok:
-          contains("scripts/handoff_to_codex.sh", "reason=target-not-found") &&
-          contains("scripts/handoff_to_codex.sh", "reason=target-archived") &&
-          contains("scripts/handoff_to_codex.sh", "reason=target-non-root") &&
-          contains("scripts/handoff_to_codex.sh", "reason=target-model-empty") &&
+          contains("scripts/handoff_to_codex.sh", 'TARGET_REFUSAL_REASON="target-not-found"') &&
+          contains("scripts/handoff_to_codex.sh", 'TARGET_REFUSAL_REASON="target-archived"') &&
+          contains("scripts/handoff_to_codex.sh", 'TARGET_REFUSAL_REASON="target-non-root"') &&
+          contains("scripts/handoff_to_codex.sh", 'TARGET_REFUSAL_REASON="target-model-empty"') &&
           contains("scripts/handoff_to_codex.sh", "Target parent thread:") &&
           contains("scripts/handoff_to_codex.sh", "TARGET-WARNING: legacy thread has no source classification"),
       },
@@ -696,7 +712,7 @@ function main() {
         ok: hasWaiterContract("references/troubleshooting.md"),
       },
       {
-        label: "the wrapper prints the runnable WAIT: hint only on accepted live --ipc success",
+        label: "the wrapper prints one shared runnable WAIT: hint for safe manual preparation and accepted live success",
         file: "scripts/handoff_to_codex.sh",
         ok:
           contains("scripts/handoff_to_codex.sh", "print_wait_hint") &&
@@ -901,6 +917,57 @@ function main() {
           contains("references/architecture.md", "`ROLLOUT-PAGE:` guidance"),
       },
     ], "Static source evidence only. Hermetic reader, observer, waiter, harvester, viewer, and wrapper suites exercise page propagation and supersession refusal without SQLite access, Desktop activation, or live IPC."),
+    check("REQ-024", "Thread-bound manual delivery preserves UUID/reply correlation and exits before every live effect.", [
+      {
+        label: "the parser defaults IPC delivery to live and accepts one explicit manual selector while rejecting live-only flag combinations",
+        file: "scripts/handoff_to_codex.sh",
+        ok:
+          contains("scripts/handoff_to_codex.sh", 'DELIVERY="live"') &&
+          contains("scripts/handoff_to_codex.sh", "--deliver live|manual") &&
+          contains("scripts/handoff_to_codex.sh", "ERROR: --deliver may be supplied only once.") &&
+          contains("scripts/handoff_to_codex.sh", "ERROR: --deliver manual cannot be combined with live-only host or foreground flags."),
+      },
+      {
+        label: "the safe manual branch prints correlated pickup, optional fixed page guidance, and WAIT without live result or live helpers",
+        file: "scripts/handoff_to_codex.sh",
+        ok:
+          manualPreparationPath.length > 0 &&
+          [
+            "read \\\"${OUTBOUND}\\\" and proceed",
+            "Codex's reply will be written to ${INBOUND}",
+            "ROLLOUT-PATH: Supply the inspector's database-designated page with --rollout-path <path>.",
+            "print_wait_hint",
+            "exit 0",
+          ].every((anchor) => manualPreparationPath.includes(anchor)) &&
+          !/RESULT:|host_policy_send|send_live|observe_rollout|powershell\.exe|codex_ipc_client|codex_ipc_autoload/.test(
+            manualPreparationPath,
+          ),
+      },
+      {
+        label: "the safe manual exit precedes host policy, client send, rollout observer, and activation helper definitions",
+        file: "scripts/handoff_to_codex.sh",
+        ok:
+          manualPreparationStart >= 0 &&
+          firstLiveOnlyDefinitions.every((index) => index > manualPreparationStart),
+      },
+      {
+        label: "unsafe manual targets retain a fixed refusal contract with no live result taxonomy",
+        file: "scripts/handoff_to_codex.sh",
+        ok:
+          contains("scripts/handoff_to_codex.sh", "ERROR: manual delivery refused -- reason=${TARGET_REFUSAL_REASON}") &&
+          contains("scripts/handoff_to_codex.sh", 'if [[ "$DELIVERY" == "manual" ]]; then'),
+      },
+      {
+        label: "bundled guidance preserves the public root, operator-owned relocation, fixed fallback anchor, and no-live boundary",
+        file: "references/troubleshooting.md",
+        ok:
+          contains("references/troubleshooting.md", "### Sandboxed thread rollout fallback") &&
+          contains("references/troubleshooting.md", "--ipc <uuid> --deliver manual") &&
+          contains("references/troubleshooting.md", "The public transport default remains `~/.claude/ipc`.") &&
+          contains("references/security-model.md", "exits after safe preparation, before host policy, PowerShell") &&
+          contains("references/security-model.md", "no live `RESULT:` line"),
+      },
+    ], "Static installed-skill evidence only. Repository release suites separately exercise manual refusal, live-effect tripwires, and sandboxed rollout fallback. Manual preparation makes no live IPC, Desktop-state, reply-writability, or runtime compatibility claim."),
   ];
 
   const ok = Object.values(files).every((item) => item.ok) &&

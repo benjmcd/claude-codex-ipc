@@ -17,6 +17,10 @@ summary bundled with the skill.
 - **Transcript pointers are opt-in.** The Claude transcript path is included in a handoff only when
   `CODEX_IPC_INCLUDE_TRANSCRIPT=1` is set, because a transcript exposes the full session context,
   potentially including unrelated material.
+- **Manual delivery does not prove reply writability.** The public transport default remains
+  `~/.claude/ipc`. Pointing `CODEX_IPC_ROOT` at a shared target-writable directory is an operator
+  configuration choice; every participant must use the same explicit root, and stored thread
+  sandbox settings are not a writability oracle.
 - **The Desktop pipe is a shared local surface.** Any local process running as the same user can
   connect to the same named pipe and files. This toolkit adds no privilege boundary and offers no
   guarantee against malicious local users or processes.
@@ -29,11 +33,15 @@ summary bundled with the skill.
   **and** `--ack-live-write`, and additionally `--allow-any-thread` unless the target equals the
   operator-set `CODEX_IPC_AUTHORIZED_TEST_THREAD` environment variable. No authorized thread id is
   shipped with the code.
-- The wrapper writes the file-drop fallback, then runs one read-only target inspection before any
-  live delivery. It requires a trusted exact active DB row, a `root` or warned
+- The wrapper writes the thread-bound envelope, then runs one read-only target inspection before
+  manual pickup or any live delivery. It requires a trusted exact active DB row, a `root` or warned
   `legacy-root-assumed` classification, and a nonempty stored model. Missing, archived, non-root,
   empty-model, malformed, contradictory, or ambiguous state refuses before host policy or pipe
-  contact with `confirmation=not-attempted`.
+  contact. Manual refusal retains the envelope, emits a fixed error, and prints no actionable
+  pickup; live refusal reports `confirmation=not-attempted`.
+- `--ipc <uuid> --deliver manual` exits after safe preparation, before host policy, PowerShell,
+  pipe client, observer, or opener code. It prints the correlated pickup and `WAIT:` instructions
+  and no live `RESULT:` line.
 - The maintained wrapper runs a fresh shared read-only host gate before every initial send and
   retry. It requires exactly one intended GUI host, no other GUI host, and complete identity
   evidence. Per-field precedence is flag > environment > `${CODEX_IPC_ROOT}/host-policy.json` >

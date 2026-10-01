@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- Added thread-bound manual delivery with `--ipc <uuid> --deliver manual`. It writes the ordinary
+  correlated envelope, reuses the mandatory read-only target inspection, and prints pickup plus a
+  bound `WAIT:` command before exiting without host policy, PowerShell, pipe, observer, or opener
+  contact. Unsafe targets retain the envelope but receive a fixed refusal and no actionable pickup.
+  Hermetic tests cover safe preparation, every refusal class, conflicting live-only flags, unknown
+  rollout-page guidance, and sandboxed rollout fallback with live-effect tripwires.
+- Bound wrapper, observer, waiter, harvester, and reply-viewer fallback to the inspector's
+  database-designated physical rollout page. One shared SQLite-free assessor now detects a direct
+  paginated successor and fails closed with fixed diagnostics; consumers never auto-hop or stitch
+  records across pages. Hermetic multi-page fixtures cover both superseded and unproven lineage.
 - Made payload goal setup explicit. Ordinary file-drop and live-wrapper payloads no longer ask the
   receiver to set `/goal`; `--request-goal` restores the former instruction for an operator who
   deliberately wants it. The committed payload example and both carrier tests cover the default

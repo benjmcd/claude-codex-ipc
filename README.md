@@ -62,24 +62,27 @@ The repository-relative Quickstart block below runs from the repository root.
 skills/ipc/scripts/handoff_to_codex.sh "review src/parser.js for edge cases"
 # Goal setup is off by default; add --request-goal before the task only on explicit operator intent.
 
-# 2. Live Desktop delivery (experimental): explicit UUID only — preview, then send.
+# 2. Thread-bound manual delivery: same UUID/reply correlation, no live contact.
+skills/ipc/scripts/handoff_to_codex.sh --ipc <conversation-id> --deliver manual -- "review the parser"
+
+# 3. Live Desktop delivery (experimental): explicit UUID only — preview, then send.
 #    The wrapper repeats one read-only root/model inspection and a fresh host gate before contact;
 #    Desktop activation stays off by default.
 node skills/ipc/scripts/codex_ipc_session_inspect.mjs --thread <conversation-id> --tail-events 20 --summary
 skills/ipc/scripts/handoff_to_codex.sh --ipc <conversation-id> "run the failing test and fix it"
 
-# 3. Replies (read-only, newest first)
+# 4. Replies (read-only, newest first)
 skills/ipc/scripts/codex_ipc_replies.sh
 
-# 4. Wait for a NAMED dispatch to complete (bounded; opt-in rollout fallback)
+# 5. Wait for a NAMED dispatch to complete (bounded; opt-in rollout fallback)
 node skills/ipc/scripts/codex_ipc_wait.mjs --thread <conversation-id> --dispatch <dispatchId> \
   --reply-path <printed .reply.md path> --accept-rollout-fallback --budget-ms 1800000 --interval-ms 1000
 ```
 
-For a goal-driven target, keep `--request-goal` off and use manual delivery: generate the
-file-drop envelope, then have the operator paste its pickup line into the intended thread. A closed
-turn is not a precondition. Expect `pending` until the named dispatch has its own completion
-evidence; never call `turn/interrupt` or resend merely to manufacture an idle gap.
+For a goal-driven target, keep `--request-goal` off and use
+`--ipc <uuid> --deliver manual`; then have the operator paste its pickup line into the intended
+thread. A closed turn is not a precondition. Expect `pending` until the named dispatch has its own
+completion evidence; never call `turn/interrupt` or resend merely to manufacture an idle gap.
 
 `codex_ipc_wait` prints exactly one of six tokens on stdout — `done`, `aborted`, `superseded`,
 `reply-missing`, `pending`, `unavailable`. `done` certifies that the **named dispatch's own turn**
@@ -96,13 +99,15 @@ An absent reply with no certifiable rollout body exhausts the eligible sources.
 Inspect diagnostics/thread rather than re-harvesting,
 auto-resending, or hand-rolling a poll. On `reply-missing`/`aborted`:
 resuming the goal in a fresh, unmarked turn will NOT re-certify the original dispatch id; machine re-certification requires a NEW dispatch with a new marker.
-After an accepted live `--ipc` send the wrapper prints a ready-to-run `WAIT:` line before its final
-`RESULT:` line. Flagless (no `--accept-rollout-fallback`) is the legacy file-primary contract.
+Manual preparation prints pickup plus a ready-to-run `WAIT:` line and no live `RESULT:`. After an
+accepted live `--ipc` send the wrapper prints the same WAIT contract before its final `RESULT:`
+line. Flagless (no `--accept-rollout-fallback`) is the legacy file-primary contract.
 
-The wrapper always writes the file-drop **envelope** before any live attempt. The **pickup line** is
-printed only when the failure is proven pre-send; after an ambiguous post-attempt result
-(`confirmation=unknown`) the envelope is preserved but pickup is suppressed, because the turn may
-already have been admitted and resending would duplicate it. Live results are machine-parseable:
+The wrapper always writes the thread-bound **envelope** before manual preparation or any live
+attempt. Manual mode prints pickup without attempting a send. On the live route, a fallback
+**pickup line** is printed only when the failure is proven pre-send. After an ambiguous post-attempt
+result (`confirmation=unknown`) the envelope is preserved but pickup is suppressed, because the
+turn may already have been admitted and resending would duplicate it. Live results are machine-parseable:
 `RESULT: gui-delivered|gui-unowned|failed-closed -- reason=<token> -- confirmation=<token>`.
 After an accepted live send, confirmation is `rollout-hit` (the exact dispatch task basename was
 observed in a rollout user message), `rollout-pending` (at least one authoritative candidate was
@@ -141,6 +146,7 @@ Component-specific options are documented by each tool's --help and [bundled ref
 | Feature | Windows | Linux/macOS | Stability |
 |---|---|---|---|
 | File-drop handoff | ✅ | ✅ | Stable |
+| Thread-bound manual handoff | ✅ | ✅ (Node with `node:sqlite`) | Stable, no live contact |
 | Reply viewer | ✅ | ✅ (bash ≥ 4 + GNU coreutils; Node optional for rollout fallback) | Stable |
 | Inspector / locator / snapshot | ✅ | ✅ (Node with `node:sqlite`, ≥ 22.5) | Stable, read-only |
 | Desktop pipe IPC + gated `codex://` activation | ✅ | ❌ | **Experimental**; send gate always applies, activation defaults off |
@@ -150,10 +156,10 @@ Dependencies and fallbacks per feature: [docs/COMPATIBILITY.md](docs/COMPATIBILI
 ## Safety
 
 Explicit target UUID for every live send — no heuristic targeting, ever. Dry-run by default;
-live writes need `--send --ack-live-write` (+`--allow-any-thread`) — except the
-`handoff_to_codex.sh --ipc <uuid>` wrapper, where selecting the explicit UUID is itself the
-acknowledgement and the wrapper supplies those client flags internally (see SECURITY.md
-"Completeness note"); no authorized thread id ships.
+live writes need `--send --ack-live-write` (+`--allow-any-thread`) — except the live
+`handoff_to_codex.sh --ipc <uuid>` route, where selecting the explicit UUID is itself the
+acknowledgement and the wrapper supplies those client flags internally. `--deliver manual` makes no
+live attempt (see SECURITY.md "Completeness note"); no authorized thread id ships.
 The wrapper rechecks a complete, single-intended-host inventory before every send or retry.
 Host settings resolve per field as flag > environment > `${CODEX_IPC_ROOT}/host-policy.json` >
 defaults (`autoload=off`, intended host `package`); every present layer must be valid. Alternate

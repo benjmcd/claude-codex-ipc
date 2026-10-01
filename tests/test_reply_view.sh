@@ -394,6 +394,189 @@ else
   [[ $VRC -eq 0 ]] && printf '%s' "$VOUT" | grep -q "SEAM-REPLY-BODY-73" && ok "viewer renders the reply landed at the wrapper-advertised path" || no "viewer did not render seam reply (rc=$VRC)"
 fi
 
+echo "== T23b thread-bound manual envelope -> multi-page waiter/viewer fallback =="
+if [[ -z "$WRAPPER" ]]; then
+  no "T23b seam: wrapper unavailable"
+else
+  REAL_NODE23B="$(command -v node 2>/dev/null)" || REAL_NODE23B=""
+  if [[ -z "$REAL_NODE23B" ]]; then
+    no "T23b seam: real Node unavailable"
+  else
+    SEAM23B_ROOT="$TMP/seam23b-root"
+    SEAM23B_PAGES="$TMP/seam23b-pages"
+    SEAM23B_HOME="$TMP/seam23b-home"
+    SEAM23B_WORK="$TMP/seam23b-work"
+    BIN23B="$TMP/bin23b"
+    mkdir -p "$SEAM23B_ROOT" "$SEAM23B_PAGES" "$SEAM23B_HOME" "$SEAM23B_WORK" "$BIN23B" \
+      || fatal "could not create T23b isolated roots"
+    PAGE23B_OLD="$SEAM23B_PAGES/rollout-old-$U1.jsonl"
+    PAGE23B_CURRENT="$SEAM23B_PAGES/rollout-current-${U1}_${U2}.jsonl"
+    "$REAL_NODE23B" - "$PAGE23B_OLD" "$PAGE23B_CURRENT" "$U1" <<'NODE'
+const fs = require("node:fs");
+const [oldPage, currentPage, threadId] = process.argv.slice(2);
+const predecessor = `${JSON.stringify({ type: "session_meta", payload: { id: threadId } })}\n`;
+const header = {
+  type: "session_meta",
+  payload: {
+    id: threadId,
+    session_id: threadId,
+    history_mode: "paginated",
+    history_base: {
+      thread_id: threadId,
+      end_byte_offset: Buffer.byteLength(predecessor, "utf8"),
+    },
+  },
+};
+fs.writeFileSync(oldPage, predecessor);
+fs.writeFileSync(currentPage, `${JSON.stringify(header)}\n`);
+NODE
+    INSPECT23B_COUNT="$TMP/inspect23b.count"
+    FORBIDDEN23B="$TMP/forbidden23b.log"
+    cat > "$BIN23B/node" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+  *codex_ipc_session_inspect.mjs*)
+    printf '1\n' >> "$INSPECT23B_COUNT"
+    "$REAL_NODE23B" - "$PAGE23B_CURRENT" "$THREAD23B" <<'NODE'
+const [page, threadId] = process.argv.slice(2);
+process.stdout.write(JSON.stringify({
+  ok: true,
+  dbThread: {
+    exists: true,
+    readOnlyOpenOk: true,
+    thread: {
+      exists: true,
+      id: threadId,
+      archived: 0,
+      model: "synthetic-model",
+      threadSource: "user",
+      rolloutPath: page,
+    },
+  },
+  targetClassification: {
+    kind: "root",
+    parentThreadId: null,
+    reasons: ["thread-source-root"],
+    warnings: [],
+  },
+  rollout: {
+    selection: { status: "found", authority: "db.rollout_path", path: page },
+    primary: { parsedOk: true, path: page },
+  },
+}));
+NODE
+    ;;
+  *codex_ipc_client.mjs*|*codex_ipc_rollout_observe.mjs*)
+    printf 'forbidden-node %s\n' "$*" >> "$FORBIDDEN23B"
+    exit 97
+    ;;
+  *) exec "$REAL_NODE23B" "$@";;
+esac
+EOF
+    for _stub in powershell.exe codex; do
+      cat > "$BIN23B/$_stub" <<'EOF'
+#!/usr/bin/env bash
+printf 'forbidden-child %s %s\n' "${0##*/}" "$*" >> "$FORBIDDEN23B"
+exit 97
+EOF
+    done
+    chmod +x "$BIN23B"/* || fatal "could not make T23b stubs executable"
+    for _stub in node powershell.exe codex; do
+      _resolved="$(PATH="$BIN23B:$PATH" command -v "$_stub" 2>/dev/null)" \
+        || fatal "T23b $_stub stub does not resolve"
+      [[ "$_resolved" == "$BIN23B/$_stub" ]] \
+        || fatal "T23b $_stub resolved outside the harness: $_resolved"
+    done
+    unset _stub _resolved
+
+    WOUT="$( cd "$SEAM23B_WORK" && env \
+      -u CODEX_IPC_ROLLOUT_PATH -u NODE_OPTIONS -u NODE_PATH -u BASH_ENV -u ENV \
+      HOME="$SEAM23B_HOME" USERPROFILE="$SEAM23B_HOME" \
+      TMPDIR="$SEAM23B_HOME" TMP="$SEAM23B_HOME" TEMP="$SEAM23B_HOME" \
+      CODEX_IPC_ROOT="$SEAM23B_ROOT" CODEX_IPC_RETENTION_DAYS=0 \
+      CODEX_IPC_GIT_CONTEXT=bounded CODEX_IPC_INCLUDE_TRANSCRIPT=0 \
+      CLAUDE_CODE_SESSION_ID=seam23b CODEX_IPC_SESSIONS_ROOT="$SEAM23B_PAGES" \
+      REAL_NODE23B="$REAL_NODE23B" INSPECT23B_COUNT="$INSPECT23B_COUNT" \
+      FORBIDDEN23B="$FORBIDDEN23B" PAGE23B_CURRENT="$PAGE23B_CURRENT" THREAD23B="$U1" \
+      PATH="$BIN23B:$PATH" bash "$WRAPPER" --ipc "$U1" --deliver manual -- "C3 synthetic task" 2>&1 )"; WRC=$?
+    mapfile -t TASKS23B < <("$REAL_FIND" "$SEAM23B_ROOT/seam23b/$U1" -maxdepth 1 -name '*.task.md' -type f 2>/dev/null | "$REAL_SORT")
+    WAIT23B_COUNT="$(printf '%s\n' "$WOUT" | grep -c '^WAIT:' || true)"
+    PICKUP23B_COUNT="$(printf '%s\n' "$WOUT" | grep -c '^    read ".*\.task\.md" and proceed$' || true)"
+    if [[ $WRC -eq 0 && "${#TASKS23B[@]}" -eq 1 && "$WAIT23B_COUNT" -eq 1 && "$PICKUP23B_COUNT" -eq 1 \
+          && "$WOUT" != *"RESULT:"* ]]; then
+      ok "manual wrapper produced one real thread-bound envelope, pickup, and WAIT without RESULT"
+      TASK23B="${TASKS23B[0]}"
+      DISPATCH23B="$(basename "$TASK23B" .task.md)"
+      REPLY23B="${TASK23B%.task.md}.reply.md"
+      WAIT23B="$(printf '%s\n' "$WOUT" | grep '^WAIT:' | head -1)"
+      PICKUP23B="$(printf '%s\n' "$WOUT" | grep '^    read ".*\.task\.md" and proceed$' | head -1)"
+      if [[ "$WAIT23B" == *"--thread $U1"* && "$WAIT23B" == *"--dispatch $DISPATCH23B"* \
+            && "$WAIT23B" == *"--reply-path"* && "$WAIT23B" == *"--rollout-path"* ]]; then
+        ok "manual WAIT binds the actual thread, dispatch, reply, and designated page"
+      else
+        no "manual WAIT lost exact correlation (line=$WAIT23B)"
+      fi
+
+      "$REAL_NODE23B" - "$PAGE23B_CURRENT" "$PICKUP23B" <<'NODE'
+const fs = require("node:fs");
+const [page, pickup] = process.argv.slice(2);
+const turnId = "33333333-3333-4333-8333-333333333333";
+const body = "C3-SANDBOX-FALLBACK-BODY";
+const records = [
+  { type: "event_msg", payload: { type: "task_started", turn_id: turnId } },
+  { type: "event_msg", payload: { type: "user_message", turn_id: turnId, message: pickup } },
+  { type: "event_msg", payload: { type: "agent_message", turn_id: turnId, phase: "final_answer", message: body } },
+  { type: "event_msg", payload: { type: "task_complete", turn_id: turnId, last_agent_message: body } },
+];
+fs.appendFileSync(page, `${records.map((item) => JSON.stringify(item)).join("\n")}\n`);
+NODE
+      HASH23B_BEFORE="$(sha256sum "$TASK23B" "$PAGE23B_OLD" "$PAGE23B_CURRENT")"
+      WAIT23B_OUT="$TMP/wait23b.out"; WAIT23B_ERR="$TMP/wait23b.err"
+      WAIT23B_CMD="${WAIT23B#WAIT: }"
+      PAGES23B_Q="$(printf '%q' "$SEAM23B_PAGES")"
+      (
+        export HOME="$SEAM23B_HOME" USERPROFILE="$SEAM23B_HOME"
+        export TMPDIR="$SEAM23B_HOME" TMP="$SEAM23B_HOME" TEMP="$SEAM23B_HOME"
+        export CODEX_IPC_ROOT="$SEAM23B_ROOT" CODEX_IPC_SESSIONS_ROOT="$SEAM23B_PAGES"
+        export REAL_NODE23B INSPECT23B_COUNT FORBIDDEN23B PAGE23B_CURRENT
+        export THREAD23B="$U1" PATH="$BIN23B:$PATH"
+        eval "$WAIT23B_CMD --budget-ms 0 --sessions-root $PAGES23B_Q"
+      ) >"$WAIT23B_OUT" 2>"$WAIT23B_ERR"; WAIT23B_RC=$?
+      printf 'done\n' > "$TMP/wait23b.expected"
+      if [[ $WAIT23B_RC -eq 0 ]] && cmp -s "$TMP/wait23b.expected" "$WAIT23B_OUT" \
+          && [[ "$(wc -l < "$WAIT23B_ERR" | tr -d ' ')" -eq 1 ]] \
+          && grep -Fxq 'WAIT_DIAGNOSTIC {"code":"reply-source","source":"rollout-fallback"}' "$WAIT23B_ERR" \
+          && ! grep -Fq 'C3-SANDBOX-FALLBACK-BODY' "$WAIT23B_OUT" "$WAIT23B_ERR"; then
+        ok "real waiter certifies the absent-reply dispatch from the bound multi-page rollout"
+      else
+        no "real waiter failed multi-page fallback (rc=$WAIT23B_RC out=$(cat "$WAIT23B_OUT") err=$(cat "$WAIT23B_ERR"))"
+      fi
+
+      VOUT="$(env CODEX_IPC_ROOT="$SEAM23B_ROOT" CLAUDE_CODE_SESSION_ID=seam23b \
+        CODEX_IPC_SESSIONS_ROOT="$SEAM23B_PAGES" REAL_NODE23B="$REAL_NODE23B" \
+        INSPECT23B_COUNT="$INSPECT23B_COUNT" FORBIDDEN23B="$FORBIDDEN23B" \
+        PAGE23B_CURRENT="$PAGE23B_CURRENT" THREAD23B="$U1" PATH="$BIN23B:$PATH" \
+        bash "$SCRIPT" --session seam23b -c "$U1" --rollout-path "$PAGE23B_CURRENT" 2>&1)"; VRC=$?
+      HASH23B_AFTER="$(sha256sum "$TASK23B" "$PAGE23B_OLD" "$PAGE23B_CURRENT")"
+      if [[ $VRC -eq 0 && "$VOUT" == *"source=rollout-fallback"* \
+            && "$VOUT" == *"C3-SANDBOX-FALLBACK-BODY"* ]]; then
+        ok "real viewer renders the certified multi-page rollout fallback body"
+      else
+        no "real viewer failed multi-page fallback rendering (rc=$VRC out=$VOUT)"
+      fi
+      if [[ ! -e "$REPLY23B" && "$HASH23B_BEFORE" == "$HASH23B_AFTER" \
+            && "$(wc -l < "$INSPECT23B_COUNT" | tr -d ' ')" -eq 1 \
+            && ! -e "$FORBIDDEN23B" ]]; then
+        ok "fallback path stays read-only, keeps reply absent, inspects once, and makes zero live contacts"
+      else
+        no "fallback seam mutated evidence, created a reply, re-inspected, or touched a live child"
+      fi
+    else
+      no "T23b manual wrapper setup failed (rc=$WRC tasks=${#TASKS23B[@]} waits=$WAIT23B_COUNT pickups=$PICKUP23B_COUNT out=$WOUT)"
+    fi
+  fi
+fi
+
 echo ""
 echo "RESULT: $PASS passed, $FAIL failed"
 [[ $FAIL -eq 0 ]] && echo "ALL GREEN" || echo "FAILURES PRESENT"

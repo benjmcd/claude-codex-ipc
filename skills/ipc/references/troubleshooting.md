@@ -8,7 +8,7 @@ Repo-level triage lives in `docs/TROUBLESHOOTING.md`; this is the bundled quick 
 |---|---|---|
 | `node:sqlite is unavailable` from inspector/locator/snapshot | Node.js without `node:sqlite` support (needs ≥ 22.5; older 22.x/23.x lines may require `--experimental-sqlite`) | Upgrade Node, or skip inspection — file-drop handoff works without it |
 | `--app/--open/--exec was removed in v0.1.8` | CLI-backed modes removed | Use the default file-drop handoff or `--ipc <conversationId>`; neither invokes the Codex CLI |
-| `--ipc` says `node not found` | Node.js missing | Install Node; or use the printed file-drop pickup line (already written) |
+| `--ipc` says `node not found` | Node.js missing | Install Node. A live invocation prints its structurally safe fallback; manual mode retains the envelope but prints no actionable pickup because target inspection did not run |
 | Inspector says `State DB was not found` | No Codex Desktop state on this machine (or non-default path) | Pass `--db`/`--sessions-root`, or accept that inspection is unavailable |
 | `autoload helper unavailable` | Not Windows, `powershell.exe` missing, or helper missing | Use file-drop; do not launch the protocol manually to bypass the shared policy |
 
@@ -50,8 +50,8 @@ infer non-delivery), or `rollout-unavailable` (observation could not determine a
 triggers an automatic resend. Thread-tail inspection can inform diagnosis, but negative bounded
 evidence cannot prove non-admission or authorize a resend.
 
-For a goal-driven target, leave `--request-goal` off and use manual delivery: generate the
-file-drop envelope, then have the operator paste its pickup line into the intended thread. Do not
+For a goal-driven target, leave `--request-goal` off and use thread-bound manual delivery with
+`--ipc <uuid> --deliver manual`, then have the operator paste its pickup line into the intended thread. Do not
 wait for a closed-turn gap before the paste. `pending` is expected until the named dispatch has its
 own completion evidence; never call `turn/interrupt` or resend merely to manufacture an idle gap.
 
@@ -102,6 +102,30 @@ bytes by default; if truncation is reported, rerun with a sufficient `--max-byte
 filedrop do not auto-recover. The inspector's stored `sandboxPolicy`/`approvalMode` are advisory only
 (`permissionProfileAdvisory`): they may differ from the effective turn and never predict
 reply-writability.
+
+### Sandboxed thread rollout fallback
+
+Use thread-bound manual preparation when the operator will paste the pickup and the target may be
+unable to write the reply path:
+
+```bash
+"${CLAUDE_SKILL_DIR}/scripts/handoff_to_codex.sh" --ipc <uuid> --deliver manual -- "<task>"
+```
+
+The command keeps the normal `${CODEX_IPC_ROOT:-~/.claude/ipc}/<sid>/<uuid>/` envelope and prints
+the exact reply path plus a `WAIT:` command. Run that printed command; when the reply is genuinely
+absent but the named dispatch has a certifiable final message, it returns `done` with
+`replySource=rollout-fallback`. Render the body without creating a reply file:
+
+```bash
+"${CLAUDE_SKILL_DIR}/scripts/codex_ipc_replies.sh" --session <sid> -c <uuid> --rollout-path <inspector-page>
+```
+
+The public transport default remains `~/.claude/ipc`. Pointing `CODEX_IPC_ROOT` at a directory the
+target can write is an operator configuration choice; the dispatcher, receiver, waiter, and viewer
+must use the same explicit root. Never hard-code a different default or infer writability from the
+stored sandbox row. If the inspector page was unavailable during preparation, the wrapper omits
+`--rollout-path` and prints fixed `ROLLOUT-PATH:` guidance instead of guessing.
 
 ## Completion / wait triage (`codex_ipc_wait`)
 

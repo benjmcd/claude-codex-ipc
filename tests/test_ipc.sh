@@ -412,6 +412,7 @@ EOF
 cat > "$BIN2/powershell.exe" <<'EOF'
 #!/usr/bin/env bash
 FG="__FGDIR__"
+n=$(cat "$FG/powershell_count" 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > "$FG/powershell_count"
 script=""
 previous=""
 for argument in "$@"; do
@@ -476,7 +477,7 @@ assert_stub_resolution "$BIN2"
 fgreset(){ # fgreset <client_mode> [inspect_mode] [pscode] [observe_mode] [policy_mode]
   rm -f "$FGDIR"/send_count "$FGDIR"/inspect_count "$FGDIR"/nodeargs.log "$FGDIR"/pslog \
         "$FGDIR"/observe_count "$FGDIR"/observe_args.log "$FGDIR"/policy_count \
-        "$FGDIR"/policylog "$FGDIR"/eventlog "$FGDIR"/policy_stderr \
+        "$FGDIR"/policylog "$FGDIR"/eventlog "$FGDIR"/policy_stderr "$FGDIR"/powershell_count \
         "$FGDIR"/helper_stderr
   echo "${1}" > "$FGDIR/client_mode"
   echo "${2:-ok}" > "$FGDIR/inspect_mode"
@@ -778,6 +779,101 @@ fgrun --ipc "$UUIDF" "t20 legacy root"
   && ok "legacy-root-assumed warns, inspects once, and may continue" \
   || no "legacy-root-assumed was rejected, silent, or re-inspected (rc=$RC)"
 assert_tax "t20-legacy"
+
+echo "== 20b. thread-bound manual delivery prepares pickup + WAIT without live contact =="
+fgreset always-ok page 0 rollout-hit eligible-codex-uri
+OUT="$( cd "$REPO" && CODEX_IPC_ROOT="$IPCROOT" CLAUDE_CODE_SESSION_ID="fgsess" \
+    CODEX_IPC_FOREGROUND_POLICY=bogus CODEX_IPC_AUTOLOAD=bogus \
+    CODEX_IPC_INTENDED_HOST=bogus-relative-host CODEX_IPC_FOREGROUND_SWITCH_STANDING_APPROVAL=1 \
+    PATH="$BIN2:$PATH" bash "$SCRIPT" --ipc "$UUIDF" --deliver manual --request-goal -- "t20b manual page" 2>&1 )"; RC=$?
+manual_task=""; while IFS= read -r f; do grep -qx "t20b manual page" "$f" && { manual_task="$f"; break; }; done < <(find "$IPCROOT/fgsess/$UUIDF" -name '*.task.md' 2>/dev/null)
+[[ $RC -eq 0 && -n "$manual_task" ]] \
+  && printf '%s\n' "$OUT" | grep -q "Open the thread in your intended Desktop host's window, then paste:" \
+  && printf '%s\n' "$OUT" | grep -Eq '^    read ".*\.task\.md" and proceed$' \
+  && printf '%s\n' "$OUT" | grep -q '^WAIT: node ' \
+  && printf '%s\n' "$OUT" | grep -q -- "--thread $UUIDF" \
+  && printf '%s\n' "$OUT" | grep -q -- '--reply-path ' \
+  && printf '%s\n' "$OUT" | grep -q -- "--rollout-path C:/ipc-fixture/rollout-current-$UUIDF.jsonl" \
+  && ! printf '%s\n' "$OUT" | grep -Eq '^(POLICY:|RESULT:|Injecting pickup|\[ Delivered)' \
+  && [[ "$(cat "$FGDIR/inspect_count" 2>/dev/null || echo 0)" == "1" ]] \
+  && [[ ! -f "$FGDIR/send_count" && ! -f "$FGDIR/powershell_count" \
+        && ! -f "$FGDIR/observe_count" && ! -f "$FGDIR/pslog" ]] \
+  && [[ "$(tr '\n' ' ' < "$FGDIR/eventlog")" == 'inspect ' ]] \
+  && ok "manual delivery ignores ambient live policy, inspects once, and prepares thread-bound recovery" \
+  || no "manual delivery contacted a live surface or omitted its pickup/wait contract (rc=$RC events=$(tr '\n' ' ' < "$FGDIR/eventlog" 2>/dev/null))"
+[[ -n "$manual_task" ]] && grep -Fq 'Read the **Task** below, set your `/goal` to a concise summary of it, then complete it' "$manual_task" \
+  && ok "manual delivery preserves the opt-in goal request inside the ordinary envelope" \
+  || no "manual delivery changed or lost the request-goal payload"
+
+echo "== 20c. manual delivery without an authoritative page gives fixed guidance =="
+fgreset always-ok ok 0 rollout-hit eligible-codex-uri
+fgrun --ipc "$UUIDF" --deliver manual -- "t20c manual unknown page"
+[[ $RC -eq 0 ]] \
+  && printf '%s\n' "$OUT" | grep -Fxq "ROLLOUT-PATH: Supply the inspector's database-designated page with --rollout-path <path>." \
+  && [[ "$(printf '%s\n' "$OUT" | grep '^WAIT:' | grep -c -- '--rollout-path' || true)" == "0" ]] \
+  && [[ "$(printf '%s\n' "$OUT" | grep -c '^WAIT:')" == "1" ]] \
+  && [[ ! -f "$FGDIR/send_count" && ! -f "$FGDIR/powershell_count" && ! -f "$FGDIR/observe_count" ]] \
+  && ok "manual delivery omits an unproven page and tells the operator how to bind one" \
+  || no "manual delivery guessed a rollout page or omitted fixed guidance (rc=$RC)"
+
+echo "== 20d. unsafe manual targets retain the envelope but print no actionable pickup =="
+for m in \
+  notfound:target-not-found \
+  okarchived:target-archived \
+  child:target-non-root \
+  model-empty:target-model-empty \
+  ambiguous:target-inspection-ambiguous; do
+    imode="${m%%:*}"; want="${m##*:}"; task="t20d manual $imode"
+    fgreset always-ok "$imode" 0
+    fgrun --ipc "$UUIDF" --deliver manual -- "$task"
+    kept=""; while IFS= read -r f; do grep -qx "$task" "$f" && { kept="$f"; break; }; done < <(find "$IPCROOT/fgsess/$UUIDF" -name '*.task.md' 2>/dev/null)
+    [[ $RC -ne 0 && -n "$kept" ]] \
+      && printf '%s\n' "$OUT" | grep -Fxq "ERROR: manual delivery refused -- reason=${want}" \
+      && ! printf '%s\n' "$OUT" | grep -Eq '^(POLICY:|RESULT:|WAIT:|    read |FALLBACK )' \
+      && [[ "$(cat "$FGDIR/inspect_count" 2>/dev/null || echo 0)" == "1" ]] \
+      && [[ ! -f "$FGDIR/send_count" && ! -f "$FGDIR/powershell_count" \
+            && ! -f "$FGDIR/observe_count" && ! -f "$FGDIR/pslog" ]] \
+      && [[ "$(tr '\n' ' ' < "$FGDIR/eventlog")" == 'inspect ' ]] \
+      && ok "manual inspect=$imode -> retained envelope + $want without actionable output" \
+      || no "manual inspect=$imode escaped refusal containment (rc=$RC out=$OUT)"
+done
+
+echo "== 20e. manual delivery rejects explicit live-only options before publication =="
+for conflict in autoload intended-host foreground-policy foreground-ack repeated-deliver; do
+  sid="fgconf-$conflict"; task="t20e conflict $conflict"; extra=()
+  case "$conflict" in
+    autoload) extra=(--autoload off);;
+    intended-host) extra=(--intended-host package);;
+    foreground-policy) extra=(--foreground-policy defer);;
+    foreground-ack) extra=(--ack-foreground-switch);;
+    repeated-deliver) extra=(--deliver live);;
+  esac
+  fgreset always-ok ok 0
+  OUT="$( cd "$REPO" && CODEX_IPC_ROOT="$IPCROOT" CLAUDE_CODE_SESSION_ID="$sid" \
+      PATH="$BIN2:$PATH" bash "$SCRIPT" --ipc "$UUIDF" --deliver manual "${extra[@]}" -- "$task" 2>&1 )"; RC=$?
+  [[ $RC -ne 0 ]] \
+    && printf '%s\n' "$OUT" | grep -q '^ERROR: ' \
+    && [[ ! -e "$IPCROOT/$sid" ]] \
+    && [[ ! -f "$FGDIR/inspect_count" && ! -f "$FGDIR/send_count" && ! -f "$FGDIR/powershell_count" ]] \
+    && ok "manual conflict $conflict fails before envelope and child execution" \
+    || no "manual conflict $conflict was accepted or wrote state (rc=$RC out=$OUT)"
+done
+
+echo "== 20f. explicit live delivery preserves foreground refusal precedence =="
+fgreset always-ok child 0
+fgrun --ipc "$UUIDF" --deliver live --foreground-policy bogus -- "t20f invalid live policy"
+[[ $RC -ne 0 ]] \
+  && printf '%s\n' "$OUT" | grep -q 'reason=invalid-foreground-policy' \
+  && [[ ! -f "$FGDIR/inspect_count" && ! -f "$FGDIR/send_count" && ! -f "$FGDIR/powershell_count" ]] \
+  && ok "explicit live invalid-policy refusal still precedes inspection" \
+  || no "explicit live invalid policy lost its precedence (rc=$RC out=$OUT)"
+fgreset always-ok child 0
+fgrun --ipc "$UUIDF" --deliver live --foreground-policy switch -- "t20f live switch no ack"
+[[ $RC -ne 0 ]] \
+  && printf '%s\n' "$OUT" | grep -q 'reason=foreground-switch-unacknowledged' \
+  && [[ ! -f "$FGDIR/inspect_count" && ! -f "$FGDIR/send_count" && ! -f "$FGDIR/powershell_count" ]] \
+  && ok "explicit live switch acknowledgement refusal still precedes inspection" \
+  || no "explicit live switch refusal lost its precedence (rc=$RC out=$OUT)"
 
 echo "== 21. autoload ok but retry never succeeds: gui-unowned, not gui-delivered =="
 fgreset always-fail ok 0

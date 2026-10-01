@@ -29,12 +29,24 @@ Paste the printed pickup line (`read "<task path>" and proceed`) into your Codex
 writes its reply to the printed per-dispatch `.reply.md` path.
 
 Goal setup is omitted by default. When the operator explicitly wants this dispatch to create a
-goal, add `--request-goal` before the task. For a thread that already runs a goal, leave the flag
-off and use the file-drop pickup line as manual delivery; the operator may paste it while a turn is
-open. Expect `pending` until the named dispatch has its own completion evidence. Do not use
-`turn/interrupt` or resend to create an idle gap.
+goal, add `--request-goal` before the task.
 
-## 2. Explicit Codex Desktop conversation handoff (optional, EXPERIMENTAL)
+## 2. Thread-bound manual delivery (no live contact)
+
+```bash
+"${CLAUDE_SKILL_DIR}/scripts/handoff_to_codex.sh" --ipc <conversation-id> --deliver manual -- "review src/parser.js for edge cases"
+```
+
+This writes the ordinary envelope under the UUID channel, performs one shared target inspection,
+and prints the pickup plus a fully correlated `WAIT:` command. It never calls host policy,
+PowerShell, the pipe client, an observer, or an opener, and prints no live `RESULT:`. If the
+inspector cannot establish a rollout page, the WAIT command omits it and fixed `ROLLOUT-PATH:`
+guidance explains how to supply one. For a thread that already runs a goal, leave
+`--request-goal` off; the operator may paste the pickup while a turn is open. Expect `pending` until
+the named dispatch has its own completion evidence. Do not use `turn/interrupt` or resend to create
+an idle gap.
+
+## 3. Explicit live Codex Desktop conversation handoff (optional, EXPERIMENTAL)
 
 ```bash
 # 1. Inspect the target first (read-only; requires node:sqlite):
@@ -54,7 +66,7 @@ clearance and the effective `codex` protocol handler are not yet qualified.
 The wrapper refuses missing, archived, non-root, empty-model, or ambiguous targets before host
 policy or pipe contact. A locator hint is not send authority.
 
-## 3. Reply viewing (read-only derived view)
+## 4. Reply viewing (read-only derived view)
 
 ```bash
 "${CLAUDE_SKILL_DIR}/scripts/codex_ipc_replies.sh"                     # current session, newest first
@@ -62,7 +74,7 @@ policy or pipe contact. A locator hint is not send authority.
 "${CLAUDE_SKILL_DIR}/scripts/codex_ipc_replies.sh" -c <conversation-id> -n 5
 ```
 
-## 4. Wait for a NAMED dispatch to complete (bounded; opt-in rollout fallback)
+## 5. Wait for a NAMED dispatch to complete (bounded; opt-in rollout fallback)
 
 ```bash
 node "${CLAUDE_SKILL_DIR}/scripts/codex_ipc_wait.mjs" \
@@ -80,10 +92,11 @@ An absent reply with no certifiable rollout body exhausts the eligible sources.
 Inspect its diagnostics/thread; do not re-harvest,
 auto-resend, or hand-roll rollout/report-file polling. On `reply-missing`/`aborted`:
 resuming the goal in a fresh, unmarked turn will NOT re-certify the original dispatch id; machine re-certification requires a NEW dispatch with a new marker.
-After an accepted live `--ipc` send the wrapper prints a ready-to-run `WAIT:` line before its final
-`RESULT:` line. Flagless (no `--accept-rollout-fallback`) is the legacy file-primary contract.
+Manual preparation prints a ready-to-run `WAIT:` line after its pickup and no `RESULT:`. An accepted
+live `--ipc` send prints the same WAIT contract before its final `RESULT:` line. Flagless (no
+`--accept-rollout-fallback`) is the legacy file-primary contract.
 
-## 5. Opt-in transcript pointer
+## 6. Opt-in transcript pointer
 
 ```bash
 CODEX_IPC_INCLUDE_TRANSCRIPT=1 "${CLAUDE_SKILL_DIR}/scripts/handoff_to_codex.sh" "task that needs my full session context"

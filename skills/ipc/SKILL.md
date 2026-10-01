@@ -68,8 +68,9 @@ cwd, recency, or project name.
 
 The IPC tooling does not invoke the Codex CLI. As of v0.1.8 the `--app`, `--open` and `--exec`
 modes are removed: they fail with a stable error before any transport access or child launch.
-Delivery is the file-drop default (paste one line into your Codex session) or live `--ipc`
-injection into a Desktop GUI thread — neither shells out to a `codex` binary.
+Delivery is the file-drop default, thread-bound manual pickup with
+`--ipc <uuid> --deliver manual`, or live `--ipc` injection into a Desktop GUI thread. None shells
+out to a `codex` binary.
 
 The IPC transport envelope (the `.task.md`/`.reply.md` pair) is deliberately machine-local under
 `${CODEX_IPC_ROOT:-~/.claude/ipc}` — that is the ONE exception to the rule below. Envelopes and
@@ -93,11 +94,12 @@ constraints, and context — so the handoff is self-contained and needs no follo
 ## Existing-session mode
 
 Before using existing-session `/ipc`, run the read-only inspector to preview the target. The
-wrapper independently runs that inspector exactly once after publishing the file-drop envelope and
-before its first live send. It reuses the resulting target snapshot across any guarded auto-load
+wrapper independently runs that inspector exactly once after publishing the thread-bound envelope.
+Manual delivery exits after that snapshot; live delivery reuses it across any guarded auto-load
 recovery; the shared host policy still runs fresh immediately before every send or retry. Selecting
-`--ipc <uuid>` is itself the live-delivery acknowledgement; the wrapper supplies the client's
-`--send --ack-live-write --allow-any-thread` internally.
+`--ipc <uuid>` with the default delivery or explicit `--deliver live` is itself the live-delivery
+acknowledgement; `--deliver manual` makes no live attempt. The wrapper supplies the client's
+`--send --ack-live-write --allow-any-thread` internally only on the live route.
 
 Run the read-only inspector (requires a Node.js version with `node:sqlite`; see
 [references/troubleshooting.md](references/troubleshooting.md)):
@@ -199,14 +201,29 @@ Codex. Use the maintained wrapper, not raw IPC:
 "${CLAUDE_SKILL_DIR}/scripts/handoff_to_codex.sh" --ipc <conversationId> "<task>"
 ```
 
+For operator pickup with the same thread/reply correlation and no pipe, host-policy, helper,
+observer, or opener contact:
+
+```bash
+"${CLAUDE_SKILL_DIR}/scripts/handoff_to_codex.sh" --ipc <conversationId> --deliver manual -- "<task>"
+```
+
+Manual mode publishes the ordinary envelope under the UUID channel, runs the same missing,
+archived, root/child, and stored-model checks, then prints exactly one pickup instruction and one
+correlation-complete `WAIT:` command. It includes the trusted inspector page when known; otherwise
+it omits `--rollout-path` and emits the fixed `ROLLOUT-PATH:` guidance. It prints no live `POLICY:`
+or `RESULT:` line. Explicit live-only `--autoload`, `--intended-host`, `--foreground-policy`, and
+`--ack-foreground-switch` flags are refused with `--deliver manual`; ambient live settings are
+irrelevant because no live path is entered.
+
 On Windows PowerShell, run the `.sh` wrapper through Git Bash.
 
 Goal setup is off by default. Add `--request-goal` before the task only when the operator
 explicitly wants the receiving thread to set a goal for this dispatch. The flag restores the
 payload's goal-setting request; it does not inspect, replace, or otherwise change an existing goal.
 
-For a known goal-driven target, use manual delivery: generate the file-drop envelope without
-`--request-goal`, then ask the operator to paste the printed pickup line into the intended thread.
+For a known goal-driven target, use thread-bound manual delivery without `--request-goal`, then ask
+the operator to paste the printed pickup line into the intended thread.
 A closed turn is not a precondition for that paste. Expect `pending` until the named dispatch has
 its own completion evidence. Never call `turn/interrupt`, and never resend merely because pickup or
 completion remains pending.
@@ -265,8 +282,10 @@ the fresh host check gates each contact. Any ambiguous post-attempt outcome stil
 inspection and forbids automatic retry. The snapshot can change after inspection; it does not
 prove future admission, completion, or reply writability.
 
-Every `--ipc` send reports exactly one machine-parseable result:
+Every live `--ipc` send reports exactly one machine-parseable result:
 `RESULT: gui-delivered|gui-unowned|failed-closed -- reason=<token> -- confirmation=<token>`.
+Successful manual preparation reports no `RESULT:` because it certifies neither admission nor
+completion; use its printed pickup and `WAIT:` lines.
 After router acceptance, confirmation is:
 
 - `rollout-hit`: the exact dispatch task basename was observed in a rollout user message. This

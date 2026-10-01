@@ -56,10 +56,12 @@ A live Desktop send starts a real model turn in a real thread. Gates, all fail-c
 - Dry-run is the default everywhere; a live send requires `--send` **and** `--ack-live-write`.
 - `--allow-any-thread` is additionally required unless the target equals the operator-set
   `CODEX_IPC_AUTHORIZED_TEST_THREAD` env var. **No authorized thread id ships in the code.**
-- The wrapper writes the file-drop fallback, then runs one read-only target inspection before any
-  host gate or live attempt. It requires an exact active root target and a nonempty stored model;
-  missing, archived, non-root, empty-model, malformed, contradictory, or ambiguous state refuses
-  with `confirmation=not-attempted`. A legacy null source is assumed root only when every
+- The wrapper writes the thread-bound envelope, then runs one read-only target inspection before
+  manual pickup or any host gate/live attempt. It requires an exact active root target and a
+  nonempty stored model;
+  missing, archived, non-root, empty-model, malformed, contradictory, or ambiguous state refuses.
+  Live mode reports `confirmation=not-attempted`; manual mode retains the envelope without an
+  actionable pickup. A legacy null source is assumed root only when every
   available child indicator is absent and is warned.
 - Before every maintained-wrapper send or retry, a shared read-only policy requires a complete
   inventory with exactly one intended GUI host and no other GUI host. Configuration resolves per
@@ -68,8 +70,10 @@ A live Desktop send starts a real model turn in a real thread. Gates, all fail-c
 - Activation defaults off. Alternate intended hosts can be send targets but are never package
   protocol activation targets. Package activation additionally requires positive package-update
   clearance and an effective-handler binding; unknown or conflicting evidence refuses.
-- Selecting `--ipc <uuid>` is itself the live-delivery acknowledgement. The
-  `handoff_to_codex.sh --ipc <uuid>` wrapper internally supplies
+- Selecting `--ipc <uuid>` with default delivery or explicit `--deliver live` is itself the
+  live-delivery acknowledgement. `--deliver manual` exits before host policy, PowerShell, pipe
+  client, observer, or opener code and emits no live result. The live
+  `handoff_to_codex.sh --ipc <uuid>` route internally supplies
   `--send --ack-live-write --allow-any-thread` to the client; the file-drop fallback envelope is
   still written first and the one target snapshot is reused across guarded recovery. Host
   inventory remains fresh before every send or retry.

@@ -22,6 +22,16 @@ Desktop update, silently. Revalidate experimental features with
 | Touches live Desktop state | No |
 | Fallback | Is itself the fallback for every other route |
 
+## Thread-bound manual handoff (`--ipc <uuid> --deliver manual`)
+
+| | |
+|---|---|
+| Supported OS | Windows (Git Bash/MSYS/WSL), Linux, macOS where local Codex state is readable |
+| Dependencies | File-drop dependencies plus Node.js with `node:sqlite` and readable local state for the mandatory shared target inspection |
+| Stability | **Stable preparation path**; no private pipe or Desktop activation contact |
+| Touches live Desktop state | No. It writes the transport envelope, reads target state, and prints operator pickup plus WAIT instructions |
+| Result contract | Safe preparation exits 0 with no live `RESULT:`; unsafe state retains the envelope and prints no actionable pickup |
+
 ## Reply viewer (`codex_ipc_replies.sh`)
 
 | | |
@@ -92,7 +102,7 @@ The provenance and live observations below are dated records. The retained `Live
 |---|---|
 | Supported OS | **Windows only** (`\\.\pipe\codex-ipc`) |
 | Dependencies | Node.js; Codex Desktop running; private router protocol (`initialize`, `thread-follower-start-turn`, uint32le framing). The maintained wrapper additionally requires the session-inspector chain: Node.js with `node:sqlite` plus readable local state. The default file-drop path does not. |
-| Maintained-wrapper target gate | After publishing the fallback envelope, one read-only inspector snapshot must prove an exact active `root` or warned `legacy-root-assumed` target and a nonempty stored model before any host gate or pipe contact. Missing, archived, non-root, empty-model, malformed, contradictory, or ambiguous state refuses with `confirmation=not-attempted`. The snapshot is reused across auto-load recovery; host inventory remains fresh before each send or retry. |
+| Maintained-wrapper target gate | After publishing the thread-bound envelope, one read-only inspector snapshot must prove an exact active `root` or warned `legacy-root-assumed` target and a nonempty stored model. Manual delivery exits after preparation, before any host gate or pipe contact. Live target refusal reports `confirmation=not-attempted`; manual refusal retains the envelope without actionable pickup. The snapshot is reused across live auto-load recovery; host inventory remains fresh before each send or retry. |
 | Direct-client settings overrides | `--model` and `--effort` persist as stored-thread settings changes. Either requires `--ack-thread-settings-change`, including dry-run request generation, and values empty after trimming are rejected. The wrapper and write-proof harness omit both fields. |
 | Wire contract | `version` is per-method and is matched **exactly, before ownership is evaluated**. `thread-follower-start-turn` = **2**; the payload key is `params.turnStart` = `{request:{threadId,turnTrigger,input[]}, context?}`; `request.threadId` must equal `params.conversationId`; the frame carries **no `hostId` key** (this client's emission policy; in the examined app version resolver, a non-null `hostId` raises every `thread-follower-*` method's required version by one, while an absent or null `hostId` follows the same branch) and no `turnStart.context.responseItems`. The original 1978 method table remains at the top level of `tests/fixtures/codex_desktop_method_versions.json`; complete later tables and their measured differences are retained in the corresponding `reverifications` entries. `tests/test_router_contract.sh` checks the client's emitted start-turn version, payload key and host-ID omission against the top-level fixture. It does not independently re-derive archive facts or certify the appended build records |
 | Derived from | `OpenAI.Codex 26.901.1978.0` — `app.asar` 298,996,178 B, SHA-256 `09c7ef96…95183d`, mtime 2026-09-02T21:05:48.620Z; main member `.vite/build/src-BXVxNf6C.js` `4c68eec5…9fe7f`; renderer member `webview/assets/app-initial-bca8cba1737e.js` `6b27d8af…8bd0` — read 2026-09-03, with the runtime-to-bundle binding taken from the running process's own stack traces. **Re-derive after every Desktop update.** The previous shape (`version:1`, `params.turnStartParams`) worked on 26.707 and is rejected on 26.825 and 26.901, where every distinct cause is masked as `no-client-found` |

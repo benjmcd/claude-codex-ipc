@@ -160,6 +160,20 @@ This appears in the Codex Desktop GUI (the operator's own session reads the file
 effect on any other running Codex session. It requires no pipe, no SQLite support, and no Codex
 CLI.
 
+### Thread-bound manual delivery (`--ipc <uuid> --deliver manual`)
+
+The wrapper writes the same payload into `<root>/<sid>/<uuid>/<dispatch>.task.md`, runs one shared
+target inspection, and then exits before defining or referencing host policy, the pipe client,
+rollout observation, or the activation helper. A safe target gets the ordinary pickup instruction
+and one correlation-complete `WAIT:` line; a trusted database-designated page is included when
+known. Missing page authority emits fixed `ROLLOUT-PATH:` guidance and never guesses. Unsafe target
+state retains the envelope but prints no actionable pickup or WAIT.
+
+Manual preparation has no `RESULT:` because it proves neither admission nor completion. It ignores
+ambient live settings and rejects explicit live-only host/foreground flags before publication. The
+transport default remains `~/.claude/ipc`; relocating `CODEX_IPC_ROOT` to a target-writable location
+is an operator choice and every participant must use the same explicit root.
+
 ### Live Desktop IPC injection (`--ipc`, optional, EXPERIMENTAL)
 
 Provenance: this transport was validated against a live Codex Desktop in the private predecessor
@@ -178,7 +192,7 @@ IPC router named pipe (`\\.\pipe\codex-ipc`, `thread-follower-start-turn`). This
 `codex_ipc_revalidate.mjs` (and, if needed, a controlled `codex_ipc_write_proof.mjs` run) after
 updates.
 
-Every `--ipc` send reports exactly one result:
+Every live `--ipc` send reports exactly one result:
 
 - `gui-delivered` — the Desktop renderer accepted the turn. Silent and instant when the target
   thread is already loaded in the app. The shared host gate runs before the initial attempt and

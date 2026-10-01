@@ -69,7 +69,13 @@ is not another exact occurrence, and discloses that uncertainty rather than eras
 
 1. **File-drop (default, stable):** operator pastes one printed pickup line into their Codex
    session. Zero dependencies beyond bash; zero effect on other sessions.
-2. **`--ipc` live injection (optional, EXPERIMENTAL, Windows):** after writing the file-drop, the
+2. **Thread-bound manual (`--ipc <uuid> --deliver manual`):** writes the ordinary envelope under
+   the UUID channel, performs the shared target inspection, and prints pickup plus a fully bound
+   `WAIT:` command. It exits before host policy, PowerShell, client, observer, or opener code and
+   prints no live `RESULT:`. A trusted inspector page is propagated; absent page authority emits
+   fixed `ROLLOUT-PATH:` guidance. The default root stays `~/.claude/ipc`; an explicit shared
+   `CODEX_IPC_ROOT` is an operator configuration choice for a target-writable location.
+3. **`--ipc` live injection (optional, EXPERIMENTAL, Windows):** after writing the envelope, the
    wrapper checks a read-only host inventory and injects the pickup line into the renderer-owned
    Desktop thread over the app's private named-pipe router. The host check runs freshly before the
    initial send and every retry. Activation of an unowned package thread is a separate, default-off
@@ -94,14 +100,17 @@ is not another exact occurrence, and discloses that uncertainty rather than eras
    (The CLI-backed `--exec`/`--app`/`--open` modes were removed in v0.1.8; there is no headless
    execution path.)
 
-Host configuration resolves per field as wrapper flag, environment, `${CODEX_IPC_ROOT}/host-policy.json`,
+Host configuration applies only to live delivery and resolves per field as wrapper flag,
+environment, `${CODEX_IPC_ROOT}/host-policy.json`,
 then defaults (`autoload=off`, intended host `package`). Every present layer is validated even when
-overridden. After publishing the fallback envelope, the wrapper runs one read-only target inspection
-before its first host gate or pipe contact and reuses that snapshot across guarded recovery. It
-requires a trusted exact active DB row, a `root` or warned `legacy-root-assumed` classification,
-and a nonempty stored model. Explicit child evidence is non-root; a null legacy source is assumed
-root only when every available child indicator is absent. Missing, archived, non-root, empty-model,
-malformed, contradictory, or ambiguous state refuses with `confirmation=not-attempted`.
+overridden. After publishing the thread-bound envelope, the wrapper runs one read-only target
+inspection. Manual delivery returns after preparation; live delivery reuses that snapshot across
+guarded recovery before its first host gate or pipe contact. The inspection requires a trusted
+exact active DB row, a `root` or warned `legacy-root-assumed` classification, and a nonempty stored
+model. Explicit child evidence is non-root; a null legacy source is assumed root only when every
+available child indicator is absent. Missing, archived, non-root, empty-model, malformed,
+contradictory, or ambiguous state refuses before host policy or pipe contact. Manual delivery emits
+its fixed refusal and no actionable pickup; live delivery reports `confirmation=not-attempted`.
 
 The wrapper considers activation only from parsed structure, not text matches. `no-client-found`
 must be the exact failed response for the requested target with exactly one matching follower
