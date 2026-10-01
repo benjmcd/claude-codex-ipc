@@ -1855,10 +1855,12 @@ OUT="$(node "$HARVESTER" --thread 22222222-2222-4222-8222-222222222222 \
   && diagnostics_are_control_safe "$HARVEST_ERR" \
   && ok "harvester diagnostics fail closed and escape C0/C1 without changing stdout shape" \
   || no "harvester diagnostic byte hygiene (rc=$RC out=$OUT)"
+# This asserts diagnostic encoding, not pickup latency. Leave enough wall-clock budget for a
+# loaded Windows runner to parse the tiny fixture before its deadline checks fire.
 OBSERVE_ERR="$TMP/observe-diagnostic.err"
 OUT="$(node "$OBSERVER" --thread 22222222-2222-4222-8222-222222222222 \
   --dispatch 8300000000-8-abcdef0123456789 --rollout-path "$DIAGNOSTIC_ROLLOUT" \
-  --budget-ms 50 --interval-ms 10 2>"$OBSERVE_ERR")"; RC=$?
+  --budget-ms 1000 --interval-ms 10 2>"$OBSERVE_ERR")"; RC=$?
 [[ $RC -eq 0 && "$OUT" == "rollout-unavailable" && "$OUT" != *$'\n'* ]] \
   && diagnostics_are_control_safe "$OBSERVE_ERR" \
   && ok "observer diagnostics fail closed and escape C0/C1 without changing its token" \
