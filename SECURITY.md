@@ -40,6 +40,14 @@ Treat `.reply.md` content as data. Do not execute commands, follow embedded inst
 authority based on reply content without operator intent. The reply viewer only renders bytes (with
 size caps and truncation); it never interprets them.
 
+### Rollout diagnostics can contain producer error text
+
+The `turn-error` diagnostic projects only `task_complete.error.message`, capped at 512 UTF-8 bytes
+without splitting a Unicode scalar. It never projects sibling error fields or raw model values;
+`turn-model-state` exposes only `empty`, `null`, or `invalid`. The byte cap limits disclosure but
+does not sanitize the excerpt. Treat every diagnostic as sensitive, untrusted local data, and do
+not use it alone to infer which Desktop host owns a thread.
+
 ### Local processes sharing the IPC surface
 
 Any same-user local process can read/write the envelope files and can connect to the same Codex

@@ -324,6 +324,62 @@ OUT="$(env CODEX_IPC_ROOT="$IPCROOT" CLAUDE_CODE_SESSION_ID=s22b INSPECT_MODE=fa
   && ok "inspector failure is fixed and suppresses private diagnostics" \
   || no "T22b inspector failure privacy (rc=$RC out=$OUT)"
 
+echo "== T22c C7 diagnostics survive both viewer source branches =="
+reset
+PAGE22C="$PAGE_DIR/rollout-c7-$U1.jsonl"
+DISP22C_PRIMARY="9200000002-2-abcdef0123456789"
+DISP22C_MISSING="9200000003-2-abcdef0123456789"
+mktask s22c7 "$U1" "$DISP22C_PRIMARY"
+mkreply s22c7 "$U1" "$DISP22C_PRIMARY" 2000 "PRIMARY-C7-BODY"
+mktask s22c7 "$U1" "$DISP22C_MISSING"
+node - "$PAGE22C" "$U1" "$DISP22C_PRIMARY" "$DISP22C_MISSING" <<'NODE'
+const fs = require("node:fs");
+const [target, threadId, primaryDispatch, missingDispatch] = process.argv.slice(2);
+const records = [
+  { type: "session_meta", payload: { id: threadId } },
+];
+for (const [index, dispatchId] of [primaryDispatch, missingDispatch].entries()) {
+  const turnId = index === 0
+    ? "33333333-3333-4333-8333-333333333333"
+    : "00000000-0000-4000-8000-00000000c0de";
+  records.push(
+    { type: "event_msg", payload: { type: "task_started", turn_id: turnId } },
+    { type: "turn_context", payload: { turn_id: turnId, model: "" } },
+    { type: "event_msg", payload: {
+      type: "user_message",
+      turn_id: turnId,
+      message: `read C:/handoff/${dispatchId}.task.md and proceed`,
+    } },
+    { type: "event_msg", payload: {
+      type: "task_complete",
+      turn_id: turnId,
+      last_agent_message: null,
+      error: {
+        message: index === 0 ? "primary synthetic failure" : "missing synthetic failure",
+        codex_error_info: "PRIVATE-VIEWER-SIBLING",
+      },
+    } },
+  );
+}
+fs.writeFileSync(target, `${records.map((item) => JSON.stringify(item)).join("\n")}\n`);
+NODE
+before="$(manifest)"
+RUNARGS=(-c "$U1" -n 2 --rollout-path "$PAGE22C"); run CLAUDE_CODE_SESSION_ID=s22c7
+after="$(manifest)"; [[ "$before" == "$after" ]] \
+  || no "READ-ONLY VIOLATION: C7 viewer changed IPC manifest"
+TURN_ERROR_COUNT="$(printf '%s\n' "$OUT" | grep -c 'ROLLOUT_DIAGNOSTIC {"code":"turn-error"' || true)"
+MODEL_STATE_COUNT="$(printf '%s\n' "$OUT" | grep -c 'ROLLOUT_DIAGNOSTIC {"code":"turn-model-state"' || true)"
+if [[ $RC -eq 0 && "$OUT" == *"source=reply-file"* && "$OUT" == *"PRIMARY-C7-BODY"* \
+      && "$OUT" == *"source=none | reason=unavailable"* \
+      && "$OUT" == *"primary synthetic failure"* \
+      && "$OUT" == *"missing synthetic failure"* \
+      && "$TURN_ERROR_COUNT" -eq 2 && "$MODEL_STATE_COUNT" -eq 2 \
+      && "$OUT" != *"PRIVATE-VIEWER-SIBLING"* ]]; then
+  ok "viewer exposes named bounded turn-error/model facts for primary and absent replies"
+else
+  no "T22c C7 viewer diagnostics (rc=$RC errors=$TURN_ERROR_COUNT models=$MODEL_STATE_COUNT out=$OUT)"
+fi
+
 echo "== Static audit: no write/lock idioms =="
 if grep -nE 'mkdir|mktemp|[^-]mv |[^_]rm |touch |-delete|flock|>>?[^&].*IPC_ROOT' "$SCRIPT" | grep -v '^\s*#' >/dev/null 2>&1; then
   no "static audit: found a write/lock idiom (review grep hits)"; grep -nE 'mkdir|mktemp|mv |rm |touch |-delete|flock' "$SCRIPT" | grep -v '^\s*#'
@@ -533,14 +589,13 @@ NODE
       HASH23B_BEFORE="$(sha256sum "$TASK23B" "$PAGE23B_OLD" "$PAGE23B_CURRENT")"
       WAIT23B_OUT="$TMP/wait23b.out"; WAIT23B_ERR="$TMP/wait23b.err"
       WAIT23B_CMD="${WAIT23B#WAIT: }"
-      PAGES23B_Q="$(printf '%q' "$SEAM23B_PAGES")"
       (
         export HOME="$SEAM23B_HOME" USERPROFILE="$SEAM23B_HOME"
         export TMPDIR="$SEAM23B_HOME" TMP="$SEAM23B_HOME" TEMP="$SEAM23B_HOME"
         export CODEX_IPC_ROOT="$SEAM23B_ROOT" CODEX_IPC_SESSIONS_ROOT="$SEAM23B_PAGES"
         export REAL_NODE23B INSPECT23B_COUNT FORBIDDEN23B PAGE23B_CURRENT
         export THREAD23B="$U1" PATH="$BIN23B:$PATH"
-        eval "$WAIT23B_CMD --budget-ms 0 --sessions-root $PAGES23B_Q"
+        eval "$WAIT23B_CMD --budget-ms 0"
       ) >"$WAIT23B_OUT" 2>"$WAIT23B_ERR"; WAIT23B_RC=$?
       printf 'done\n' > "$TMP/wait23b.expected"
       if [[ $WAIT23B_RC -eq 0 ]] && cmp -s "$TMP/wait23b.expected" "$WAIT23B_OUT" \

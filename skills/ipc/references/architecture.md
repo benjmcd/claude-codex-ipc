@@ -68,6 +68,17 @@ diagnostics. This matters for turns the machine opened defensively rather than f
 `task_started` record, whose integrity window is too narrow for the in-window checks to see the
 gap that made them ambiguous.
 
+The marker remains bound to the turn in which it appears, including an already-open turn. An
+immediate unmarked continuation cannot replace that dispatch terminal or lend it a missing body.
+For the matching dispatch terminal only, and only when the turn has no assistant output,
+`task_complete.error.message` may produce `turn-error`; `turn_aborted` produces the same named fact
+without an excerpt. The excerpt is capped at 512 UTF-8 bytes without splitting a Unicode scalar,
+and sibling error fields are discarded. Separately, the latest matching `turn_context` before the
+terminal may produce `turn-model-state` for `empty`, `null`, or `invalid`. Missing or nonempty
+model state produces no public diagnostic, and the raw value is never retained. These facts carry
+their matching turn/source location but do not change lifecycle, certification, reply precedence,
+or the waiter's six-token stdout contract.
+
 ### `item_completed` item classes
 
 Current-format rollouts wrap semantic records in an `item_completed` envelope whose `item.type`
@@ -105,7 +116,9 @@ Four conditions still fail such a record closed, as `schema-drift` naming the cl
 The same problem exists one level up. Every rollout record is a top-level envelope: `event_msg` and
 `response_item` declare a `payload.type` the reader matches as a **pair**, and six further types -
 `compacted`, `inter_agent_communication_metadata`, `session_meta`, `token_usage_record`,
-`turn_context` and `world_state` - declare none at all and are lifecycle-inert. That set is pinned
+`turn_context` and `world_state` - declare none at all and are lifecycle-inert. A matching
+`turn_context` can retain only the applied model's state for the diagnostic projection above; the
+raw value remains discarded and gains no lifecycle authority. That set is pinned
 to the same kind of dated census: 6,479,880 records in exactly eight envelope types over 6,176
 retained rollout files, measured 2026-09-03T22:08:25Z.
 
@@ -355,6 +368,20 @@ The read-only reply viewer accepts an explicit page for a UUID-scoped `-c` view 
 once with `--derive-rollout-path`; session-wide and filedrop views cannot select a page. Missing
 authority prints fixed `ROLLOUT-PATH:` guidance, page vetoes print fixed `ROLLOUT-PAGE:` guidance,
 and a primary reply stays visible with a stale-body caution while fallback remains unavailable.
+
+Local path configuration is deliberately narrow:
+
+| Component | Existing option / supported alias | Precedence |
+|---|---|---|
+| Inspector | `--sessions-root` / `CODEX_IPC_SESSIONS_ROOT` | Flag, nonempty environment, existing home default |
+| Waiter | `--rollout-path` / `CODEX_IPC_ROLLOUT_PATH`; `--sessions-root` / `CODEX_IPC_SESSIONS_ROOT` | Flag, nonempty environment, existing default/discovery |
+| Observer | `--rollout-path` / `CODEX_IPC_ROLLOUT_PATH`; existing environment-only `CODEX_IPC_SESSIONS_ROOT` | Rollout flag wins; sessions root remains environment-only |
+| Harvester | `--rollout-path` / `CODEX_IPC_ROLLOUT_PATH`; existing `CODEX_IPC_SESSIONS_ROOT` | Rollout flag wins; retained aliases do not add authority |
+
+The viewer has no independent environment option, although its harvester child inherits the
+process environment; explicit viewer flags are preferred. `CODEX_HOME` is not supported, and no
+configured path proves page or owner authority.
+
 After a complete certifying cursor exists, polling callers may skip an intermediate full read only
 when a metadata check finds the same canonical path, physical identity, and size. Such a no-growth
 observation cannot certify pickup, completion, a reply, or proof success. Any growth/change and the
@@ -409,7 +436,9 @@ live `--ipc` GUI injection.
 - `codex_ipc_session_inspect.mjs` — one thread's state-DB row plus rollout JSONL tail, with
   heuristic activity signals (mid-turn detection). Opens SQLite `readOnly:true`.
 - `codex_ipc_thread_locator.mjs` — candidate conversationIds for a workspace/project from the
-  Desktop thread index. Candidates are discovery, not send authority.
+  Desktop thread index. Candidates are discovery, not send authority. `--since-*` compares current
+  indexed timestamps; reset/revert can make an older thread match, so inclusion does not prove
+  new-thread provenance.
 - `codex_ipc_snapshot.mjs` — config/state-DB evidence (hashes, marker counts) around a controlled
   write; also a pure-JSON `--compare` mode.
 - `codex_ipc_probe.mjs` — transport/framing research tool; dry-run by default, non-mutating

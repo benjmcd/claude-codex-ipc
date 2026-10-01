@@ -4893,6 +4893,257 @@ test("repair RED: a final before the dispatch marker cannot certify that dispatc
   assert.equal(result.lifecycle.certifiable, false);
 });
 
+test("goal continuation: marker inside an already-open turn keeps its own boundary", () => {
+  const dispatch = "8265100000-2-abcdef0123456789";
+  const turn = WRAPPER_TURN;
+  const records = [
+    { type: "session_meta", payload: { id: WRAPPER_THREAD } },
+    ev("task_started", { turn_id: turn }),
+    ev("user_message", { turn_id: turn, message: "ordinary prior request" }),
+    ev("agent_message", { turn_id: turn, phase: "commentary", message: "working" }),
+    ev("user_message", {
+      turn_id: turn,
+      message: `read C:/x/${dispatch}.task.md and proceed`,
+    }),
+    ev("agent_message", { turn_id: turn, phase: "final_answer", message: "OWN" }),
+    ev("task_complete", { turn_id: turn, last_agent_message: "OWN" }),
+  ];
+  const parsed = writeAndRead("goal-open-turn", records);
+  const result = correlateDispatch(parsed, dispatch);
+  assert.equal(result.status, "complete");
+  assert.equal(result.text, "OWN");
+  assert.equal(result.turnId, turn);
+  assert.equal(result.boundaryMode, "turn-id");
+  assert.equal(result.duplicateCount, 1);
+  assert.equal(result.finalMessageCount, 1);
+  assert.equal(result.lifecycle.status, "complete");
+  assert.equal(result.lifecycle.certifiable, true);
+  assert.deepEqual(result.lifecycle.diagnostics, []);
+  assert.equal(result.latestOccurrence.markerLine, 5);
+  assert.equal(result.latestOccurrence.terminalLine, 7);
+  assert.equal(result.latestOccurrence.turnId, turn);
+  assert.equal(result.freshness.status, "complete");
+  assert.equal(result.freshness.settled, true);
+  assert.equal(result.freshness.boundaryLine, 7);
+  const snapshots = snapshotsOf(parsed);
+  assert.equal(snapshots.length, 1);
+  assert.equal(snapshots[0].activity, "closed");
+  assert.equal(snapshots[0].superseded, false);
+});
+
+test("goal continuation: an immediate unmarked turn cannot replace the dispatch terminal", () => {
+  const dispatch = "8265200000-2-abcdef0123456789";
+  const other = "33333333-3333-4333-8333-333333333333";
+  const prefix = [
+    { type: "session_meta", payload: { id: WRAPPER_THREAD } },
+    ev("task_started", { turn_id: WRAPPER_TURN }),
+    ev("user_message", {
+      turn_id: WRAPPER_TURN,
+      message: `read C:/x/${dispatch}.task.md and proceed`,
+    }),
+    ev("agent_message", { turn_id: WRAPPER_TURN, phase: "final_answer", message: "OWN" }),
+    ev("task_complete", { turn_id: WRAPPER_TURN, last_agent_message: "OWN" }),
+    ev("task_started", { turn_id: other }),
+  ];
+  const suffixes = [
+    ["open", []],
+    ["closed", [
+      ev("agent_message", { turn_id: other, phase: "final_answer", message: "OTHER" }),
+      ev("task_complete", { turn_id: other, last_agent_message: "OTHER" }),
+    ]],
+  ];
+  for (const [name, suffix] of suffixes) {
+    const parsed = writeAndRead(`goal-continuation-${name}`, [...prefix, ...suffix]);
+    const result = correlateDispatch(parsed, dispatch);
+    assert.equal(result.status, "complete", name);
+    assert.equal(result.text, "OWN", name);
+    assert.equal(result.turnId, WRAPPER_TURN, name);
+    assert.equal(result.duplicateCount, 1, name);
+    assert.equal(result.finalMessageCount, 1, name);
+    assert.equal(result.latestOccurrence.markerLine, 3, name);
+    assert.equal(result.latestOccurrence.terminalLine, 5, name);
+    assert.equal(result.lifecycle.certifiable, true, name);
+    assert.equal(result.freshness.boundaryLine, 5, name);
+    assert.deepEqual(result.diagnostics, [], name);
+    const snapshots = snapshotsOf(parsed);
+    assert.equal(snapshots.length, 2, name);
+    assert.equal(snapshots[0].activity, "closed", name);
+    assert.equal(snapshots[0].superseded, false, name);
+    assert.equal(snapshots[1].activity, name, name);
+  }
+});
+
+test("goal continuation: a missing own body cannot borrow the next turn body", () => {
+  const dispatch = "8265300000-2-abcdef0123456789";
+  const other = "33333333-3333-4333-8333-333333333333";
+  const records = [
+    { type: "session_meta", payload: { id: WRAPPER_THREAD } },
+    ev("task_started", { turn_id: WRAPPER_TURN }),
+    ev("user_message", {
+      turn_id: WRAPPER_TURN,
+      message: `read C:/x/${dispatch}.task.md and proceed`,
+    }),
+    ev("task_complete", { turn_id: WRAPPER_TURN, last_agent_message: null }),
+    ev("task_started", { turn_id: other }),
+    ev("agent_message", { turn_id: other, phase: "final_answer", message: "OTHER" }),
+    ev("task_complete", { turn_id: other, last_agent_message: "OTHER" }),
+  ];
+  const result = correlateDispatch(writeAndRead("goal-missing-own-body", records), dispatch);
+  assert.equal(result.status, "none");
+  assert.equal(result.reason, "unavailable");
+  assert.equal(result.text, null);
+  assert.equal(result.turnId, WRAPPER_TURN);
+  assert.equal(result.finalMessageCount, 0);
+  assert.equal(result.duplicateCount, 1);
+  assert.equal(result.lifecycle.status, "complete");
+  assert.equal(result.lifecycle.certifiable, false);
+  assert.equal(result.latestOccurrence.turnId, WRAPPER_TURN);
+  assert.equal(result.latestOccurrence.terminalLine, 4);
+  assert.equal(result.latestOccurrence.harvestStatus, "none");
+  assert.equal(result.latestOccurrence.settled, false);
+  assert.equal(result.freshness.status, "unavailable");
+  assert.equal(result.freshness.settled, false);
+  assert.equal(result.freshness.boundaryLine, 4);
+  assert.deepEqual(result.diagnostics, []);
+});
+
+test("C7: same-turn error and empty model are bounded named diagnostics", () => {
+  const dispatch = "8265400000-2-abcdef0123456789";
+  const errorMessage = `${"A".repeat(508)}💥PRIVATE-TAIL`;
+  const records = [
+    { type: "session_meta", payload: { id: WRAPPER_THREAD } },
+    ev("task_started", { turn_id: WRAPPER_TURN }),
+    { type: "turn_context", payload: { turn_id: WRAPPER_TURN, model: " \t" } },
+    ev("user_message", {
+      turn_id: WRAPPER_TURN,
+      message: `read C:/x/${dispatch}.task.md and proceed`,
+    }),
+    ev("task_complete", {
+      turn_id: WRAPPER_TURN,
+      last_agent_message: null,
+      error: {
+        message: errorMessage,
+        codex_error_info: "PRIVATE-CODEX-ERROR-INFO",
+        internal: "PRIVATE-INTERNAL",
+      },
+    }),
+  ];
+  const result = correlateDispatch(writeAndRead("c7-error-empty-model", records), dispatch);
+  assert.equal(result.status, "none");
+  assert.equal(result.lifecycle.status, "complete");
+  assert.equal(result.lifecycle.certifiable, false);
+  const error = result.diagnostics.find((item) => item.code === "turn-error");
+  assert.ok(error);
+  assert.equal(error.turnId, WRAPPER_TURN);
+  assert.equal(error.assistantOutput, false);
+  assert.equal(error.turnError.kind, "task_complete");
+  assert.equal(error.turnError.excerpt, `${"A".repeat(508)}💥`);
+  assert.equal(Buffer.byteLength(error.turnError.excerpt, "utf8"), 512);
+  assert.equal(error.turnError.excerptBytes, 512);
+  assert.equal(error.turnError.sourceBytes, Buffer.byteLength(errorMessage, "utf8"));
+  assert.equal(error.turnError.truncated, true);
+  assert.ok(!JSON.stringify(error).includes("PRIVATE-TAIL"));
+  assert.ok(!JSON.stringify(error).includes("PRIVATE-CODEX-ERROR-INFO"));
+  assert.ok(!JSON.stringify(error).includes("PRIVATE-INTERNAL"));
+  const model = result.diagnostics.find((item) => item.code === "turn-model-state");
+  assert.ok(model);
+  assert.equal(model.turnId, WRAPPER_TURN);
+  assert.deepEqual(model.appliedModel, { state: "empty" });
+  assert.ok(!Object.hasOwn(model.appliedModel, "value"));
+
+  const straddledMessage = `${"B".repeat(510)}💥PRIVATE-TAIL`;
+  const straddled = correlateDispatch(writeAndRead("c7-error-invalid-model", [
+    { type: "session_meta", payload: { id: WRAPPER_THREAD } },
+    ev("task_started", { turn_id: WRAPPER_TURN }),
+    { type: "turn_context", payload: { turn_id: WRAPPER_TURN, model: { private: true } } },
+    ev("user_message", {
+      turn_id: WRAPPER_TURN,
+      message: `read C:/x/${dispatch}.task.md and proceed`,
+    }),
+    ev("task_complete", {
+      turn_id: WRAPPER_TURN,
+      last_agent_message: null,
+      error: { message: straddledMessage },
+    }),
+  ]), dispatch);
+  const straddledError = straddled.diagnostics.find((item) => item.code === "turn-error");
+  assert.equal(straddledError.turnError.excerpt, "B".repeat(510));
+  assert.equal(straddledError.turnError.excerptBytes, 510);
+  assert.equal(straddledError.turnError.truncated, true);
+  assert.ok(!JSON.stringify(straddled.diagnostics).includes("PRIVATE-TAIL"));
+  const invalidModel = straddled.diagnostics.find((item) => item.code === "turn-model-state");
+  assert.deepEqual(invalidModel.appliedModel, { state: "invalid" });
+  assert.ok(!JSON.stringify(invalidModel).includes("private"));
+});
+
+test("C7: abort is named while unrelated and nonempty model facts stay isolated", () => {
+  const dispatch = "8265500000-2-abcdef0123456789";
+  const other = "33333333-3333-4333-8333-333333333333";
+  const records = [
+    { type: "session_meta", payload: { id: WRAPPER_THREAD } },
+    ev("task_started", { turn_id: other }),
+    { type: "turn_context", payload: { turn_id: other, model: "" } },
+    ev("task_complete", {
+      turn_id: other,
+      last_agent_message: null,
+      error: { message: "UNRELATED-PRIVATE-ERROR" },
+    }),
+    ev("task_started", { turn_id: WRAPPER_TURN }),
+    { type: "event_msg", payload: { type: "thread_settings_applied", model: "" } },
+    { type: "turn_context", payload: { turn_id: WRAPPER_TURN, model: "configured" } },
+    ev("user_message", {
+      turn_id: WRAPPER_TURN,
+      message: `read C:/x/${dispatch}.task.md and proceed`,
+    }),
+    ev("turn_aborted", { turn_id: WRAPPER_TURN }),
+  ];
+  const result = correlateDispatch(writeAndRead("c7-abort-isolation", records), dispatch);
+  assert.equal(result.lifecycle.status, "aborted");
+  const errors = result.diagnostics.filter((item) => item.code === "turn-error");
+  assert.equal(errors.length, 1);
+  assert.equal(errors[0].turnId, WRAPPER_TURN);
+  assert.equal(errors[0].assistantOutput, false);
+  assert.deepEqual(errors[0].turnError, {
+    kind: "turn_aborted",
+    excerpt: null,
+    excerptBytes: 0,
+    sourceBytes: 0,
+    truncated: false,
+  });
+  assert.ok(!result.diagnostics.some((item) => item.code === "turn-model-state"));
+  assert.ok(!JSON.stringify(result.diagnostics).includes("UNRELATED-PRIVATE-ERROR"));
+});
+
+test("C7: task_complete error with assistant output preserves normal certification", () => {
+  const dispatch = "8265600000-2-abcdef0123456789";
+  const records = [
+    { type: "session_meta", payload: { id: WRAPPER_THREAD } },
+    ev("task_started", { turn_id: WRAPPER_TURN }),
+    { type: "turn_context", payload: { turn_id: WRAPPER_TURN, model: null } },
+    ev("user_message", {
+      turn_id: WRAPPER_TURN,
+      message: `read C:/x/${dispatch}.task.md and proceed`,
+    }),
+    ev("agent_message", {
+      turn_id: WRAPPER_TURN,
+      phase: "final_answer",
+      message: "OWN",
+    }),
+    ev("task_complete", {
+      turn_id: WRAPPER_TURN,
+      last_agent_message: "OWN",
+      error: { message: "must not replace assistant output" },
+    }),
+  ];
+  const result = correlateDispatch(writeAndRead("c7-output-preserved", records), dispatch);
+  assert.equal(result.status, "complete");
+  assert.equal(result.text, "OWN");
+  assert.equal(result.lifecycle.certifiable, true);
+  assert.ok(!result.diagnostics.some((item) => item.code === "turn-error"));
+  const model = result.diagnostics.find((item) => item.code === "turn-model-state");
+  assert.deepEqual(model.appliedModel, { state: "null" });
+});
+
 test("repair RED: a wrapped agent body without final_answer phase cannot certify", () => {
   const dispatch = "8266000000-2-abcdef0123456789";
   const records = [

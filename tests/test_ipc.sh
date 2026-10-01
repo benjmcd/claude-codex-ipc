@@ -378,7 +378,7 @@ case "\$*" in
       ok)         echo '{"ok":true,"dbThread":{"exists":true,"readOnlyOpenOk":true,"thread":{"exists":true,"id":"$UUIDF","archived":0,"model":"synthetic-model","threadSource":"user"}},"targetClassification":{"kind":"root","parentThreadId":null,"reasons":["thread-source-root"],"warnings":[]}}'; exit 0;;
       page)       echo '{"ok":true,"dbThread":{"exists":true,"readOnlyOpenOk":true,"thread":{"exists":true,"id":"$UUIDF","archived":0,"model":"synthetic-model","threadSource":"user","rolloutPath":"C:/ipc-fixture/rollout-current-$UUIDF.jsonl"}},"targetClassification":{"kind":"root","parentThreadId":null,"reasons":["thread-source-root"],"warnings":[]},"rollout":{"primary":{"parsedOk":true,"path":"C:/ipc-fixture/rollout-current-$UUIDF.jsonl"},"selection":{"status":"found","reason":"db-rollout-path","authority":"db.rollout_path","path":"C:/ipc-fixture/rollout-current-$UUIDF.jsonl","candidateCount":2,"aliasCount":2}}}'; exit 0;;
       legacy)     echo '{"ok":true,"dbThread":{"exists":true,"readOnlyOpenOk":true,"thread":{"exists":true,"id":"$UUIDF","archived":0,"model":"synthetic-model","threadSource":null}},"targetClassification":{"kind":"legacy-root-assumed","parentThreadId":null,"reasons":["legacy-indicators-absent"],"warnings":["legacy-null-source"]}}'; exit 0;;
-      child)      echo '{"ok":true,"dbThread":{"exists":true,"readOnlyOpenOk":true,"thread":{"exists":true,"id":"$UUIDF","archived":0,"model":"synthetic-model","threadSource":"subagent"}},"targetClassification":{"kind":"non-root","parentThreadId":"44444444-4444-4444-8444-444444444444","reasons":["thread-source-child","spawn-edge"],"warnings":[]}}'; exit 0;;
+      child)      echo '{"ok":true,"dbThread":{"exists":true,"readOnlyOpenOk":true,"thread":{"exists":true,"id":"$UUIDF","archived":0,"model":"synthetic-model","threadSource":"subagent"}},"targetClassification":{"kind":"non-root","parentThreadId":"22222222-2222-4222-8222-222222222222","reasons":["thread-source-child","spawn-edge"],"warnings":[]}}'; exit 0;;
       guardian)   echo '{"ok":true,"dbThread":{"exists":true,"readOnlyOpenOk":true,"thread":{"exists":true,"id":"$UUIDF","archived":0,"model":"synthetic-model","threadSource":"guardian_review"}},"targetClassification":{"kind":"non-root","parentThreadId":null,"reasons":["thread-source-child"],"warnings":[]}}'; exit 0;;
       source-child) echo '{"ok":true,"dbThread":{"exists":true,"readOnlyOpenOk":true,"thread":{"exists":true,"id":"$UUIDF","archived":0,"model":"synthetic-model","threadSource":null}},"targetClassification":{"kind":"non-root","parentThreadId":null,"reasons":["source-subagent"],"warnings":[]}}'; exit 0;;
       ambiguous) echo '{"ok":true,"dbThread":{"exists":true,"readOnlyOpenOk":true,"thread":{"exists":true,"id":"$UUIDF","archived":0,"model":"synthetic-model","threadSource":"user"}},"targetClassification":{"kind":"ambiguous","parentThreadId":null,"reasons":["root-child-conflict"],"warnings":[]}}'; exit 0;;
@@ -753,7 +753,7 @@ for m in \
     fgrun --ipc "$UUIDF" "t20 $imode"
     parent_ok=1
     if [[ "$imode" == child ]]; then
-      printf '%s' "$OUT" | grep -q 'Target parent thread: 44444444-4444-4444-8444-444444444444' || parent_ok=0
+      printf '%s' "$OUT" | grep -q 'Target parent thread: 22222222-2222-4222-8222-222222222222' || parent_ok=0
     fi
     [[ $RC -ne 0 ]] \
       && printf '%s' "$OUT" | grep -q "RESULT: failed-closed -- reason=${want} -- confirmation=not-attempted" \

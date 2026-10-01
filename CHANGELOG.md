@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- Kept continuation turns isolated from the dispatch they follow: a marker inside an already-open
+  turn retains that turn's boundary, and an immediate unmarked continuation cannot replace its
+  terminal or supply its missing body. Added privacy-bounded `turn-error` and `turn-model-state`
+  diagnostics without adding waiter tokens or changing reply precedence.
+- Added narrow local-path aliases for inspector, waiter, and observer inputs while retaining the
+  harvester's existing aliases. Explicit flags win over nonempty environment values, which win
+  over the unchanged defaults; the aliases do not establish page or owner authority.
 - Added thread-bound manual delivery with `--ipc <uuid> --deliver manual`. It writes the ordinary
   correlated envelope, reuses the mandatory read-only target inspection, and prints pickup plus a
   bound `WAIT:` command before exiting without host policy, PowerShell, pipe, observer, or opener

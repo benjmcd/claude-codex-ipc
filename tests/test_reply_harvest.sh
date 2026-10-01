@@ -123,9 +123,9 @@ function pageFixture(name) {
   const root = path.join(tmp, name);
   const predecessorDir = path.join(root, "2026", "09", "28");
   const successorDir = path.join(root, "2026", "09", "30");
-  const threadId = "55555555-5555-4555-8555-555555555555";
-  const pageId = "66666666-6666-4666-8666-666666666666";
-  const turnId = "77777777-7777-4777-8777-777777777777";
+  const threadId = "11111111-1111-4111-8111-111111111111";
+  const pageId = "22222222-2222-4222-8222-222222222222";
+  const turnId = "33333333-3333-4333-8333-333333333333";
   const dispatchId = "8800000000-8-abcdef0123456789";
   fs.mkdirSync(predecessorDir, { recursive: true });
   fs.mkdirSync(successorDir, { recursive: true });
@@ -947,6 +947,47 @@ await test("an unbound supersession body cannot annotate a primary reply", () =>
   assert.equal(fs.readFileSync(reply, "utf8"), "PRIMARY-UNCHANGED");
 });
 
+await test("C7 harvester carries bounded same-turn diagnostics with and without a primary", () => {
+  const threadId = "11111111-1111-4111-8111-111111111111";
+  const turnId = "22222222-2222-4222-8222-222222222222";
+  const dispatchId = "8711000000-8-abcdef0123456789";
+  const root = path.join(tmp, "c7-harvest");
+  fs.mkdirSync(root, { recursive: true });
+  const rollout = path.join(root, `rollout-error-${threadId}.jsonl`);
+  const reply = path.join(root, `${dispatchId}.reply.md`);
+  fs.writeFileSync(rollout, `${[
+    { type: "session_meta", payload: { id: threadId } },
+    { type: "event_msg", payload: { type: "task_started", turn_id: turnId } },
+    { type: "turn_context", payload: { turn_id: turnId, model: "" } },
+    { type: "event_msg", payload: {
+      type: "user_message",
+      turn_id: turnId,
+      message: `read C:/x/${dispatchId}.task.md and proceed`,
+    } },
+    { type: "event_msg", payload: {
+      type: "task_complete",
+      turn_id: turnId,
+      last_agent_message: null,
+      error: { message: "synthetic harvest failure", codex_error_info: "PRIVATE-HARVEST" },
+    } },
+  ].map((item) => JSON.stringify(item)).join("\n")}\n`);
+
+  const missing = harvestDispatch({ threadId, dispatchId, rolloutPath: rollout });
+  assert.equal(missing.source, "none");
+  assert.equal(missing.reason, "unavailable");
+  assert.ok(missing.diagnostics.some((item) => item.code === "turn-error"));
+  assert.ok(missing.diagnostics.some((item) => item.code === "turn-model-state"));
+  assert.ok(!JSON.stringify(missing.diagnostics).includes("PRIVATE-HARVEST"));
+
+  fs.writeFileSync(reply, "PRIMARY-UNCHANGED");
+  const primary = harvestDispatch({ threadId, dispatchId, replyPath: reply, rolloutPath: rollout });
+  assert.equal(primary.source, "reply-file");
+  assert.equal(primary.bodyBase64, null);
+  assert.ok(primary.diagnostics.some((item) => item.code === "turn-error"));
+  assert.ok(primary.diagnostics.some((item) => item.code === "turn-model-state"));
+  assert.equal(fs.readFileSync(reply, "utf8"), "PRIMARY-UNCHANGED");
+});
+
 await test("directory or symlink-like non-regular primary does not block fallback", () => {
   const notRegular = path.join(tmp, "not-regular.reply.md");
   fs.mkdirSync(notRegular);
@@ -1756,6 +1797,26 @@ OUT="$(CODEX_IPC_OBSERVE_INTERVAL_MS=0 node "$OBSERVER" \
 [[ $RC -eq 0 && "$OUT" == "rollout-hit" && "$(wc -l < <(printf '%s\n' "$OUT"))" -eq 1 ]] \
   && grep -qi 'warning.*interval' "$ERR" && ok "exact one-line hit token; invalid env warns on stderr" \
   || no "observer hit/stdout/warning contract (rc=$RC out=$OUT)"
+OUT="$(CODEX_IPC_ROLLOUT_PATH="$OBS_HIT" node "$OBSERVER" \
+  --thread 11111111-1111-4111-8111-111111111111 \
+  --dispatch 1000000000-1-abcdef0123456789 --budget-ms 250 --interval-ms 1 \
+  2>"$ERR")"; RC=$?
+[[ $RC -eq 0 && "$OUT" == "rollout-hit" ]] \
+  && ok "observer accepts CODEX_IPC_ROLLOUT_PATH as its existing rollout-path option" \
+  || no "observer rollout-path environment alias (rc=$RC out=$OUT)"
+OUT="$(CODEX_IPC_ROLLOUT_PATH=$'bad\npath' node "$OBSERVER" \
+  --thread 11111111-1111-4111-8111-111111111111 \
+  --dispatch 1000000000-1-abcdef0123456789 --rollout-path "$OBS_HIT" \
+  --budget-ms 250 --interval-ms 1 2>"$ERR")"; RC=$?
+[[ $RC -eq 0 && "$OUT" == "rollout-hit" ]] \
+  && ok "explicit observer rollout path overrides an invalid environment alias" \
+  || no "observer explicit rollout-path precedence (rc=$RC out=$OUT)"
+OUT="$(CODEX_IPC_ROLLOUT_PATH=$'bad\npath' node "$OBSERVER" \
+  --thread 11111111-1111-4111-8111-111111111111 \
+  --dispatch 1000000000-1-abcdef0123456789 2>"$ERR")"; RC=$?
+[[ $RC -ne 0 && -z "$OUT" ]] && grep -q -- '--rollout-path must be a nonempty path' "$ERR" \
+  && ok "invalid observer rollout-path environment alias uses the existing refusal" \
+  || no "observer invalid rollout-path environment refusal (rc=$RC out=$OUT)"
 OUT="$(node "$OBSERVER" --thread bad --dispatch x 2>"$ERR")"; RC=$?
 [[ $RC -ne 0 && -z "$OUT" ]] && ok "usage error is nonzero with no outcome token" || no "usage error contract (rc=$RC out=$OUT)"
 OUT="$(CODEX_IPC_SESSIONS_ROOT="$TMP/missing-observer-pages" node "$OBSERVER" \

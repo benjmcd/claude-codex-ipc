@@ -340,7 +340,7 @@ for entry in "${ENTRIES[@]}"; do
         if harvest_output="$(node "$HARVESTER" --thread "$thread" --dispatch "$dispatch" \
             --reply-path "$reply_path" --max-bytes "$MAX_BYTES" "${ROLLOUT_ARGS[@]}" 2>&1)"; then
             printf '%s\n' "$harvest_output" \
-                | grep -E '^(ROLLOUT-PATH|ROLLOUT-PAGE):' || true
+                | grep -E '^(ROLLOUT-PATH|ROLLOUT-PAGE):|^ROLLOUT_DIAGNOSTIC \{"code":"(turn-error|turn-model-state)"' || true
             if printf '%s\n' "$harvest_output" \
                 | grep -Eq $'^REPLY_SUPERSEDED_WARNING\t'; then
                 reply_superseded=1

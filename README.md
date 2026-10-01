@@ -90,6 +90,8 @@ completed; it is never proof that the thread is idle now or that the returned su
 satisfies the task. Retrieve the selected reply body and inspect it against the task's
 done-criteria. The producer completes and checks the full result before a separate, single
 reply-write attempt.
+Same-turn terminal failures and unusable applied-model states may appear only as named diagnostics
+on stderr. They add no waiter token and do not change reply-file precedence or certification.
 Only an error returned by that write supports a permission/sandbox-denial claim; a calculation or
 parse failure does not. If the write is actually denied, the final agent message retains the full
 substantive result for rollout fallback.
@@ -123,7 +125,9 @@ Foreground-policy grammar and full operational rules: [skills/ipc/SKILL.md](skil
 
 ## Primary wrapper variables
 
-Component-specific options are documented by each tool's --help and [bundled references in the skill guide](skills/ipc/SKILL.md).
+Component-specific options are documented by each tool's --help and bundled references.
+The [skill guide](skills/ipc/SKILL.md) records the narrow path aliases. An explicit flag wins over
+a nonempty alias, which wins over the existing component default.
 
 | Variable | Default | Effect |
 |---|---|---|

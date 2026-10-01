@@ -968,6 +968,84 @@ function main() {
           contains("references/security-model.md", "no live `RESULT:` line"),
       },
     ], "Static installed-skill evidence only. Repository release suites separately exercise manual refusal, live-effect tripwires, and sandboxed rollout fallback. Manual preparation makes no live IPC, Desktop-state, reply-writability, or runtime compatibility claim."),
+    check("REQ-025", "Correlated terminal diagnostics are privacy-bounded facts and do not alter the waiter or reply-source contract.", [
+      {
+        label: "reader caps only the terminal error message and retains model state without its raw value",
+        file: "scripts/codex_ipc_rollout_reader.mjs",
+        ok:
+          contains("scripts/codex_ipc_rollout_reader.mjs", "const TURN_ERROR_EXCERPT_BYTES = 512;") &&
+          contains("scripts/codex_ipc_rollout_reader.mjs", "? body.error.message") &&
+          contains("scripts/codex_ipc_rollout_reader.mjs", 'if (body.model === null) return { state: "null" };') &&
+          contains("scripts/codex_ipc_rollout_reader.mjs", 'if (typeof body.model !== "string") return { state: "invalid" };') &&
+          contains("scripts/codex_ipc_rollout_reader.mjs", 'return { state: body.model.trim().length === 0 ? "empty" : "present" };') &&
+          !contains("scripts/codex_ipc_rollout_reader.mjs", "codex_error_info"),
+      },
+      {
+        label: "facts are matching-turn, no-output/preterminal diagnostics with fixed codes",
+        file: "scripts/codex_ipc_rollout_reader.mjs",
+        ok:
+          contains("scripts/codex_ipc_rollout_reader.mjs", /if \(!assistantOutput\)[\s\S]*?diagnostic\("turn-error"/) &&
+          contains("scripts/codex_ipc_rollout_reader.mjs", /bucket\.appliedModelRecord[\s\S]*?state !== "present"[\s\S]*?diagnostic\("turn-model-state"/) &&
+          contains("scripts/codex_ipc_rollout_reader.mjs", /contexts[\s\S]*?item\.line < snapshot\.terminalLine[\s\S]*?\.at\(-1\)/),
+      },
+      {
+        label: "waiter keeps exactly six stdout tokens and viewer forwards only the two named facts",
+        file: "scripts/codex_ipc_wait.mjs",
+        ok:
+          contains("scripts/codex_ipc_wait.mjs", /WAIT_TOKENS = Object\.freeze\(\[\s*"done",\s*"aborted",\s*"superseded",\s*"reply-missing",\s*"pending",\s*"unavailable",\s*\]\)/) &&
+          contains("scripts/codex_ipc_wait.mjs", "WAIT_DIAGNOSTIC") &&
+          contains("scripts/codex_ipc_replies.sh", '\"(turn-error|turn-model-state)\"'),
+      },
+      {
+        label: "bundled guidance locks disclosure, lifecycle, and operator interpretation",
+        file: "references/architecture.md",
+        ok:
+          contains("references/architecture.md", "capped at 512 UTF-8 bytes") &&
+          contains("references/architecture.md", "do not change lifecycle, certification, reply precedence") &&
+          contains("references/security-model.md", "sibling error fields and raw model values are discarded") &&
+          contains("references/troubleshooting.md", "not proof of host ownership or permission to retry"),
+      },
+    ], "Static source and prose evidence only. Repository reader, waiter, harvester, and viewer suites provide the behavioral proof; live producer compatibility remains separately gated."),
+    check("REQ-026", "Alternate local state roots use narrow aliases with explicit precedence and never become authority.", [
+      {
+        label: "inspector and waiter resolve flags before nonempty environment aliases and defaults",
+        file: "scripts/codex_ipc_session_inspect.mjs",
+        ok:
+          contains("scripts/codex_ipc_session_inspect.mjs", "process.env.CODEX_IPC_SESSIONS_ROOT || defaultCodexPath(\"sessions\")") &&
+          contains("scripts/codex_ipc_session_inspect.mjs", 'case "--sessions-root":') &&
+          contains("scripts/codex_ipc_wait.mjs", "raw.rolloutPath || env.CODEX_IPC_ROLLOUT_PATH || null") &&
+          contains("scripts/codex_ipc_wait.mjs", "raw.sessionsRoot || env.CODEX_IPC_SESSIONS_ROOT ||") &&
+          contains("scripts/codex_ipc_wait.mjs", "same meaning as --sessions-root; flag wins"),
+      },
+      {
+        label: "observer adds only the rollout alias while harvester documents its retained aliases",
+        file: "scripts/codex_ipc_rollout_observe.mjs",
+        ok:
+          contains("scripts/codex_ipc_rollout_observe.mjs", "raw.rolloutPath || process.env.CODEX_IPC_ROLLOUT_PATH || null") &&
+          contains("scripts/codex_ipc_rollout_observe.mjs", "sessionsRoot: process.env.CODEX_IPC_SESSIONS_ROOT || undefined") &&
+          contains("scripts/codex_ipc_reply_harvest.mjs", "rolloutPath: process.env.CODEX_IPC_ROLLOUT_PATH || null") &&
+          contains("scripts/codex_ipc_reply_harvest.mjs", "sessionsRoot: process.env.CODEX_IPC_SESSIONS_ROOT || undefined") &&
+          contains("scripts/codex_ipc_reply_harvest.mjs", "same validation as --rollout-path; flag wins"),
+      },
+      {
+        label: "bundled matrix excludes CODEX_HOME and states that paths do not grant authority",
+        file: "SKILL.md",
+        ok:
+          contains("SKILL.md", "Local path aliases are intentionally component-scoped") &&
+          contains("SKILL.md", "`CODEX_HOME` is not a supported") &&
+          contains("SKILL.md", "no configured path establishes page or owner authority") &&
+          contains("references/architecture.md", "Local path configuration is deliberately narrow"),
+      },
+      {
+        label: "operator guidance keeps locator timestamps and wrong-host symptoms non-authoritative",
+        file: "references/troubleshooting.md",
+        ok:
+          contains("references/troubleshooting.md", "reset/revert can make an older thread match") &&
+          contains("references/troubleshooting.md", "not proof of ownership") &&
+          contains("references/troubleshooting.md", "The operator closes the wrong host") &&
+          contains("references/troubleshooting.md", "Retry creates another rollout page"),
+      },
+    ], "Static installed-skill evidence only. Aliases are path inputs, not compatibility or authority claims; hermetic component tests prove precedence and validation."),
   ];
 
   const ok = Object.values(files).every((item) => item.ok) &&

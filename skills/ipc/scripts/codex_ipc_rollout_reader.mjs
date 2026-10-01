@@ -7,6 +7,7 @@ export const DEFAULT_MAX_RECORD_BYTES = 24 * 1024 * 1024;
 const READ_CHUNK_BYTES = 256 * 1024;
 const CONTENT_ANCHOR_BYTES = 4096;
 const DEADLINE_ERROR_CODE = "IPC_ROLLOUT_DEADLINE_EXCEEDED";
+const TURN_ERROR_EXCERPT_BYTES = 512;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const UUID_SOURCE = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
 const ROLLOUT_BASENAME_RE = new RegExp(
@@ -229,6 +230,62 @@ function unknownTypelessEnvelope(envelopeType, rawPayload) {
 
 function diagnostic(code, details = {}) {
   return { code, ...details };
+}
+
+function boundedTurnError(message) {
+  if (typeof message !== "string") {
+    return {
+      kind: "task_complete",
+      excerpt: null,
+      excerptBytes: 0,
+      sourceBytes: null,
+      truncated: false,
+    };
+  }
+  const sourceBytes = Buffer.byteLength(message, "utf8");
+  if (sourceBytes <= TURN_ERROR_EXCERPT_BYTES) {
+    return {
+      kind: "task_complete",
+      excerpt: message,
+      excerptBytes: sourceBytes,
+      sourceBytes,
+      truncated: false,
+    };
+  }
+  let excerpt = "";
+  let excerptBytes = 0;
+  // `for...of` advances by Unicode scalar, so a UTF-8 cap cannot split a surrogate pair.
+  for (const scalar of message) {
+    const scalarBytes = Buffer.byteLength(scalar, "utf8");
+    if (excerptBytes + scalarBytes > TURN_ERROR_EXCERPT_BYTES) break;
+    excerpt += scalar;
+    excerptBytes += scalarBytes;
+  }
+  return {
+    kind: "task_complete",
+    excerpt,
+    excerptBytes,
+    sourceBytes,
+    truncated: true,
+  };
+}
+
+function taskCompleteError(body) {
+  if (!Object.hasOwn(body, "error") || body.error === null || body.error === undefined) {
+    return null;
+  }
+  const message =
+    body.error && typeof body.error === "object" && !Array.isArray(body.error)
+      ? body.error.message
+      : null;
+  return boundedTurnError(message);
+}
+
+function appliedModelState(body) {
+  if (!Object.hasOwn(body, "model")) return null;
+  if (body.model === null) return { state: "null" };
+  if (typeof body.model !== "string") return { state: "invalid" };
+  return { state: body.model.trim().length === 0 ? "empty" : "present" };
 }
 
 export function rolloutPageGuidance(location, rolloutPath) {
@@ -896,6 +953,14 @@ export function normalizeRolloutRecord(value, context = {}) {
     typeof body.last_agent_message === "string" || body.last_agent_message === null
       ? body.last_agent_message
       : undefined;
+  const turnError =
+    identityValid && envelopeType === "event_msg" && payloadType === "task_complete"
+      ? taskCompleteError(body)
+      : null;
+  const appliedModel =
+    identityValid && envelopeType === "turn_context"
+      ? appliedModelState(body)
+      : null;
   return {
     envelopeType,
     payloadType,
@@ -908,6 +973,8 @@ export function normalizeRolloutRecord(value, context = {}) {
     unknownItemClass: null,
     unknownEnvelopeType: inertUnknownEnvelope && identityValid ? envelopeType : null,
     lastAgentMessage,
+    ...(turnError ? { turnError } : {}),
+    ...(appliedModel ? { appliedModel } : {}),
     text:
       interAgent || inertResponseItem || !identityValid || !semanticRoleValid
         ? ""
@@ -925,6 +992,10 @@ export function normalizeRolloutRecord(value, context = {}) {
 
 function retainForCorrelation(record) {
   if (record.knownPair !== true) return false;
+  if (record.envelopeType === "turn_context") {
+    // Retain only the privacy-safe state projection, never the raw context or model value.
+    return record.turnId !== null && record.appliedModel !== undefined;
+  }
   if (record.envelopeType === "event_msg") {
     return RETAINED_EVENT_TYPES.has(record.payloadType);
   }
@@ -2378,17 +2449,61 @@ function computeOccurrence(snapshot, bucket, marker) {
   if (!snapshot.terminalType) {
     return { ...base, waitStatus: "pending", harvestStatus: "none", harvestReason: "pending", diagnostics: [] };
   }
-  if (snapshot.terminalType === "turn_aborted") {
-    return { ...base, waitStatus: "aborted", harvestStatus: "none", harvestReason: "unavailable", diagnostics: [] };
-  }
 
-  // task_complete: presentation and certification share one exact logical body decision.
   const lam = bucket.terminal ? bucket.terminal.lastAgentMessage : undefined;
   const agentMessages = bucket.agentMessages.filter(
     (item) =>
       item.line > marker.line &&
       (snapshot.terminalLine === null || item.line < snapshot.terminalLine),
   );
+  const assistantOutput =
+    agentMessages.some((item) => typeof item.text === "string" && item.text.length > 0) ||
+    (typeof lam === "string" && lam.length > 0);
+  const factDiagnostics = [];
+  if (!assistantOutput) {
+    const turnError = snapshot.terminalType === "turn_aborted"
+      ? {
+          kind: "turn_aborted",
+          excerpt: null,
+          excerptBytes: 0,
+          sourceBytes: 0,
+          truncated: false,
+        }
+      : bucket.terminal?.turnError || null;
+    if (turnError) {
+      factDiagnostics.push(diagnostic("turn-error", {
+        line: bucket.terminal?.line ?? snapshot.terminalLine,
+        byteOffset: bucket.terminal?.byteOffset ?? null,
+        turnId: snapshot.turnId,
+        assistantOutput: false,
+        turnError,
+      }));
+    }
+  }
+  if (
+    bucket.appliedModelRecord &&
+    bucket.appliedModelRecord.appliedModel?.state !== "present"
+  ) {
+    factDiagnostics.push(diagnostic("turn-model-state", {
+      line: bucket.appliedModelRecord.line,
+      byteOffset: bucket.appliedModelRecord.byteOffset,
+      turnId: snapshot.turnId,
+      appliedModel: {
+        state: bucket.appliedModelRecord.appliedModel.state,
+      },
+    }));
+  }
+  if (snapshot.terminalType === "turn_aborted") {
+    return {
+      ...base,
+      waitStatus: "aborted",
+      harvestStatus: "none",
+      harvestReason: "unavailable",
+      diagnostics: factDiagnostics,
+    };
+  }
+
+  // task_complete: presentation and certification share one exact logical body decision.
   const bodyDecision = completionBodyDecision(agentMessages, lam, {
     requireTerminalCopy: true,
   });
@@ -2399,6 +2514,7 @@ function computeOccurrence(snapshot, bucket, marker) {
       harvestStatus: "none",
       harvestReason: "unavailable",
       diagnostics: [
+        ...factDiagnostics,
         diagnostic("multiple-final-message-bodies", {
           line: snapshot.terminalLine,
           turnId: snapshot.turnId,
@@ -2414,6 +2530,7 @@ function computeOccurrence(snapshot, bucket, marker) {
       harvestStatus: "none",
       harvestReason: "unavailable",
       diagnostics: [
+        ...factDiagnostics,
         diagnostic("completion-message-mismatch", {
           line: snapshot.terminalLine,
           turnId: snapshot.turnId,
@@ -2433,15 +2550,18 @@ function computeOccurrence(snapshot, bucket, marker) {
     // Disclosure on the certifying path: when the terminal copy resolved more than one distinct
     // final body to exactly one, say so. The body is served, and the fact that a choice was made
     // is carried with it instead of being dropped (owner ruling D-34 / OD-11, 2026-09-03).
-    diagnostics: bodyDecision.disambiguated
-      ? [
-          diagnostic("terminal-copy-disambiguated", {
-            line: snapshot.terminalLine,
-            turnId: snapshot.turnId,
-            count: bodyDecision.count,
-          }),
-        ]
-      : [],
+    diagnostics: [
+      ...factDiagnostics,
+      ...(bodyDecision.disambiguated
+        ? [
+            diagnostic("terminal-copy-disambiguated", {
+              line: snapshot.terminalLine,
+              turnId: snapshot.turnId,
+              count: bodyDecision.count,
+            }),
+          ]
+        : []),
+    ],
   };
 }
 
@@ -2646,6 +2766,7 @@ export function createDispatchCorrelator(dispatchId) {
     : `${dispatchId}.task.md`;
   const accumulator = createTurnBoundaryAccumulator();
   const buckets = new Map();
+  const appliedModelsByTurn = new Map();
   const occurrences = [];
   let sawParseError = false;
 
@@ -2702,6 +2823,13 @@ export function createDispatchCorrelator(dispatchId) {
     const bucket = buckets.get(snapshot.sequence);
     buckets.delete(snapshot.sequence);
     if (!bucket) return;
+    if (snapshot.turnId) {
+      const contexts = appliedModelsByTurn.get(snapshot.turnId) || [];
+      bucket.appliedModelRecord = contexts
+        .filter((item) => snapshot.terminalLine === null || item.line < snapshot.terminalLine)
+        .at(-1) || null;
+      appliedModelsByTurn.delete(snapshot.turnId);
+    }
     // One turn can certify at most its earliest dispatch occurrence. Later matching
     // user events remain in the bucket so they can invalidate that occurrence.
     const marker = bucket.userMessages.find((item) => exactTaskBasename(item.text, basename));
@@ -2711,6 +2839,15 @@ export function createDispatchCorrelator(dispatchId) {
   return {
     push(record) {
       if (record.parseError) sawParseError = true;
+      if (
+        record.envelopeType === "turn_context" &&
+        record.turnId &&
+        record.appliedModel
+      ) {
+        const contexts = appliedModelsByTurn.get(record.turnId) || [];
+        contexts.push(record);
+        appliedModelsByTurn.set(record.turnId, contexts);
+      }
       const { sequence, snapshots } = accumulator.push(record);
       ingest(record, sequence);
       for (const snapshot of snapshots) processSnapshot(snapshot);

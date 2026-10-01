@@ -212,6 +212,8 @@ function usage() {
        [--rollout-path <explicit>] [--budget-ms <n>] [--interval-ms <n>]
 
 Environment:
+  CODEX_IPC_ROLLOUT_PATH         same validation as --rollout-path; flag wins
+  CODEX_IPC_SESSIONS_ROOT        rollout locator root when no page is explicit
   CODEX_IPC_OBSERVE_BUDGET_MS    bounded observation budget (default 20000, measurement-informed)
   CODEX_IPC_OBSERVE_INTERVAL_MS  positive poll interval (default 250)`;
 }
@@ -270,12 +272,13 @@ function parseArgs(argv) {
   const budgetSource = raw.budgetMs ?? process.env.CODEX_IPC_OBSERVE_BUDGET_MS;
   const intervalSource = raw.intervalMs ?? process.env.CODEX_IPC_OBSERVE_INTERVAL_MS;
   const maxRecordSource = process.env.CODEX_IPC_ROLLOUT_MAX_RECORD_BYTES;
+  const rolloutSource = raw.rolloutPath || process.env.CODEX_IPC_ROLLOUT_PATH || null;
   return {
     warnings,
     options: {
       threadId: raw.threadId.toLowerCase(),
       dispatchId: raw.dispatchId,
-      rolloutPath: raw.rolloutPath ? normalizeRolloutCliPath(raw.rolloutPath) : null,
+      rolloutPath: rolloutSource ? normalizeRolloutCliPath(rolloutSource) : null,
       sessionsRoot: process.env.CODEX_IPC_SESSIONS_ROOT || undefined,
       budgetMs: positiveOrDefault(
         budgetSource,

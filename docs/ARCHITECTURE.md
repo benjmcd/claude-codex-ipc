@@ -48,6 +48,11 @@ no cache, reconstructed reply file, transport-root write, lock, or retention sid
 Within the exactly correlated turn, final bodies are deduplicated by exact text. Multiple distinct
 explicit `final_answer` bodies certify only when a nonempty `task_complete.last_agent_message`
 exactly matches one body; missing, empty, or nonmatching terminal evidence remains unavailable.
+The dispatch marker keeps the turn boundary it was observed inside. A later unmarked continuation
+cannot replace that turn's terminal or supply a missing final body. When the dispatch's own
+terminal has no assistant output, the reader may attach privacy-bounded `turn-error` and
+`turn-model-state` facts. Those facts neither certify a body nor change lifecycle or source
+selection.
 
 Completion and freshness are separate projections. Historical completion remains evidence that an
 exact dispatch occurrence completed; `latestOccurrence` reports the newest exact marker occurrence,
@@ -131,7 +136,9 @@ prevents heuristic retargeting, and ambiguous outcomes are not retried.
 - `codex_ipc_session_inspect.mjs` — thread row, fail-closed root classification and parent facts,
   stored settings, database-selected rollout, full-stream turn activity, and bounded display tail.
 - `codex_ipc_thread_locator.mjs` — candidate discovery for new-session mode (never send
-  authority); its root/non-root/legacy hints do not replace inspection.
+  authority); its root/non-root/legacy hints do not replace inspection. Its `--since-*` filters
+  use the current indexed timestamps, which can be rewritten by thread reset/revert, so a match is
+  not proof that a thread was newly created.
 - `codex_ipc_snapshot.mjs` — config/DB hashing for before/after isolation evidence.
 - `codex_ipc_revalidate.mjs` — post-update validate-only checks. It parses and runs the shared host
   policy before the optional pipe read; a host refusal suppresses `--allow-live-ipc-read` rather
@@ -205,6 +212,15 @@ complete cursor may enable a metadata-only no-growth check of canonical path, ph
 identity, and size. That check is pending-only and cannot prove pickup or completion. Growth and
 change run the full certifying reader, as do final or budget-edge attempts that begin before the
 deadline; a deadline that elapses during sleep returns unverified without a post-deadline read.
+
+Path configuration is deliberately component-scoped. Inspector accepts
+`CODEX_IPC_SESSIONS_ROOT`; waiter accepts `CODEX_IPC_ROLLOUT_PATH` and
+`CODEX_IPC_SESSIONS_ROOT`; observer accepts `CODEX_IPC_ROLLOUT_PATH` and its existing
+environment-only `CODEX_IPC_SESSIONS_ROOT`; harvester retains both aliases. Where a corresponding
+flag exists, precedence is explicit flag, then nonempty environment, then the existing default or
+discovery behavior. The viewer has no independent environment option, although its harvester child
+inherits the process environment; use viewer flags for an auditable selection. `CODEX_HOME` is not
+a supported path alias. A configured path is input, never page or owner authority.
 
 ## Design invariants
 

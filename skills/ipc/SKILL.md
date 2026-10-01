@@ -433,11 +433,31 @@ but never observed, correlated, or projected as child activity; the boundary rec
 boundaries are unavailable, and UUID timestamps are never ownership authority. At and after a
 valid boundary, later inherited `session_meta` records remain provenance only: admitted lineage IDs
 never rebind the pinned owner, and record-level `thread_id` fields must still name the child.
+
+Local path aliases are intentionally component-scoped:
+
+| Component | Existing option / supported alias | Precedence |
+|---|---|---|
+| Inspector | `--sessions-root` / `CODEX_IPC_SESSIONS_ROOT` | Flag, nonempty environment, existing home default |
+| Waiter | `--rollout-path` / `CODEX_IPC_ROLLOUT_PATH`; `--sessions-root` / `CODEX_IPC_SESSIONS_ROOT` | Flag, nonempty environment, existing default/discovery |
+| Observer | `--rollout-path` / `CODEX_IPC_ROLLOUT_PATH`; existing environment-only `CODEX_IPC_SESSIONS_ROOT` | Rollout flag wins; sessions root remains environment-only |
+| Harvester | `--rollout-path` / `CODEX_IPC_ROLLOUT_PATH`; existing `CODEX_IPC_SESSIONS_ROOT` | Rollout flag wins; retained aliases do not add authority |
+
+The reply viewer has no independent path environment option, although its harvester child inherits
+the process environment; prefer the viewer's explicit page flags. `CODEX_HOME` is not a supported
+alias, and no configured path establishes page or owner authority.
+
 A bounded example (30-minute budget, opt-in rollout fallback):
 `node scripts/codex_ipc_wait.mjs --thread <uuid> --dispatch <dispatchId> --reply-path <path>
 --accept-rollout-fallback --budget-ms 1800000 --interval-ms 1000`. A `done` token is
 **named-dispatch completion, never current thread idleness** — `terminalState` and a per-dispatch
 `done` both describe past turns.
+The dispatch marker remains bound to its own turn even when inserted into an already-open turn. An
+immediate unmarked continuation cannot replace that terminal or supply a missing body. If the
+dispatch's own `task_complete` or `turn_aborted` has no assistant output, `turn-error` may report a
+bounded fact; `turn-model-state` may report `empty`, `null`, or `invalid` from the latest matching
+preterminal `turn_context`. These diagnostics use stderr, add no seventh token, carry no raw model
+value, and do not change reply-file precedence, lifecycle, or certification.
 Only a genuinely absent reply is eligible for waiter rollout fallback.
 A present-but-invalid reply returns `reply-missing` without consulting rollout fallback.
 An absent reply with no certifiable rollout body exhausts the eligible sources.
@@ -497,6 +517,8 @@ node "${CLAUDE_SKILL_DIR}/scripts/codex_ipc_thread_locator.mjs" --cwd <absolute-
 
 If the user created a clearly titled waiting thread, narrow with `--title-contains <text>` and
 `--require-single`. A locator result is only candidate discovery, not send authority.
+Its `--since-*` filters compare current indexed timestamps. Reset/revert can rewrite those values
+and make an older thread match, so time-filter inclusion never proves new-thread provenance.
 `targetKindHint` marks explicit `user` rows as `root`, explicit child rows as `non-root`, and
 null-source rows as `legacy-unknown`; it never applies the full classification. If exactly one
 intended candidate remains, run `codex_ipc_session_inspect.mjs` on that conversationId and then

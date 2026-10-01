@@ -495,6 +495,8 @@ Options:
                             stay exit 1 with no token. Flagless stays all-determinations-exit-0.
 
 Environment:
+  CODEX_IPC_ROLLOUT_PATH      same validation as --rollout-path; flag wins
+  CODEX_IPC_SESSIONS_ROOT     same meaning as --sessions-root; flag wins
   CODEX_IPC_WAIT_BUDGET_MS    same validation as --budget-ms; flag wins
   CODEX_IPC_WAIT_INTERVAL_MS  same validation as --interval-ms; flag wins`;
 }
@@ -594,6 +596,7 @@ export function parseWaitArgs(argv, env = process.env) {
   const warnings = [];
   const budgetSource = raw.budgetMs ?? env.CODEX_IPC_WAIT_BUDGET_MS;
   const intervalSource = raw.intervalMs ?? env.CODEX_IPC_WAIT_INTERVAL_MS;
+  const rolloutSource = raw.rolloutPath || env.CODEX_IPC_ROLLOUT_PATH || null;
   const transportRoot = raw.transportRoot || env.CODEX_IPC_ROOT ||
     path.join(os.homedir(), ".claude", "ipc");
   return {
@@ -604,8 +607,9 @@ export function parseWaitArgs(argv, env = process.env) {
       replyPath: raw.replyPath,
       transportRoot,
       sessionId: raw.sessionId,
-      rolloutPath: raw.rolloutPath ? normalizeRolloutCliPath(raw.rolloutPath) : null,
-      sessionsRoot: raw.sessionsRoot || path.join(os.homedir(), ".codex", "sessions"),
+      rolloutPath: rolloutSource ? normalizeRolloutCliPath(rolloutSource) : null,
+      sessionsRoot: raw.sessionsRoot || env.CODEX_IPC_SESSIONS_ROOT ||
+        path.join(os.homedir(), ".codex", "sessions"),
       budgetMs: nonNegativeInteger(
         budgetSource,
         DEFAULT_WAIT_BUDGET_MS,

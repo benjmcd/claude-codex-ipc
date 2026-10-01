@@ -11,6 +11,7 @@ Repo-level triage lives in `docs/TROUBLESHOOTING.md`; this is the bundled quick 
 | `--ipc` says `node not found` | Node.js missing | Install Node. A live invocation prints its structurally safe fallback; manual mode retains the envelope but prints no actionable pickup because target inspection did not run |
 | Inspector says `State DB was not found` | No Codex Desktop state on this machine (or non-default path) | Pass `--db`/`--sessions-root`, or accept that inspection is unavailable |
 | `autoload helper unavailable` | Not Windows, `powershell.exe` missing, or helper missing | Use file-drop; do not launch the protocol manually to bypass the shared policy |
+| Thread appears to belong to the wrong Desktop host | Symptoms from diagnostics or local state; not proof of ownership | Re-inspect the exact target. The operator closes the wrong host and pastes pickup into the intended host; opening it there only establishes a follower, and Retry creates another rollout page. Do not automate host lifecycle or resend from symptoms alone |
 
 ## Before first use
 
@@ -54,6 +55,11 @@ For a goal-driven target, leave `--request-goal` off and use thread-bound manual
 `--ipc <uuid> --deliver manual`, then have the operator paste its pickup line into the intended thread. Do not
 wait for a closed-turn gap before the paste. `pending` is expected until the named dispatch has its
 own completion evidence; never call `turn/interrupt` or resend merely to manufacture an idle gap.
+
+Opening a thread in another Desktop host makes that host a follower; it does not prove the earlier
+host was wrong or transfer ownership evidence. If the wrong host must close, that is an operator
+action. Retry creates another rollout page, so inspect the intended target and selected physical
+page before issuing any new dispatch.
 
 1. `RESULT: gui-delivered` — the router accepted exactly one target follower; this is not task
    completion or reply-file success. Read the rollout confirmation and use the printed
@@ -157,6 +163,24 @@ determination exits 0.
   never certifies it. Issue a NEW dispatch if the goal still matters.
 - `unavailable`: no authoritative rollout candidate or rollout/reply-scan ambiguity — re-inspect;
   never infer non-delivery or auto-resend.
+
+The waiter writes detail as `WAIT_DIAGNOSTIC` on stderr; the harvester writes
+`ROLLOUT_DIAGNOSTIC`, and the reply viewer forwards the two named facts below:
+
+- `turn-error`: the dispatch's own `task_complete` or `turn_aborted` ended with no assistant
+  output. A completion may expose only `error.message`, capped at 512 UTF-8 bytes; siblings are
+  discarded. Abort carries no excerpt. The fact adds no waiter token and changes no source.
+- `turn-model-state`: the latest matching `turn_context` before the terminal reported `empty`,
+  `null`, or `invalid`. Raw model values and unrelated turns are never exposed. Missing or valid
+  nonempty state emits no diagnostic.
+
+These are correlated diagnostic data, not proof of host ownership or permission to retry. Local
+path aliases are likewise narrow: inspector accepts `CODEX_IPC_SESSIONS_ROOT`; waiter accepts that
+plus `CODEX_IPC_ROLLOUT_PATH`; observer accepts the rollout alias plus its existing environment-only
+sessions root; harvester retains both. A corresponding flag wins over a nonempty environment value,
+then the existing default/discovery applies. `CODEX_HOME` is unsupported. Locator `--since-*`
+filters use current indexed timestamps; reset/revert can make an older thread match, so inspect the
+candidate before delivery.
 
 ## Encoding and mojibake recovery
 

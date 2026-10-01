@@ -437,6 +437,59 @@ echo "== 2b. inspector canonicalizes case-insensitive UUID input before authorit
 run_inspect "$CASE/state.sqlite" "$CASE/sessions" "${THREAD^^}"
 assert_case canonical-thread "uppercase target retains the exact lowercase DB row and rollout authority"
 
+echo "== 2b1. E1 sessions-root environment alias preserves explicit-flag precedence =="
+E1_CASE="$TMP/e1-sessions"; mkdir -p "$E1_CASE/env" "$E1_CASE/flag"
+E1_ENV_PAGE="$E1_CASE/env/rollout-env-$THREAD.jsonl"
+E1_FLAG_PAGE="$E1_CASE/flag/rollout-flag-$THREAD.jsonl"
+write_user_complete "$E1_ENV_PAGE"
+write_user_abort "$E1_FLAG_PAGE"
+make_db "$E1_CASE/state.sqlite"
+E1_OUT="$(env CODEX_IPC_SESSIONS_ROOT="$E1_CASE/env" "$NODE_BIN" "$INSPECT" \
+  --db "$E1_CASE/state.sqlite" --thread "$THREAD" --tail-events 20 2>/dev/null)"; E1_RC=$?
+if [[ $E1_RC -eq 0 ]] && printf '%s' "$E1_OUT" | "$NODE_BIN" -e '
+const fs = require("node:fs");
+const value = JSON.parse(fs.readFileSync(0, "utf8"));
+process.exit(value.rollout?.primary?.path &&
+  fs.realpathSync.native(value.rollout.primary.path) === fs.realpathSync.native(process.argv[1]) ? 0 : 1);
+' "$E1_ENV_PAGE" >/dev/null 2>&1; then
+  ok "inspector accepts CODEX_IPC_SESSIONS_ROOT as the existing sessions-root option"
+else
+  no "inspector ignored CODEX_IPC_SESSIONS_ROOT (rc=$E1_RC)"
+fi
+E1_OUT="$(env CODEX_IPC_SESSIONS_ROOT="$E1_CASE/env" "$NODE_BIN" "$INSPECT" \
+  --db "$E1_CASE/state.sqlite" --sessions-root "$E1_CASE/flag" \
+  --thread "$THREAD" --tail-events 20 2>/dev/null)"; E1_RC=$?
+if [[ $E1_RC -eq 0 ]] && printf '%s' "$E1_OUT" | "$NODE_BIN" -e '
+const fs = require("node:fs");
+const value = JSON.parse(fs.readFileSync(0, "utf8"));
+process.exit(value.rollout?.primary?.path &&
+  fs.realpathSync.native(value.rollout.primary.path) === fs.realpathSync.native(process.argv[1]) ? 0 : 1);
+' "$E1_FLAG_PAGE" >/dev/null 2>&1; then
+  ok "explicit inspector sessions-root overrides a conflicting environment alias"
+else
+  no "explicit inspector sessions-root did not win (rc=$E1_RC)"
+fi
+
+E1_HOME="$E1_CASE/home"; E1_DEFAULT="$E1_HOME/.codex/sessions"
+mkdir -p "$E1_DEFAULT"
+E1_DEFAULT_PAGE="$E1_DEFAULT/rollout-default-$THREAD.jsonl"
+write_user_complete "$E1_DEFAULT_PAGE"
+E1_HOME_NATIVE="$(cygpath -m "$E1_HOME" 2>/dev/null || printf '%s' "$E1_HOME")"
+E1_DEFAULT_NATIVE="$(cygpath -m "$E1_DEFAULT_PAGE" 2>/dev/null || printf '%s' "$E1_DEFAULT_PAGE")"
+E1_OUT="$(env -u CODEX_IPC_SESSIONS_ROOT USERPROFILE="$E1_HOME_NATIVE" HOME="$E1_HOME_NATIVE" \
+  "$NODE_BIN" "$INSPECT" --db "$E1_CASE/state.sqlite" --thread "$THREAD" \
+  --tail-events 20 2>/dev/null)"; E1_RC=$?
+if [[ $E1_RC -eq 0 ]] && printf '%s' "$E1_OUT" | "$NODE_BIN" -e '
+const fs = require("node:fs");
+const path = require("node:path");
+const value = JSON.parse(fs.readFileSync(0, "utf8"));
+process.exit(path.resolve(value.rollout?.primary?.path || "") === path.resolve(process.argv[1]) ? 0 : 1);
+' "$E1_DEFAULT_NATIVE" >/dev/null 2>&1; then
+  ok "unset sessions-root alias preserves the existing home default"
+else
+  no "unset sessions-root alias changed the inspector default (rc=$E1_RC)"
+fi
+
 echo "== 2c. snapshot canonicalizes target/other/allowlist UUIDs and binds compare identity =="
 SNAP_CASE="$TMP/snapshot-case"; mkdir -p "$SNAP_CASE"
 "$NODE_BIN" "$SNAPSHOT_DB_BUILDER" "$SNAP_CASE/state.sqlite" "$THREAD" "$OTHER_THREAD" >/dev/null 2>&1

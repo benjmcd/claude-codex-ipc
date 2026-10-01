@@ -371,7 +371,11 @@ export function harvestDispatch(options) {
 
 function usage() {
   return `Usage: node codex_ipc_reply_harvest.mjs --thread <uuid|filedrop> --dispatch <id>
-       [--reply-path <path>] [--rollout-path <path>] [--max-bytes <n>]`;
+       [--reply-path <path>] [--rollout-path <path>] [--max-bytes <n>]
+
+Environment:
+  CODEX_IPC_ROLLOUT_PATH   same validation as --rollout-path; flag wins
+  CODEX_IPC_SESSIONS_ROOT  rollout locator root when no page is explicit`;
 }
 
 function takeValue(argv, index, flag) {
@@ -392,7 +396,7 @@ function parseArgs(argv) {
     threadId: null,
     dispatchId: null,
     replyPath: null,
-      rolloutPath: process.env.CODEX_IPC_ROLLOUT_PATH || null,
+    rolloutPath: process.env.CODEX_IPC_ROLLOUT_PATH || null,
     sessionsRoot: process.env.CODEX_IPC_SESSIONS_ROOT || undefined,
     maxBytes: DEFAULT_MAX_BYTES,
   };

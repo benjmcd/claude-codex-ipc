@@ -88,7 +88,8 @@ Options:
                          (selection.candidateCount always states the true total). Re-run the
                          identical command without --summary for the full object.
   --db <path>            State DB path. Default: %USERPROFILE%\\.codex\\state_5.sqlite
-  --sessions-root <path> Sessions root. Default: %USERPROFILE%\\.codex\\sessions
+  --sessions-root <path> Sessions root. Default: CODEX_IPC_SESSIONS_ROOT, else
+                         %USERPROFILE%\\.codex\\sessions. The flag wins.
   --help                 Show this help.
 
 Safety:
@@ -111,7 +112,7 @@ function parseArgs(argv) {
     tailEvents: DEFAULT_TAIL_EVENTS,
     maxTextChars: DEFAULT_MAX_TEXT_CHARS,
     dbPath: defaultCodexPath("state_5.sqlite"),
-    sessionsRoot: defaultCodexPath("sessions"),
+    sessionsRoot: process.env.CODEX_IPC_SESSIONS_ROOT || defaultCodexPath("sessions"),
     // S1 enforcement rule 1: `--summary` sets exactly ONE boolean and has no other parse-time
     // effect. It is deliberately NOT a value-bearing option and never rewrites another field.
     summary: false,

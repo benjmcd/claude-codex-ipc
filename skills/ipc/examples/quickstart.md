@@ -86,6 +86,9 @@ node "${CLAUDE_SKILL_DIR}/scripts/codex_ipc_wait.mjs" \
 `codex_ipc_wait` prints exactly one of six tokens on stdout: `done`, `aborted`, `superseded`,
 `reply-missing`, `pending`, `unavailable`. `done` certifies the **named dispatch's own turn**
 reached completion — it is never proof that the thread is idle now.
+An immediate unmarked continuation cannot replace the dispatch terminal or provide its missing
+body. Correlated `turn-error` / `turn-model-state` detail may appear on stderr without changing the
+six-token contract; see [troubleshooting](../references/troubleshooting.md).
 Only a genuinely absent reply is eligible for waiter rollout fallback.
 A present-but-invalid reply returns `reply-missing` without consulting rollout fallback.
 An absent reply with no certifiable rollout body exhausts the eligible sources.
@@ -95,6 +98,10 @@ resuming the goal in a fresh, unmarked turn will NOT re-certify the original dis
 Manual preparation prints a ready-to-run `WAIT:` line after its pickup and no `RESULT:`. An accepted
 live `--ipc` send prints the same WAIT contract before its final `RESULT:` line. Flagless (no
 `--accept-rollout-fallback`) is the legacy file-primary contract.
+
+For local alternate state roots, use only the component aliases documented in the
+[skill guide](../SKILL.md): `CODEX_IPC_SESSIONS_ROOT` and, where supported,
+`CODEX_IPC_ROLLOUT_PATH`. An explicit flag wins; `CODEX_HOME` is not an alias.
 
 ## 6. Opt-in transcript pointer
 

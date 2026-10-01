@@ -24,6 +24,7 @@ Before force replacement, run the matching preview: `./install.sh --dry-run --fo
 | `mapfile: command not found` | The reply viewer needs bash ≥ 4; stock macOS bash is 3.2. `brew install bash` and run the script with the newer bash. |
 | `reason=intended-host-not-running` | The read-only inventory did not find exactly one intended GUI host. The follower client did not run. Start or select the intended host outside this tool, or use the printed file-drop line there. |
 | `reason=host-inventory-incomplete` / `other-desktop-host-running` | Identity evidence was unreadable, mixed, or duplicated. Close the unintended GUI host or restore readable process/package evidence; do not bypass the gate. |
+| The thread appears to belong to the wrong Desktop host | Treat that as a hypothesis, not a conclusion from diagnostics. Re-inspect the exact target and local state. The operator closes the wrong host and performs pickup in the intended host; opening the thread there only establishes a follower, and Retry creates another rollout page. Do not automate host lifecycle or resend from symptoms alone. |
 | `reason=target-non-root` | The pre-send inspector found sub-agent, guardian-review, or other child evidence. Direct delivery is refused before host policy or pipe contact. Use the printed file-drop line with the known root parent when appropriate; the wrapper prints `Target parent thread:` when that identity is available. |
 | `reason=target-model-empty` | The stored thread model is null, empty, or whitespace. No send was attempted and the toolkit does not repair settings. Select a healthy root thread or repair the target in its intended Desktop host, then issue a new dispatch. |
 | `reason=target-inspection-ambiguous` | Target existence, identity, archive state, root classification, or model safety could not be established from one trusted read-only snapshot. No send was attempted. Inspect the target; do not bypass or treat locator hints as authority. |
@@ -83,8 +84,14 @@ determination exits 0.
 
 ## Rollout diagnostics you may see
 
+The waiter emits detail as `WAIT_DIAGNOSTIC` on stderr; the harvester emits
+`ROLLOUT_DIAGNOSTIC`. The reply viewer forwards the two named diagnostics below. These are
+correlated facts, not proof of host ownership or permission to retry.
+
 | Diagnostic | Meaning |
 |---|---|
+| `turn-error` | The dispatch's own `task_complete` or `turn_aborted` ended with no assistant output. For `task_complete`, only `error.message` may appear, capped at 512 UTF-8 bytes; sibling fields are discarded. Abort carries no excerpt. The fact does not add a waiter token or change source selection. |
+| `turn-model-state` | The latest matching `turn_context` before the terminal reported `empty`, `null`, or `invalid` model state. Raw values and unrelated turns are never included. Missing or valid nonempty model state emits no diagnostic. |
 | `unknown-item-class` | An `item_completed` wrapper named an item class outside the reader's dated named set. Informational only: the record is inert, the turn is unaffected, and the class is named in `itemType`. Report it so the census can be re-derived; the named set is pinned to a corpus census re-derived at each release cut. |
 | `schema-drift` with an `itemType` | One of three things about an unnamed item class: it carried a body- or role-bearing field (`content`, `text`, `phase`, `role`); the record's outer turn/thread identity was invalid; or the class is only a case or separator variant of a named one (`agent_message` for `AgentMessage`), which is a producer mis-spelling rather than a new class. In each case the reader could not rule out an unread body or speaker, so it fails the turn closed by design. |
 | `schema-drift` with `itemType` `null` | The `item_completed` wrapper named no item class at all, or named one that was not a string. This is a missing class, not an unknown one: there is no name to log, so it can never be admitted as inert. Fails the turn closed by design. |
@@ -92,6 +99,13 @@ determination exits 0.
 | `schema-drift` whose `envelopeType` is outside the named set | An unnamed top-level envelope that could not be admitted as inert: it declared a `payload.type`, which makes it an unknown envelope/payload **pair** rather than an unknown envelope; or it carried a `payload.item`; or its payload was present but was not a plain object; or the payload carried `content`, `text`, `message`, `last_agent_message`, `phase` or `role`; or the record's owner identity was invalid. In each case the reader could not rule out an unread body or speaker, so it fails the turn closed by design. A record whose top-level `type` is missing or not a string reports `envelopeType` `null` and fails closed for the same reason as a missing item class: there is no name to log. |
 | `terminal-copy-disambiguated` | The turn carried more than one distinct final body and the non-empty `task_complete.last_agent_message` matched exactly one of them, which was served. `finalMessageCount` reports the true number of distinct finals. This is disclosure on a certifying path, not a failure; it carries no body text. |
 | `multiple-final-message-bodies` | Distinct final bodies that the terminal copy could **not** resolve. The turn refuses. |
+
+Path aliases are deliberately narrow: inspector accepts `CODEX_IPC_SESSIONS_ROOT`; waiter accepts
+that alias plus `CODEX_IPC_ROLLOUT_PATH`; observer accepts the rollout alias plus its existing
+environment-only sessions root; harvester retains both. A corresponding explicit flag wins over a
+nonempty environment value, then the existing default/discovery applies. `CODEX_HOME` is not an
+alias. The locator's `--since-*` filters are discovery aids over current timestamps; reset/revert
+can make an older thread match, so inspect the selected target before any delivery.
 
 Forked threads whose first record carries `forked_from_id` with no
 `subagent_history_start_ordinal` and no top-level `ordinal` are read as ordinary rollouts. If such

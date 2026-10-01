@@ -36,7 +36,12 @@ const dispatch = "9100000000-1-abcdef0123456789";
 const taskName = `${dispatch}.task.md`;
 
 const api = await import(pathToFileURL(waitPath));
-const { DEFAULT_WAIT_BUDGET_MS, DEFAULT_WAIT_INTERVAL_MS, waitForCompletion } = api;
+const {
+  DEFAULT_WAIT_BUDGET_MS,
+  DEFAULT_WAIT_INTERVAL_MS,
+  parseWaitArgs,
+  waitForCompletion,
+} = api;
 const { readRolloutFile } = await import(
   pathToFileURL(path.join(path.dirname(waitPath), "codex_ipc_rollout_reader.mjs"))
 );
@@ -152,6 +157,8 @@ function cli(args, env = {}, timeout = 15000) {
       HOME: tmp,
       USERPROFILE: tmp,
       CODEX_IPC_ROOT: path.join(tmp, "default-transport"),
+      CODEX_IPC_ROLLOUT_PATH: "",
+      CODEX_IPC_SESSIONS_ROOT: "",
       CODEX_IPC_WAIT_BUDGET_MS: "",
       CODEX_IPC_WAIT_INTERVAL_MS: "",
       ...env,
@@ -179,6 +186,43 @@ await test("module exports side-effect-free wait API and documented defaults", (
   assert.equal(imported.stdout, "");
   assert.equal(imported.stderr, "");
   assert.doesNotMatch(fs.readFileSync(waitPath, "utf8"), /node:sqlite/);
+});
+
+await test("E1 waiter path aliases preserve flag then environment then default precedence", () => {
+  const envPage = path.join(tmp, "env-page.jsonl");
+  const flagPage = path.join(tmp, "flag-page.jsonl");
+  const envRoot = path.join(tmp, "env-sessions");
+  const flagRoot = path.join(tmp, "flag-sessions");
+  const baseArgs = ["--thread", thread, "--dispatch", dispatch];
+  const fromEnvironment = parseWaitArgs(baseArgs, {
+    CODEX_IPC_ROLLOUT_PATH: envPage,
+    CODEX_IPC_SESSIONS_ROOT: envRoot,
+  }).options;
+  assert.equal(fromEnvironment.rolloutPath, envPage);
+  assert.equal(fromEnvironment.sessionsRoot, envRoot);
+
+  const fromFlags = parseWaitArgs([
+    ...baseArgs,
+    "--rollout-path", flagPage,
+    "--sessions-root", flagRoot,
+  ], {
+    CODEX_IPC_ROLLOUT_PATH: "\u0000invalid",
+    CODEX_IPC_SESSIONS_ROOT: envRoot,
+  }).options;
+  assert.equal(fromFlags.rolloutPath, flagPage);
+  assert.equal(fromFlags.sessionsRoot, flagRoot);
+
+  const empty = parseWaitArgs(baseArgs, {
+    CODEX_IPC_ROLLOUT_PATH: "",
+    CODEX_IPC_SESSIONS_ROOT: "",
+  }).options;
+  const absent = parseWaitArgs(baseArgs, {}).options;
+  assert.equal(empty.rolloutPath, absent.rolloutPath);
+  assert.equal(empty.sessionsRoot, absent.sessionsRoot);
+  assert.throws(
+    () => parseWaitArgs(baseArgs, { CODEX_IPC_ROLLOUT_PATH: "bad\npath" }),
+    (error) => error?.code === "IPC_ROLLOUT_PATH_INVALID",
+  );
 });
 
 await test("done requires own task_complete plus a regular readable reply", async () => {
@@ -225,7 +269,7 @@ await test("a successor preserving the dispatch still vetoes stale-page completi
     root,
     records,
     markerEndOffset,
-    "44444444-4444-4444-8444-444444444444",
+    "33333333-3333-4333-8333-333333333333",
   );
   const result = await waitForCompletion(directOptions(root, rollout, reply, { sessionsRoot: root }));
   assert.equal(result.token, "unavailable");
@@ -322,6 +366,51 @@ await test("aborted wins even when a reply is present and marks it unverified", 
   ]);
   assertToken(result, "aborted");
   assert.match(result.stderr, /reply-unverified/);
+  assert.match(result.stderr, /"code":"turn-error"/);
+  assert.match(result.stderr, /"kind":"turn_aborted"/);
+});
+
+await test("C7 task error keeps reply-file primacy and emits empty-model evidence", () => {
+  const root = caseDir("turn-error-primary");
+  const rollout = writeRollout(root, [
+    ...ownOpenRecords().slice(0, 2),
+    { type: "turn_context", payload: { turn_id: ownTurn, model: "" } },
+    ownOpenRecords()[2],
+    event("task_complete", ownTurn, {
+      last_agent_message: null,
+      error: { message: "synthetic failure", codex_error_info: "PRIVATE-SIBLING" },
+    }),
+  ]);
+  const reply = writeReply(path.join(root, `${dispatch}.reply.md`));
+  const result = cli([
+    "--thread", thread, "--dispatch", dispatch,
+    "--rollout-path", rollout, "--reply-path", reply,
+  ]);
+  assertToken(result, "done");
+  assert.match(result.stderr, /"code":"turn-error"/);
+  assert.match(result.stderr, /"turnError":\{"kind":"task_complete"/);
+  assert.match(result.stderr, /"excerpt":"synthetic failure"/);
+  assert.match(result.stderr, /"code":"turn-model-state"/);
+  assert.match(result.stderr, /"appliedModel":\{"state":"empty"\}/);
+  assert.doesNotMatch(result.stderr, /PRIVATE-SIBLING/);
+});
+
+await test("C7 task error without a reply remains reply-missing with named diagnostics", () => {
+  const root = caseDir("turn-error-missing");
+  const rollout = writeRollout(root, [
+    ...ownOpenRecords(),
+    event("task_complete", ownTurn, {
+      last_agent_message: null,
+      error: { message: "synthetic missing reply" },
+    }),
+  ]);
+  const result = cli([
+    "--thread", thread, "--dispatch", dispatch,
+    "--rollout-path", rollout, "--reply-path", path.join(root, "missing.reply.md"),
+  ]);
+  assertToken(result, "reply-missing");
+  assert.match(result.stderr, /"code":"turn-error"/);
+  assert.match(result.stderr, /"assistantOutput":false/);
 });
 
 await test("aborted notes an existing reply even when metadata access is denied", async () => {
@@ -400,6 +489,45 @@ await test("completed unrelated turn before compaction is not borrowed by own op
   const reply = writeReply(path.join(root, `${dispatch}.reply.md`));
   const result = await waitForCompletion(directOptions(root, rollout, reply));
   assert.equal(result.token, "pending");
+});
+
+await test("goal continuation keeps rollout fallback bound to the completed dispatch turn", async () => {
+  const root = caseDir("goal-continuation-complete");
+  const rollout = writeRollout(root, [
+    ...ownCompletedRecords("OWN"),
+    event("task_started", otherTurn),
+    event("agent_message", otherTurn, { phase: "final_answer", message: "OTHER" }),
+    event("task_complete", otherTurn, { last_agent_message: "OTHER" }),
+  ]);
+  const result = await waitForCompletion(directOptions(
+    root,
+    rollout,
+    path.join(root, "missing.reply.md"),
+    { acceptRolloutFallback: true },
+  ));
+  assert.equal(result.token, "done");
+  assert.equal(result.replySource, "rollout-fallback");
+  assert.deepEqual(result.diagnostics, []);
+});
+
+await test("goal continuation cannot lend its body to a bodyless dispatch terminal", async () => {
+  const root = caseDir("goal-continuation-bodyless");
+  const rollout = writeRollout(root, [
+    ...ownOpenRecords(),
+    event("task_complete", ownTurn, { last_agent_message: null }),
+    event("task_started", otherTurn),
+    event("agent_message", otherTurn, { phase: "final_answer", message: "OTHER" }),
+    event("task_complete", otherTurn, { last_agent_message: "OTHER" }),
+  ]);
+  const result = await waitForCompletion(directOptions(
+    root,
+    rollout,
+    path.join(root, "missing.reply.md"),
+    { acceptRolloutFallback: true },
+  ));
+  assert.equal(result.token, "reply-missing");
+  assert.equal(result.replySource, undefined);
+  assert.deepEqual(result.diagnostics, []);
 });
 
 await test("dispatch marker requires an exact task basename boundary", async () => {
