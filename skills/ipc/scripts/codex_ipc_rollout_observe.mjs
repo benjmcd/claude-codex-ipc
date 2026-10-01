@@ -2,11 +2,16 @@
 import path from "node:path";
 import { realpathSync } from "node:fs";
 import {
+  assessRolloutPageSupersession,
   DEFAULT_MAX_RECORD_BYTES,
   inspectRolloutNoGrowth,
   isCompleteReaderCursor,
   locateRollout,
+  normalizeRolloutCliPath,
   readRolloutFile,
+  ROLLOUT_PATH_GUIDANCE,
+  rolloutDiagnosticLines,
+  rolloutPageGuidance,
 } from "./codex_ipc_rollout_reader.mjs";
 
 // Retained-envelope census p90 was 17.78 s on 2026-07-10; keep bounded headroom above it.
@@ -39,15 +44,16 @@ function exactTaskBasename(text, basename) {
   return false;
 }
 
-function admissionSeen(records, dispatchId) {
+function admissionMarkerByteOffset(records, dispatchId) {
   const basename = dispatchId.endsWith(".task.md") ? dispatchId : `${dispatchId}.task.md`;
-  return records.some(
+  const match = records.find(
     (item) =>
       !item.parseError &&
       item.envelopeType === "event_msg" &&
       item.payloadType === "user_message" &&
       exactTaskBasename(item.text, basename),
   );
+  return Number.isSafeInteger(match?.byteOffset) ? match.byteOffset : null;
 }
 
 export async function observeRollout(options, injected = {}) {
@@ -55,6 +61,7 @@ export async function observeRollout(options, injected = {}) {
   const sleep = injected.sleep || defaultSleep;
   const readRolloutFileImpl = injected.readRolloutFile || readRolloutFile;
   const inspectNoGrowth = injected.inspectRolloutNoGrowth || inspectRolloutNoGrowth;
+  const assessPage = injected.assessRolloutPageSupersession || assessRolloutPageSupersession;
   const budgetMs = options.budgetMs;
   const intervalMs = options.intervalMs;
   const maxIterations = Math.ceil(budgetMs / intervalMs) + 1;
@@ -66,7 +73,25 @@ export async function observeRollout(options, injected = {}) {
   let softSchemaDrift = false;
   let hardReadFailure = false;
   let admissionObserved = false;
+  let admissionByteOffset = null;
+  let pageGuidanceRecorded = false;
   const diagnostics = [];
+
+  const pageIsCurrent = () => {
+    if (!candidatePath || !cursor) return false;
+    const assessment = assessPage({
+      threadId: options.threadId,
+      rolloutPath: candidatePath,
+      sessionsRoot: options.sessionsRoot,
+      expectedIdentityKey: candidateIdentityKey,
+      expectedSize: cursor.size,
+      dispatchMarkerByteOffset: admissionByteOffset,
+      deadlineAt: startedAt + budgetMs,
+      now,
+    });
+    diagnostics.push(...(assessment.diagnostics || []));
+    return assessment.status === "current";
+  };
 
   for (let iteration = 0; iteration < maxIterations; iteration += 1) {
     if (iteration > 0 && now() - startedAt >= budgetMs) break;
@@ -79,6 +104,10 @@ export async function observeRollout(options, injected = {}) {
         now,
       });
       diagnostics.push(...(located.diagnostics || []));
+      if (!pageGuidanceRecorded) {
+        diagnostics.push(...rolloutPageGuidance(located, options.rolloutPath));
+        pageGuidanceRecorded = true;
+      }
       if (located.status === "ambiguous") {
         return { token: "rollout-unavailable", diagnostics };
       }
@@ -104,8 +133,10 @@ export async function observeRollout(options, injected = {}) {
         // full read solely to keep waiting; growth/change and any final or budget-edge attempt
         // that begins before the deadline return to the hash-validating reader below. A deadline
         // that elapses during sleep returns unavailable/pending evidence without certification.
+        if (!pageIsCurrent()) return { token: "rollout-unavailable", diagnostics };
       } else {
         let readAdmission = false;
+        let readAdmissionByteOffset = null;
         const parsed = readRolloutFileImpl(candidatePath, {
           ...(cursor ? { cursor } : {}),
           rolloutThreadId: options.threadId,
@@ -115,7 +146,11 @@ export async function observeRollout(options, injected = {}) {
           now,
           retainRecords: false,
           onRecord: (item) => {
-            if (admissionSeen([item], options.dispatchId)) readAdmission = true;
+            const markerByteOffset = admissionMarkerByteOffset([item], options.dispatchId);
+            if (markerByteOffset !== null) {
+              readAdmission = true;
+              readAdmissionByteOffset = markerByteOffset;
+            }
           },
         });
         diagnostics.push(...(parsed.diagnostics || []));
@@ -131,20 +166,30 @@ export async function observeRollout(options, injected = {}) {
         ) {
           hardReadFailure = true;
         }
-        if (parsed.ok && readAdmission) admissionObserved = true;
+        if (parsed.ok && readAdmission) {
+          admissionObserved = true;
+          admissionByteOffset = readAdmissionByteOffset;
+        }
         // `onRecord` receives only normalized, owner-bound, known-form records. Once an exact
         // user admission from a trusted read is carried to a stable EOF, unrelated schema drift
         // elsewhere remains diagnostic but cannot erase that positive admission proof. Drift or
         // malformed bytes that merely contain the basename never reach `onRecord`. Any parse or
         // hard reader/integrity failure vetoes a hit even if an earlier exact admission was seen.
-        if (completeRead && admissionObserved && !hardReadFailure) {
-          return { token: "rollout-hit", diagnostics };
-        }
         if (parsed.ok) {
           readableCandidate = true;
           cursor = parsed.cursor;
           if (!completeRead) diagnostics.push({ code: "rollout-read-not-at-eof" });
-        } else if (parsed.reason === "deadline-exceeded") {
+        }
+        // Page authority is independent of whether this dispatch has appeared. A trustworthy
+        // full read of a superseded page must not sleep to its budget and report pending merely
+        // because its searched-for marker is absent.
+        if (completeRead && !pageIsCurrent()) {
+          return { token: "rollout-unavailable", diagnostics };
+        }
+        if (completeRead && admissionObserved && !hardReadFailure) {
+          return { token: "rollout-hit", diagnostics };
+        }
+        if (!parsed.ok && parsed.reason === "deadline-exceeded") {
           if (readableCandidate) break;
           return { token: "rollout-unavailable", diagnostics };
         }
@@ -230,7 +275,7 @@ function parseArgs(argv) {
     options: {
       threadId: raw.threadId.toLowerCase(),
       dispatchId: raw.dispatchId,
-      rolloutPath: raw.rolloutPath || null,
+      rolloutPath: raw.rolloutPath ? normalizeRolloutCliPath(raw.rolloutPath) : null,
       sessionsRoot: process.env.CODEX_IPC_SESSIONS_ROOT || undefined,
       budgetMs: positiveOrDefault(
         budgetSource,
@@ -260,6 +305,7 @@ async function main(argv) {
     parsed = parseArgs(argv);
   } catch (error) {
     console.error(`ERROR: ${error.message}`);
+    if (error?.code === "IPC_ROLLOUT_PATH_INVALID") console.error(ROLLOUT_PATH_GUIDANCE);
     console.error(usage());
     process.exitCode = 1;
     return;
@@ -267,6 +313,7 @@ async function main(argv) {
   for (const warning of parsed.warnings) console.error(warning);
   try {
     const result = await observeRollout(parsed.options);
+    for (const line of rolloutDiagnosticLines(result.diagnostics)) console.error(line);
     for (const item of result.diagnostics) {
       console.error(`ROLLOUT_DIAGNOSTIC ${serializeDiagnostic(item)}`);
     }

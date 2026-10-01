@@ -1001,7 +1001,7 @@ let value;
 try {
   value = JSON.parse(fs.readFileSync(0, "utf8"));
 } catch {
-  process.stdout.write("ambiguous\t-\t-");
+  process.stdout.write("ambiguous\t-\t-\t-");
   process.exit(0);
 }
 const target = String(process.argv[1] || "").toLowerCase();
@@ -1051,14 +1051,34 @@ const parent = classValid && classification.parentThreadId
 const legacy = classValid && classification.warnings.includes("legacy-null-source")
   ? "legacy-null-source"
   : "-";
-process.stdout.write([state, parent, legacy].join("\t"));
+const selection = value?.rollout?.selection;
+const rawRolloutPath = thread?.rolloutPath;
+let rolloutPath = "-";
+if (
+  typeof rawRolloutPath === "string" &&
+  rawRolloutPath.length > 0 &&
+  !/[\u0000\r\n\t]/u.test(rawRolloutPath) &&
+  selection?.status === "found" &&
+  selection?.authority === "db.rollout_path" &&
+  selection?.path === rawRolloutPath &&
+  value?.rollout?.primary?.parsedOk === true
+) {
+  rolloutPath = rawRolloutPath;
+  if (/^\\\\\?\\UNC\\/iu.test(rolloutPath)) {
+    rolloutPath = `//${rolloutPath.slice(8)}`;
+  } else if (/^\\\\\?\\/u.test(rolloutPath)) {
+    rolloutPath = rolloutPath.slice(4);
+  }
+  rolloutPath = rolloutPath.replaceAll("\\\\", "/");
+}
+process.stdout.write([state, parent, legacy, rolloutPath].join("\t"));
 ' "$IPC_CID"
     }
     observe_rollout() {
         local observation=""
-        if observation=$(node "${SCRIPT_DIR}/codex_ipc_rollout_observe.mjs" \
-            --thread "${IPC_CID}" \
-            --dispatch "${DISPATCH_ID}"); then
+        local -a observe_args=(--thread "${IPC_CID}" --dispatch "${DISPATCH_ID}")
+        [[ -z "$INSPECT_ROLLOUT_PATH" ]] || observe_args+=(--rollout-path "$INSPECT_ROLLOUT_PATH")
+        if observation=$(node "${SCRIPT_DIR}/codex_ipc_rollout_observe.mjs" "${observe_args[@]}"); then
             case "$observation" in
                 rollout-hit|rollout-pending|rollout-unavailable)
                     printf '%s\n' "$observation"
@@ -1077,8 +1097,13 @@ process.stdout.write([state, parent, legacy].join("\t"));
     # runnable WAIT: line (exact thread/dispatch/--reply-path + the D2 flag and 30-minute budget)
     # BEFORE the single final RESULT: line. File-drop, exec, and every failure branch must not.
     print_wait_hint() {
-        printf 'WAIT: node %q --thread %q --dispatch %q --reply-path %q --accept-rollout-fallback --budget-ms 1800000 --interval-ms 1000 --status-exit-codes\n' \
-            "${SCRIPT_DIR}/codex_ipc_wait.mjs" "$IPC_CID" "$DISPATCH_ID" "$INBOUND"
+        if [[ -n "$INSPECT_ROLLOUT_PATH" ]]; then
+            printf 'WAIT: node %q --thread %q --dispatch %q --reply-path %q --rollout-path %q --accept-rollout-fallback --budget-ms 1800000 --interval-ms 1000 --status-exit-codes\n' \
+                "${SCRIPT_DIR}/codex_ipc_wait.mjs" "$IPC_CID" "$DISPATCH_ID" "$INBOUND" "$INSPECT_ROLLOUT_PATH"
+        else
+            printf 'WAIT: node %q --thread %q --dispatch %q --reply-path %q --accept-rollout-fallback --budget-ms 1800000 --interval-ms 1000 --status-exit-codes\n' \
+                "${SCRIPT_DIR}/codex_ipc_wait.mjs" "$IPC_CID" "$DISPATCH_ID" "$INBOUND"
+        fi
     }
     print_confirmation_disclaimer() {
         echo "(Rollout confirmation reflects bounded pickup observation only; it does not confirm" >&2
@@ -1103,7 +1128,8 @@ process.stdout.write([state, parent, legacy].join("\t"));
         rm -f "$INSPECT_STDERR"
     fi
     INSPECT_FIELDS=$(classify_inspected_target)
-    IFS=$'\t' read -r INSPECT_CLASS INSPECT_PARENT INSPECT_WARNING <<< "$INSPECT_FIELDS"
+    IFS=$'\t' read -r INSPECT_CLASS INSPECT_PARENT INSPECT_WARNING INSPECT_ROLLOUT_PATH <<< "$INSPECT_FIELDS"
+    [[ "$INSPECT_ROLLOUT_PATH" == "-" ]] && INSPECT_ROLLOUT_PATH=""
     case "${INSPECT_STATUS}:${INSPECT_CLASS}" in
         0:active|0:legacy-root-assumed|0:archived|0:non-root|0:model-empty|1:missing) : ;;
         *) INSPECT_CLASS=ambiguous ;;

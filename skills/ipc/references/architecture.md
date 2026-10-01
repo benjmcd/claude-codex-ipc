@@ -317,8 +317,14 @@ Locator basenames are strict: legacy `...-<rootUuid>.jsonl` and paginated
 `session_meta` must also bind `session_id` to the root, declare `history_mode: paginated`, and carry
 a valid `history_base.thread_id`. The state DB's explicit rollout path is authoritative. Root-only
 discovery may recognize both forms, but multiple distinct valid physical pages are ambiguous and
-are never resolved by mtime. A poll remains on its selected page; cross-page N-to-N+1 rollover is
-not yet certified or supported. Even with one valid file, root-only discovery returns
+are never resolved by mtime. A poll remains on its selected page and never auto-hops or stitches
+records. A SQLite-free veto recursively scans the configured sessions root for one direct
+paginated successor with a complete first record, `history_base.thread_id` equal to the bound page
+ID, and a safe record-boundary `end_byte_offset` no larger than the bound page. A marker at or
+beyond that cutoff is `dispatch-history-abandoned`; an earlier marker is
+`rollout-page-superseded`; malformed, incomplete, or multiple claims are
+`page-supersession-unproven`. Each state vetoes positive pickup, completion, and rollout-fallback
+results while keeping the reader on the original page. Even with one valid file, root-only discovery returns
 `candidate-set-unresolved` when its scan also finds a recognized exact-target candidate that fails
 validation, any `rollout-*` basename containing the target UUID that is not understood as a
 candidate for that root (including when a trailing second UUID makes the legacy parser attribute
@@ -329,7 +335,12 @@ do not follow a target-thread ID to a differently owned physical rollout:
 without a trusted alias authority that remap is `unavailable`, not inferred. This limits rollout
 observation/fallback only; file-primary replies and the preserved file-drop envelope remain usable.
 They accept `--rollout-path` but do not derive it from the DB; pass the exact
-designated path when known, or accept that root-only discovery can be ambiguous.
+designated path when known, or accept that root-only discovery can be ambiguous. The maintained
+wrapper propagates its single trusted inspector page to both observation and the printed waiter.
+The read-only reply viewer accepts an explicit page for a UUID-scoped `-c` view or can derive it
+once with `--derive-rollout-path`; session-wide and filedrop views cannot select a page. Missing
+authority prints fixed `ROLLOUT-PATH:` guidance, page vetoes print fixed `ROLLOUT-PAGE:` guidance,
+and a primary reply stays visible with a stale-body caution while fallback remains unavailable.
 After a complete certifying cursor exists, polling callers may skip an intermediate full read only
 when a metadata check finds the same canonical path, physical identity, and size. Such a no-growth
 observation cannot certify pickup, completion, a reply, or proof success. Any growth/change and the

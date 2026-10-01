@@ -22,6 +22,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=codex_ipc_safe_render.sh
 source "$SCRIPT_DIR/codex_ipc_safe_render.sh"
 HARVESTER="$SCRIPT_DIR/codex_ipc_reply_harvest.mjs"
+INSPECTOR="$SCRIPT_DIR/codex_ipc_session_inspect.mjs"
+ROLLOUT_READER="$SCRIPT_DIR/codex_ipc_rollout_reader.mjs"
 
 # --- Two one-liners kept in lockstep with handoff_to_codex.sh (do NOT source the wrapper: it parses
 # --- argv, runs the reaper, and exits at top level). ---
@@ -38,6 +40,8 @@ codex_ipc_replies.sh — consolidated read-only view of Codex replies (derived; 
   [-c|--conversation <id>]    narrow to one thread: a Codex conversationId (UUID) or 'filedrop'
   [-n <count>]                max replies to show, newest first (default 10)
   [--max-bytes <n>]           max body bytes per reply (default 4096)
+  [--rollout-path <path>]      bind fallback/supersession checks to this inspector-designated page
+  [--derive-rollout-path]      derive that page once from the trusted inspector (requires -c UUID)
   [--since <find -newermt>]   only replies newer than this spec (e.g. '1 hour ago', '2026-07-06')
   [--paths-only]              list paths/metadata, no bodies (safe when replies may be mid-write)
   [--list-sessions]           list known session dirs (newest reply first) and exit 0
@@ -54,12 +58,15 @@ IPC_ROOT="${IPC_ROOT%/}"
 
 # --- Parse flags (fail closed on anything unrecognized) ---
 SESSION=""; CONV=""; N=10; MAX_BYTES=4096; SINCE=""; PATHS_ONLY=0; LIST_SESSIONS=0
+ROLLOUT_PATH=""; DERIVE_ROLLOUT_PATH=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --session) SESSION="${2:-}"; shift 2;;
         -c|--conversation) CONV="${2:-}"; shift 2;;
         -n) N="${2:-}"; shift 2;;
         --max-bytes) MAX_BYTES="${2:-}"; shift 2;;
+        --rollout-path) ROLLOUT_PATH="${2:-}"; shift 2;;
+        --derive-rollout-path) DERIVE_ROLLOUT_PATH=1; shift;;
         --since) SINCE="${2:-}"; shift 2;;
         --paths-only) PATHS_ONLY=1; shift;;
         --list-sessions) LIST_SESSIONS=1; shift;;
@@ -82,6 +89,32 @@ if [[ -n "$CONV" ]]; then
     # validates IPC_CID as a UUID, so no other thread-dir name can exist.
     if [[ "$CONV" != "filedrop" ]] && ! is_uuid "$CONV"; then
         echo "ERROR: -c must be a conversationId (UUID) or 'filedrop'." >&2; exit 1
+    fi
+fi
+if [[ -n "$ROLLOUT_PATH" && "$DERIVE_ROLLOUT_PATH" -eq 1 ]]; then
+    echo "ERROR: --rollout-path and --derive-rollout-path are mutually exclusive." >&2
+    exit 1
+fi
+if [[ -n "$ROLLOUT_PATH" || "$DERIVE_ROLLOUT_PATH" -eq 1 ]]; then
+    if [[ -z "$CONV" || "$CONV" == "filedrop" ]] || ! is_uuid "$CONV"; then
+        echo "ERROR: rollout page selection requires -c with a Codex conversation UUID." >&2
+        exit 1
+    fi
+fi
+if [[ -n "$ROLLOUT_PATH" ]]; then
+    if ! command -v node >/dev/null 2>&1 || [[ ! -f "$ROLLOUT_READER" ]]; then
+        echo "ERROR: --rollout-path requires the bundled Node rollout reader." >&2
+        exit 1
+    fi
+    if ! ROLLOUT_PATH="$(node --input-type=module - "$ROLLOUT_PATH" "$ROLLOUT_READER" <<'NODE'
+import { pathToFileURL } from "node:url";
+const api = await import(pathToFileURL(process.argv[3]));
+process.stdout.write(api.normalizeRolloutCliPath(process.argv[2]));
+NODE
+    )"; then
+        echo "ERROR: invalid --rollout-path." >&2
+        echo "ROLLOUT-PATH: Supply the inspector's database-designated page with --rollout-path <path>." >&2
+        exit 1
     fi
 fi
 
@@ -146,6 +179,55 @@ if [[ -n "$CONV" ]]; then
 else
     SCOPE_DIR="$SESSION_DIR"
 fi
+
+# Inspector derivation is explicit, single-thread-only, and runs once per viewer invocation. Its
+# stderr is suppressed because it can carry private local paths; every failure collapses to one
+# fixed message. Only the database-designated, successfully parsed primary page is admitted.
+if [[ "$DERIVE_ROLLOUT_PATH" -eq 1 ]]; then
+    if ! command -v node >/dev/null 2>&1 || [[ ! -f "$INSPECTOR" ]]; then
+        echo "ERROR: --derive-rollout-path could not obtain a trusted database-designated page." >&2
+        exit 1
+    fi
+    inspector_output=""
+    if ! inspector_output="$(node "$INSPECTOR" --thread "$CONV" --tail-events 1 --summary 2>/dev/null)"; then
+        echo "ERROR: --derive-rollout-path could not obtain a trusted database-designated page." >&2
+        exit 1
+    fi
+    if ! ROLLOUT_PATH="$(node -e '
+const fs = require("node:fs");
+const target = String(process.argv[1] || "").toLowerCase();
+let value;
+try { value = JSON.parse(fs.readFileSync(0, "utf8")); } catch { process.exit(1); }
+const db = value?.dbThread;
+const thread = db?.thread;
+const selection = value?.rollout?.selection;
+const raw = thread?.rolloutPath;
+const trusted =
+  value?.ok === true &&
+  db?.exists === true &&
+  db?.readOnlyOpenOk === true &&
+  thread?.exists === true &&
+  typeof thread?.id === "string" &&
+  thread.id.toLowerCase() === target &&
+  typeof raw === "string" &&
+  raw.length > 0 &&
+  !/[\u0000\r\n\t]/u.test(raw) &&
+  selection?.status === "found" &&
+  selection?.authority === "db.rollout_path" &&
+  selection?.path === raw &&
+  value?.rollout?.primary?.parsedOk === true;
+if (!trusted) process.exit(1);
+let page = raw;
+if (/^\\\\\?\\UNC\\/iu.test(page)) page = `//${page.slice(8)}`;
+else if (/^\\\\\?\\/u.test(page)) page = page.slice(4);
+process.stdout.write(page.replaceAll("\\\\", "/"));
+' "$CONV" <<<"$inspector_output")" || [[ -z "$ROLLOUT_PATH" ]]; then
+        echo "ERROR: --derive-rollout-path could not obtain a trusted database-designated page." >&2
+        exit 1
+    fi
+fi
+ROLLOUT_ARGS=()
+[[ -z "$ROLLOUT_PATH" ]] || ROLLOUT_ARGS=(--rollout-path "$ROLLOUT_PATH")
 
 # --- --since pre-flight (mandatory before enumeration; makes the fail-closed contract real) ---
 if [[ -n "$SINCE" ]]; then
@@ -256,7 +338,9 @@ for entry in "${ENTRIES[@]}"; do
         && [[ -f "$HARVESTER" && "$thread" != "filedrop" && -f "$task_path" && ! -L "$task_path" ]]; then
         harvest_output=""
         if harvest_output="$(node "$HARVESTER" --thread "$thread" --dispatch "$dispatch" \
-            --reply-path "$reply_path" --max-bytes "$MAX_BYTES" 2>&1)"; then
+            --reply-path "$reply_path" --max-bytes "$MAX_BYTES" "${ROLLOUT_ARGS[@]}" 2>&1)"; then
+            printf '%s\n' "$harvest_output" \
+                | grep -E '^(ROLLOUT-PATH|ROLLOUT-PAGE):' || true
             if printf '%s\n' "$harvest_output" \
                 | grep -Eq $'^REPLY_SUPERSEDED_WARNING\t'; then
                 reply_superseded=1
@@ -275,7 +359,7 @@ for entry in "${ENTRIES[@]}"; do
         if command -v node >/dev/null 2>&1 && [[ -f "$HARVESTER" && "$thread" != "filedrop" \
             && -f "$task_path" && ! -L "$task_path" ]]; then
             if harvest_line="$(node "$HARVESTER" --thread "$thread" --dispatch "$dispatch" \
-                --max-bytes "$MAX_BYTES")"; then
+                --max-bytes "$MAX_BYTES" "${ROLLOUT_ARGS[@]}")"; then
                 if [[ "$harvest_line" != *$'\n'* ]]; then
                     IFS=$'\t' read -r source_kind reason source_bytes returned_bytes duplicate_count boundary_mode body_base64 <<<"$harvest_line"
                 fi

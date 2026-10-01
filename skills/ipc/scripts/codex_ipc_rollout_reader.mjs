@@ -14,6 +14,49 @@ const ROLLOUT_BASENAME_RE = new RegExp(
   "i",
 );
 
+export const ROLLOUT_PATH_GUIDANCE =
+  "ROLLOUT-PATH: Supply the inspector's database-designated page with --rollout-path <path>.";
+export const ROLLOUT_PAGE_DIAGNOSTIC_CODES = Object.freeze([
+  "rollout-page-superseded",
+  "dispatch-history-abandoned",
+  "page-supersession-unproven",
+]);
+
+function rolloutPathError(message) {
+  const error = new Error(message);
+  error.code = "IPC_ROLLOUT_PATH_INVALID";
+  return error;
+}
+
+// MSYS may rewrite a namespaced Windows path such as \\?\C:\x into C:\?\C:\x before Node
+// receives argv. Recognize only the exact native and observed-mangled drive/UNC grammars. This is
+// a CLI-boundary spelling repair: locator ownership, canonical-path, physical-identity, and cursor
+// checks still run against the resulting path and are not relaxed.
+export function normalizeRolloutCliPath(value, platform = process.platform) {
+  if (value === null || value === undefined) return value;
+  if (typeof value !== "string" || value.length === 0 || /[\u0000\r\n\t]/u.test(value)) {
+    throw rolloutPathError("--rollout-path must be a nonempty path without control characters");
+  }
+  if (platform !== "win32") return value;
+
+  let match = value.match(/^(?:\\\\\?\\UNC\\|\/\/\?\/UNC\/)(.+)$/iu);
+  if (match) return value.startsWith("//") ? `//${match[1]}` : `\\\\${match[1]}`;
+
+  match = value.match(/^(?:\\\\\?\\|\/\/\?\/)([A-Za-z]:[\\/].*)$/u);
+  if (match) return match[1];
+
+  match = value.match(/^[A-Za-z]:[\\/]\?[\\/]UNC[\\/](.+)$/iu);
+  if (match) return value.includes("/") ? `//${match[1]}` : `\\\\${match[1]}`;
+
+  match = value.match(/^[A-Za-z]:[\\/]\?[\\/]([A-Za-z]:[\\/].*)$/u);
+  if (match) return match[1];
+
+  if (/^(?:\\\\\?\\|\/\/\?\/|[A-Za-z]:[\\/]\?[\\/])/u.test(value)) {
+    throw rolloutPathError("unsupported Windows namespaced rollout path");
+  }
+  return value;
+}
+
 const EVENT_TYPES = new Set([
   "agent_message",
   "agent_reasoning",
@@ -186,6 +229,26 @@ function unknownTypelessEnvelope(envelopeType, rawPayload) {
 
 function diagnostic(code, details = {}) {
   return { code, ...details };
+}
+
+export function rolloutPageGuidance(location, rolloutPath) {
+  if (rolloutPath || location?.status === "found") return [];
+  return [
+    diagnostic("rollout-page-required", {
+      reason: location?.reason || "unavailable",
+      option: "--rollout-path",
+    }),
+  ];
+}
+
+export function rolloutDiagnosticLines(items = []) {
+  const codes = new Set(items.map((item) => item?.code).filter(Boolean));
+  const lines = [];
+  if (codes.has("rollout-page-required")) lines.push(ROLLOUT_PATH_GUIDANCE);
+  for (const code of ROLLOUT_PAGE_DIAGNOSTIC_CODES) {
+    if (codes.has(code)) lines.push(`ROLLOUT-PAGE: ${code}`);
+  }
+  return lines;
 }
 
 function textFromAllowedFields(payload) {
@@ -2257,6 +2320,7 @@ function computeOccurrence(snapshot, bucket, marker) {
 
   const base = {
     markerLine: marker.line,
+    markerByteOffset: marker.byteOffset,
     startLine: bucket.startLine,
     terminalLine: snapshot.terminalLine,
     turnId: snapshot.turnId,
@@ -2504,7 +2568,7 @@ function projectLatestOccurrence(occurrences) {
   const latest = [...occurrences]
     .sort((left, right) => left.markerLine - right.markerLine)
     .at(-1);
-  return {
+  const projected = {
     status: latest.waitStatus,
     harvestStatus: latest.harvestStatus,
     reason: latest.harvestReason,
@@ -2514,6 +2578,13 @@ function projectLatestOccurrence(occurrences) {
     terminalLine: latest.terminalLine,
     turnId: latest.turnId,
   };
+  // Internal page-cutoff evidence. Keep it non-enumerable so the frozen public projection remains
+  // byte-compatible for JSON consumers and exact-object tests.
+  Object.defineProperty(projected, "markerByteOffset", {
+    value: latest.markerByteOffset,
+    enumerable: false,
+  });
+  return projected;
 }
 
 function projectDispatchFreshness(occurrences, parserDiagnostics) {
@@ -2759,6 +2830,7 @@ function readFirstRecord(filePath, maxRecordBytes = DEFAULT_MAX_RECORD_BYTES) {
     const chunks = [];
     let bytes = 0;
     let position = 0;
+    let terminated = false;
     const chunk = Buffer.allocUnsafe(4096);
     while (bytes <= maxRecordBytes) {
       const bytesRead = fs.readSync(descriptor, chunk, 0, chunk.length, position);
@@ -2773,6 +2845,7 @@ function readFirstRecord(filePath, maxRecordBytes = DEFAULT_MAX_RECORD_BYTES) {
       }
       chunks.push(Buffer.from(current.subarray(0, newline)));
       bytes += newline;
+      terminated = true;
       break;
     }
     if (bytes > maxRecordBytes) {
@@ -2784,7 +2857,7 @@ function readFirstRecord(filePath, maxRecordBytes = DEFAULT_MAX_RECORD_BYTES) {
       first = first.subarray(3);
     }
     const text = new TextDecoder("utf-8", { fatal: true }).decode(first);
-    return { ok: true, value: JSON.parse(text) };
+    return { ok: true, value: JSON.parse(text), terminated };
   } catch (error) {
     return { ok: false, reason: "unreadable", error };
   } finally {
@@ -2826,6 +2899,7 @@ function validateCandidate(filePath, threadId) {
     const sessionId =
       typeof payload?.session_id === "string" ? normalizedUuid(payload.session_id) : null;
     const historyBaseThreadId = normalizedUuid(payload?.history_base?.thread_id);
+    const historyBaseEndByteOffset = payload?.history_base?.end_byte_offset;
     const paginationValid =
       filename?.paginated !== true ||
       (sessionId === threadId &&
@@ -2847,6 +2921,8 @@ function validateCandidate(filePath, threadId) {
         sessionId,
         historyMode: payload?.history_mode || null,
         historyBaseThreadId,
+        historyBaseEndByteOffset,
+        firstRecordTerminated: first.terminated === true,
       };
     }
     const identity = fileIdentity(filePath, stat, exactStat);
@@ -2860,6 +2936,9 @@ function validateCandidate(filePath, threadId) {
       ownerId,
       pageId: filename.pageId,
       paginated: filename.paginated,
+      historyBaseThreadId,
+      historyBaseEndByteOffset,
+      firstRecordTerminated: first.terminated === true,
     };
   } catch (error) {
     return { ok: false, reason: "unreadable", path: filePath, message: error.message };
@@ -2891,7 +2970,11 @@ function findUuidCandidates(root, threadId, options = {}) {
         return { matches, diagnostics, deadlineExceeded: true };
       }
       const candidate = path.join(directory, entry.name);
-      if (entry.isDirectory() && !entry.isSymbolicLink()) {
+      if (
+        entry.isDirectory() &&
+        !entry.isSymbolicLink() &&
+        options.recursive !== false
+      ) {
         stack.push(candidate);
       } else if (entry.isFile() || entry.isSymbolicLink()) {
         const filename = parseRolloutBasename(entry.name);
@@ -3049,6 +3132,159 @@ export function locateRollout(options) {
     aliasCount: valid.length,
     diagnostics,
   };
+}
+
+function pathIsWithin(filePath, rootPath) {
+  const relative = path.relative(canonicalPath(rootPath), canonicalPath(filePath));
+  return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative));
+}
+
+function cutoffIsRecordBoundary(filePath, cutoff) {
+  if (cutoff === 0) return true;
+  let descriptor;
+  try {
+    descriptor = fs.openSync(filePath, "r");
+    const byte = Buffer.allocUnsafe(1);
+    return fs.readSync(descriptor, byte, 0, 1, cutoff - 1) === 1 && byte[0] === 0x0a;
+  } catch {
+    return false;
+  } finally {
+    if (descriptor !== undefined) fs.closeSync(descriptor);
+  }
+}
+
+function pageAssessment(status, code = null, details = {}) {
+  return {
+    status,
+    diagnostics: code ? [diagnostic(code, details)] : [],
+  };
+}
+
+// A page successor is a veto, never an implicit source switch. SQLite designates the current page;
+// this SQLite-free check can only prove that the bound page lost authority (or that lineage is too
+// incomplete to certify). Records and cursors are therefore never carried onto another file.
+export function assessRolloutPageSupersession(options = {}) {
+  const threadId = String(options.threadId || "").toLowerCase();
+  const rolloutPath = options.rolloutPath;
+  const now = options.now || Date.now;
+  const deadlineAt = options.deadlineAt ?? Number.POSITIVE_INFINITY;
+  const unproven = (reason, details = {}) => pageAssessment(
+    "unproven",
+    "page-supersession-unproven",
+    { reason, ...details },
+  );
+
+  if (!UUID_RE.test(threadId) || typeof rolloutPath !== "string" || rolloutPath.length === 0) {
+    return unproven("bound-page-missing");
+  }
+  if (now() >= deadlineAt) return unproven("deadline-exceeded");
+
+  const bound = validateCandidate(rolloutPath, threadId);
+  if (!bound.ok || bound.firstRecordTerminated !== true) {
+    return unproven("bound-page-invalid");
+  }
+  if (options.expectedIdentityKey && bound.identityKey !== options.expectedIdentityKey) {
+    return unproven("bound-page-identity-changed");
+  }
+  if (Number.isSafeInteger(options.expectedSize) && bound.size !== options.expectedSize) {
+    return unproven("bound-page-size-changed");
+  }
+  const boundPageId = bound.pageId || bound.ownerId;
+  if (!UUID_RE.test(boundPageId || "")) return unproven("bound-page-id-invalid");
+
+  const configuredRoot = options.sessionsRoot || path.join(os.homedir(), ".codex", "sessions");
+  const roots = [];
+  const configuredRootContainsBound =
+    typeof configuredRoot === "string" &&
+    configuredRoot.length > 0 &&
+    fs.existsSync(configuredRoot) &&
+    pathIsWithin(rolloutPath, configuredRoot);
+  if (configuredRootContainsBound) {
+    roots.push(configuredRoot);
+  }
+  const boundDirectory = path.dirname(rolloutPath);
+  if (roots.length === 0) roots.push(boundDirectory);
+
+  const rootKeys = new Set();
+  const matches = new Set();
+  const scanDiagnostics = [];
+  for (const root of roots) {
+    const key = canonicalPath(root);
+    if (rootKeys.has(key)) continue;
+    rootKeys.add(key);
+    const discovered = findUuidCandidates(root, threadId, {
+      now,
+      deadlineAt,
+      recursive: configuredRootContainsBound,
+    });
+    for (const item of discovered.matches) matches.add(item);
+    scanDiagnostics.push(...discovered.diagnostics);
+    if (discovered.deadlineExceeded) return unproven("deadline-exceeded");
+  }
+  if (scanDiagnostics.length > 0) {
+    return unproven("candidate-set-unresolved", { issueCount: scanDiagnostics.length });
+  }
+
+  const successors = [];
+  const seenIdentities = new Set([bound.identityKey]);
+  for (const candidatePath of [...matches].sort((left, right) => left.localeCompare(right))) {
+    if (now() >= deadlineAt) return unproven("deadline-exceeded");
+    // Discovery includes the bound page itself. It was just revalidated above, so skip its
+    // ordinary spelling (and any canonical alias) before opening candidates. This preserves the
+    // post-read authority check without paying for a redundant fourth open on single-shot waits.
+    if (canonicalPath(candidatePath) === bound.canonicalPath) continue;
+    // Only the paginated filename grammar can carry a direct history_base successor claim.
+    // Legacy siblings may be retained predecessors or unrelated fixtures; they cannot supersede
+    // the bound page, so do not open or reclassify them during this narrow veto.
+    if (parseRolloutBasename(path.basename(candidatePath))?.paginated !== true) continue;
+    const candidate = validateCandidate(candidatePath, threadId);
+    if (!candidate.ok) return unproven("candidate-invalid");
+    if (seenIdentities.has(candidate.identityKey)) continue;
+    seenIdentities.add(candidate.identityKey);
+    if (candidate.firstRecordTerminated !== true) {
+      return unproven("candidate-header-incomplete");
+    }
+    if (candidate.pageId === boundPageId) return unproven("page-self-link");
+    if (candidate.historyBaseThreadId !== boundPageId) continue;
+
+    const cutoff = candidate.historyBaseEndByteOffset;
+    if (
+      !Number.isSafeInteger(cutoff) ||
+      cutoff < 0 ||
+      cutoff > bound.size ||
+      !cutoffIsRecordBoundary(rolloutPath, cutoff)
+    ) {
+      return unproven("history-cutoff-invalid", {
+        successorPageId: candidate.pageId,
+        endByteOffset: Number.isSafeInteger(cutoff) ? cutoff : null,
+      });
+    }
+    successors.push({ candidate, cutoff });
+  }
+
+  if (successors.length === 0) return pageAssessment("current");
+  if (successors.length !== 1) {
+    return unproven("successor-ambiguous", { successorCount: successors.length });
+  }
+
+  const [{ candidate: successor, cutoff }] = successors;
+  const marker = options.dispatchMarkerByteOffset;
+  if (marker !== null && marker !== undefined && !Number.isSafeInteger(marker)) {
+    return unproven("dispatch-marker-offset-invalid");
+  }
+  if (Number.isSafeInteger(marker) && marker >= cutoff) {
+    return pageAssessment("abandoned", "dispatch-history-abandoned", {
+      boundPageId,
+      successorPageId: successor.pageId,
+      dispatchMarkerByteOffset: marker,
+      endByteOffset: cutoff,
+    });
+  }
+  return pageAssessment("superseded", "rollout-page-superseded", {
+    boundPageId,
+    successorPageId: successor.pageId,
+    endByteOffset: cutoff,
+  });
 }
 
 // A4 marker-proof consumer: a NAMED consumer over the ONE shared createTurnBoundaryAccumulator (no

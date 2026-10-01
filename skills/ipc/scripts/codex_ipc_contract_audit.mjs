@@ -25,10 +25,15 @@ const REQUIRED_FILES = [
   "scripts/codex_ipc_autoload.ps1",
   "scripts/codex_ipc_host_policy.ps1",
   "scripts/codex_ipc_revalidate.mjs",
+  "scripts/codex_ipc_reply_harvest.mjs",
+  "scripts/codex_ipc_rollout_observe.mjs",
+  "scripts/codex_ipc_rollout_reader.mjs",
   "scripts/codex_ipc_session_inspect.mjs",
   "scripts/codex_ipc_snapshot.mjs",
   "scripts/codex_ipc_thread_locator.mjs",
+  "scripts/codex_ipc_wait.mjs",
   "scripts/codex_ipc_write_proof.mjs",
+  "references/architecture.md",
   "references/handoff-template.md",
 ];
 
@@ -383,7 +388,7 @@ function main() {
             /classification\.kind\s*===\s*"ambiguous"/,
             /classification\.kind\s*===\s*"non-root"/,
             /typeof\s+thread\.model\s*!==\s*"string"\s*\|\|\s*thread\.model\.trim\(\)\s*===\s*""/,
-            /process\.stdout\.write\(\[state, parent, legacy\]\.join\("\\t"\)\)/,
+            /process\.stdout\.write\(\[state, parent, legacy, rolloutPath\]\.join\("\\t"\)\)/,
           ].every((anchor) => anchor.test(inspectedTargetClassifier)) &&
           contains("scripts/handoff_to_codex.sh", "INSPECT_FIELDS=$(classify_inspected_target)") &&
           contains(
@@ -841,6 +846,61 @@ function main() {
           ),
       },
     ], "Static instruction checks only: they prove the required guidance bytes are present, not that an agent obeyed them. Hermetic wrapper and payload-parity suites prove default-off and explicit opt-in rendering without live IPC."),
+    check("REQ-023", "DB-designated rollout pages propagate end to end and direct successor pages fail closed without auto-hopping.", [
+      {
+        label: "wrapper admits only a parsed DB-designated page and passes it to observation and the waiter",
+        file: "scripts/handoff_to_codex.sh",
+        ok:
+          contains("scripts/handoff_to_codex.sh", 'selection?.authority === "db.rollout_path"') &&
+          contains("scripts/handoff_to_codex.sh", "value?.rollout?.primary?.parsedOk === true") &&
+          contains("scripts/handoff_to_codex.sh", 'observe_args+=(--rollout-path "$INSPECT_ROLLOUT_PATH")') &&
+          contains("scripts/handoff_to_codex.sh", '--rollout-path %q --accept-rollout-fallback'),
+      },
+      {
+        label: "reader owns the SQLite-free direct-successor veto and its fixed diagnostic codes",
+        file: "scripts/codex_ipc_rollout_reader.mjs",
+        ok:
+          contains("scripts/codex_ipc_rollout_reader.mjs", "export function assessRolloutPageSupersession") &&
+          contains("scripts/codex_ipc_rollout_reader.mjs", '"dispatch-history-abandoned"') &&
+          contains("scripts/codex_ipc_rollout_reader.mjs", '"rollout-page-superseded"') &&
+          contains("scripts/codex_ipc_rollout_reader.mjs", '"page-supersession-unproven"') &&
+          matchCount("scripts/codex_ipc_rollout_reader.mjs", /node:sqlite/g) === 0,
+      },
+      {
+        label: "observer, waiter, and harvester share the same SQLite-free page assessor",
+        file: "scripts/codex_ipc_rollout_observe.mjs",
+        ok:
+          contains("scripts/codex_ipc_rollout_observe.mjs", "assessRolloutPageSupersession") &&
+          contains("scripts/codex_ipc_wait.mjs", "assessRolloutPageSupersession") &&
+          contains("scripts/codex_ipc_reply_harvest.mjs", "assessRolloutPageSupersession") &&
+          matchCount("scripts/codex_ipc_rollout_observe.mjs", /node:sqlite/g) === 0 &&
+          matchCount("scripts/codex_ipc_wait.mjs", /node:sqlite/g) === 0 &&
+          matchCount("scripts/codex_ipc_reply_harvest.mjs", /node:sqlite/g) === 0,
+      },
+      {
+        label: "reply viewer exposes explicit or single-inspection page selection only for UUID scope",
+        file: "scripts/codex_ipc_replies.sh",
+        ok:
+          contains("scripts/codex_ipc_replies.sh", "--rollout-path and --derive-rollout-path are mutually exclusive") &&
+          contains("scripts/codex_ipc_replies.sh", "rollout page selection requires -c with a Codex conversation UUID") &&
+          contains("scripts/codex_ipc_replies.sh", 'node "$INSPECTOR" --thread "$CONV" --tail-events 1 --summary') &&
+          contains("scripts/codex_ipc_replies.sh", "const db = value?.dbThread;") &&
+          contains("scripts/codex_ipc_replies.sh", "const thread = db?.thread;") &&
+          contains("scripts/codex_ipc_replies.sh", "db?.exists === true") &&
+          contains("scripts/codex_ipc_replies.sh", "db?.readOnlyOpenOk === true") &&
+          contains("scripts/codex_ipc_replies.sh", "could not obtain a trusted database-designated page"),
+      },
+      {
+        label: "operator and architecture guidance preserve page binding, fixed diagnostics, and no auto-hop",
+        file: "SKILL.md",
+        ok:
+          contains("SKILL.md", "never auto-hops or stitches records onto a successor") &&
+          contains("SKILL.md", "`ROLLOUT-PAGE:` line") &&
+          contains("references/architecture.md", /never auto-hops or stitches\s+records/) &&
+          contains("references/architecture.md", "`--derive-rollout-path`") &&
+          contains("references/architecture.md", "`ROLLOUT-PAGE:` guidance"),
+      },
+    ], "Static source evidence only. Hermetic reader, observer, waiter, harvester, viewer, and wrapper suites exercise page propagation and supersession refusal without SQLite access, Desktop activation, or live IPC."),
   ];
 
   const ok = Object.values(files).every((item) => item.ok) &&

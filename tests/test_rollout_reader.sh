@@ -32,12 +32,14 @@ const proofApi = await import(
 );
 const {
   DEFAULT_MAX_RECORD_BYTES,
+  assessRolloutPageSupersession,
   correlateDispatch,
   createTurnBoundaryAccumulator,
   inspectRolloutMarker,
   inspectRolloutNoGrowth,
   isCompleteReaderCursor,
   locateRollout,
+  normalizeRolloutCliPath,
   normalizeRolloutRecord,
   parseRolloutBasename,
   pollRolloutForMarker,
@@ -112,10 +114,193 @@ test("module exports bounded built-in-only reader API", () => {
   assert.equal(typeof isCompleteReaderCursor, "function");
   assert.equal(typeof inspectRolloutNoGrowth, "function");
   assert.equal(typeof locateRollout, "function");
+  assert.equal(typeof normalizeRolloutCliPath, "function");
+  assert.equal(typeof assessRolloutPageSupersession, "function");
   assert.equal(typeof parseRolloutBasename, "function");
   assert.equal(typeof correlateDispatch, "function");
   assert.equal(typeof recordThreadIdentity, "function");
   assert.ok(DEFAULT_MAX_RECORD_BYTES > 20 * 1024 * 1024);
+});
+
+test("CLI rollout-path normalization recognizes native and Git-Bash-mangled Windows namespaces", () => {
+  assert.equal(
+    normalizeRolloutCliPath(String.raw`\\?\C:\Users\fixture\page.jsonl`, "win32"),
+    String.raw`C:\Users\fixture\page.jsonl`,
+  );
+  assert.equal(
+    normalizeRolloutCliPath(String.raw`C:\?\C:\Users\fixture\page.jsonl`, "win32"),
+    String.raw`C:\Users\fixture\page.jsonl`,
+  );
+  assert.equal(
+    normalizeRolloutCliPath(String.raw`C:/?/C:/Users/fixture/page.jsonl`, "win32"),
+    "C:/Users/fixture/page.jsonl",
+  );
+  assert.equal(
+    normalizeRolloutCliPath(String.raw`\\?\UNC\server\share\page.jsonl`, "win32"),
+    String.raw`\\server\share\page.jsonl`,
+  );
+  assert.equal(
+    normalizeRolloutCliPath(String.raw`\\?\C:\Users\fixture\page.jsonl`, "linux"),
+    String.raw`\\?\C:\Users\fixture\page.jsonl`,
+  );
+  assert.throws(
+    () => normalizeRolloutCliPath(String.raw`\\?\relative\page.jsonl`, "win32"),
+    (error) => error?.code === "IPC_ROLLOUT_PATH_INVALID",
+  );
+});
+
+test("page successor assessment distinguishes preserved, abandoned, and unproven history", () => {
+  const threadId = "11111111-1111-4111-8111-111111111111";
+  const predecessorPage = "22222222-2222-4222-8222-222222222222";
+  const successorPage = "33333333-3333-4333-8333-333333333333";
+  const ancestorPage = "00000000-0000-4000-8000-00000000c0de";
+  const turnId = "00000000-0000-4000-8000-000000000000";
+  const dispatchId = "7100000000-7-abcdef0123456789";
+  const root = path.join(tmp, "page-successor");
+  const predecessorDir = path.join(root, "2026", "09", "28");
+  const successorDir = path.join(root, "2026", "09", "30");
+  fs.mkdirSync(predecessorDir, { recursive: true });
+  fs.mkdirSync(successorDir, { recursive: true });
+  const predecessorPath = path.join(
+    predecessorDir,
+    `rollout-predecessor-${threadId}_${predecessorPage}.jsonl`,
+  );
+  const successorPath = path.join(
+    successorDir,
+    `rollout-successor-${threadId}_${successorPage}.jsonl`,
+  );
+  const predecessorRecords = [
+    {
+      type: "session_meta",
+      payload: {
+        id: threadId,
+        session_id: threadId,
+        history_mode: "paginated",
+        history_base: { thread_id: ancestorPage, end_byte_offset: 0 },
+      },
+    },
+    { type: "event_msg", payload: { type: "task_started", turn_id: turnId } },
+    {
+      type: "event_msg",
+      payload: {
+        type: "user_message",
+        turn_id: turnId,
+        message: `read C:/handoff/${dispatchId}.task.md and proceed`,
+      },
+    },
+    {
+      type: "event_msg",
+      payload: { type: "agent_message", turn_id: turnId, phase: "final_answer", message: "SAFE" },
+    },
+    {
+      type: "event_msg",
+      payload: { type: "task_complete", turn_id: turnId, last_agent_message: "SAFE" },
+    },
+  ];
+  const predecessorLines = predecessorRecords.map((record) => JSON.stringify(record));
+  const markerOffset = predecessorLines
+    .slice(0, 2)
+    .reduce((size, line) => size + Buffer.byteLength(line) + 1, 0);
+  const markerEndOffset = markerOffset + Buffer.byteLength(predecessorLines[2]) + 1;
+  fs.writeFileSync(predecessorPath, `${predecessorLines.join("\n")}\n`);
+
+  const located = locateRollout({ threadId, rolloutPath: predecessorPath });
+  assert.equal(located.status, "found");
+  const base = {
+    threadId,
+    rolloutPath: predecessorPath,
+    sessionsRoot: root,
+    expectedIdentityKey: located.candidates[0].identityKey,
+    dispatchMarkerByteOffset: markerOffset,
+  };
+  assert.equal(assessRolloutPageSupersession(base).status, "current");
+
+  const writeSuccessor = (endByteOffset, newline = true) => {
+    const first = JSON.stringify({
+      type: "session_meta",
+      payload: {
+        id: threadId,
+        session_id: threadId,
+        history_mode: "paginated",
+        history_base: { thread_id: predecessorPage, end_byte_offset: endByteOffset },
+      },
+    });
+    fs.writeFileSync(successorPath, `${first}${newline ? "\n" : ""}`);
+  };
+
+  writeSuccessor(markerEndOffset);
+  const superseded = assessRolloutPageSupersession(base);
+  assert.equal(superseded.status, "superseded");
+  assert.ok(superseded.diagnostics.some((item) => item.code === "rollout-page-superseded"));
+
+  writeSuccessor(markerOffset);
+  const abandoned = assessRolloutPageSupersession(base);
+  assert.equal(abandoned.status, "abandoned");
+  assert.ok(abandoned.diagnostics.some((item) => item.code === "dispatch-history-abandoned"));
+
+  writeSuccessor(markerOffset + 1);
+  const midRecord = assessRolloutPageSupersession(base);
+  assert.equal(midRecord.status, "unproven");
+  assert.ok(midRecord.diagnostics.some((item) => item.code === "page-supersession-unproven"));
+
+  const predecessorSize = fs.statSync(predecessorPath).size;
+  for (const [label, cutoff] of [
+    ["negative", -1],
+    ["fractional", markerOffset + 0.5],
+    ["unsafe", Number.MAX_SAFE_INTEGER + 1],
+    ["past-eof", predecessorSize + 1],
+  ]) {
+    writeSuccessor(cutoff);
+    const invalid = assessRolloutPageSupersession(base);
+    assert.equal(invalid.status, "unproven", label);
+    assert.equal(invalid.diagnostics[0]?.reason, "history-cutoff-invalid", label);
+  }
+
+  writeSuccessor(0);
+  const zeroCutoff = assessRolloutPageSupersession(base);
+  assert.equal(zeroCutoff.status, "abandoned");
+  assert.ok(zeroCutoff.diagnostics.some((item) => item.code === "dispatch-history-abandoned"));
+
+  writeSuccessor(predecessorSize);
+  const eofCutoff = assessRolloutPageSupersession(base);
+  assert.equal(eofCutoff.status, "superseded");
+  assert.ok(eofCutoff.diagnostics.some((item) => item.code === "rollout-page-superseded"));
+
+  fs.writeFileSync(successorPath, `${JSON.stringify({
+    type: "session_meta",
+    payload: {
+      id: threadId,
+      session_id: threadId,
+      history_mode: "paginated",
+      history_base: { thread_id: predecessorPage },
+    },
+  })}\n`);
+  const missingCutoff = assessRolloutPageSupersession(base);
+  assert.equal(missingCutoff.status, "unproven");
+  assert.equal(missingCutoff.diagnostics[0]?.reason, "history-cutoff-invalid");
+
+  writeSuccessor(markerEndOffset, false);
+  const incomplete = assessRolloutPageSupersession(base);
+  assert.equal(incomplete.status, "unproven");
+  assert.ok(incomplete.diagnostics.some((item) => item.code === "page-supersession-unproven"));
+
+  writeSuccessor(markerEndOffset);
+  const secondSuccessorPath = path.join(
+    successorDir,
+    `rollout-successor-${threadId}_${ancestorPage}.jsonl`,
+  );
+  fs.writeFileSync(secondSuccessorPath, `${JSON.stringify({
+    type: "session_meta",
+    payload: {
+      id: threadId,
+      session_id: threadId,
+      history_mode: "paginated",
+      history_base: { thread_id: predecessorPage, end_byte_offset: markerEndOffset },
+    },
+  })}\n`);
+  const ambiguous = assessRolloutPageSupersession(base);
+  assert.equal(ambiguous.status, "unproven");
+  assert.equal(ambiguous.diagnostics[0]?.reason, "successor-ambiguous");
 });
 
 test("record ownership ignores nested business data outside event item carriers", () => {

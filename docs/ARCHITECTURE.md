@@ -178,9 +178,20 @@ understood as a candidate for that root (including when a trailing second UUID m
 parser attribute the name to another root), or an unreadable subtree. A recognized paginated
 basename is exempt when only its page ID equals the target and its root is another session. Other
 unresolved diagnostics are never discarded to select the valid file. Polling remains bound to that
-page, and cross-page N-to-N+1 rollover is not yet certified or supported. The standalone observer,
-waiter, and harvester do not query the DB for that path; callers should pass
-their exact `--rollout-path` when known, or accept root-discovery ambiguity. Between full reads, a
+page and never auto-hops or stitches records. A SQLite-free veto recursively scans the configured
+sessions root for one direct paginated successor whose complete first record names the bound page
+ID in `history_base.thread_id` and gives a safe record-boundary `end_byte_offset` no larger than the
+bound page. A marker at or beyond that cutoff is `dispatch-history-abandoned`; an earlier marker is
+`rollout-page-superseded`; malformed, incomplete, or multiple claims are
+`page-supersession-unproven`. Each state vetoes positive pickup, completion, and rollout-fallback
+results while leaving the reader on the original page. The standalone observer, waiter, and
+harvester do not query the DB for that path; callers should pass their exact `--rollout-path` when
+known, or accept root-discovery ambiguity. The maintained wrapper propagates its one trusted
+inspector page to observation and the printed waiter. The reply viewer accepts an
+explicit page for a UUID-scoped `-c` view or can derive it once with `--derive-rollout-path`;
+session-wide and filedrop views cannot select a page. Missing authority prints fixed
+`ROLLOUT-PATH:` guidance, page vetoes print fixed `ROLLOUT-PAGE:` guidance, and a primary reply
+stays visible with a stale-body caution while fallback remains unavailable. Between full reads, a
 complete cursor may enable a metadata-only no-growth check of canonical path, physical
 identity, and size. That check is pending-only and cannot prove pickup or completion. Growth and
 change run the full certifying reader, as do final or budget-edge attempts that begin before the

@@ -91,6 +91,26 @@ function writeRollout(directory, records, id = thread, prefix = "rollout") {
   return target;
 }
 
+function writeSuccessor(directory, predecessorRecords, cutoff, pageId) {
+  const target = path.join(directory, "successor", `rollout-page-${thread}_${pageId}.jsonl`);
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  fs.writeFileSync(target, `${JSON.stringify({
+    type: "session_meta",
+    payload: {
+      id: thread,
+      session_id: thread,
+      history_mode: "paginated",
+      history_base: { thread_id: thread, end_byte_offset: cutoff },
+    },
+  })}\n`);
+  const lines = predecessorRecords.map((item) => JSON.stringify(item));
+  const markerOffset = lines
+    .slice(0, 2)
+    .reduce((size, line) => size + Buffer.byteLength(line) + 1, 0);
+  const markerEndOffset = markerOffset + Buffer.byteLength(lines[2]) + 1;
+  return { target, markerOffset, markerEndOffset };
+}
+
 function writeReply(target, body = "verified reply") {
   fs.mkdirSync(path.dirname(target), { recursive: true });
   fs.writeFileSync(target, body);
@@ -167,6 +187,49 @@ await test("done requires own task_complete plus a regular readable reply", asyn
   const reply = writeReply(path.join(root, `${dispatch}.reply.md`));
   const result = await waitForCompletion(directOptions(root, rollout, reply));
   assert.equal(result.token, "done");
+});
+
+await test("a successor cutoff at the dispatch marker vetoes stale-page completion", async () => {
+  const root = caseDir("page-abandoned");
+  const records = ownCompletedRecords();
+  const rollout = writeRollout(path.join(root, "predecessor"), records);
+  const reply = writeReply(path.join(root, `${dispatch}.reply.md`));
+  const offsets = writeSuccessor(
+    root,
+    records,
+    records.slice(0, 2).reduce(
+      (size, item) => size + Buffer.byteLength(JSON.stringify(item)) + 1,
+      0,
+    ),
+    "33333333-3333-4333-8333-333333333333",
+  );
+  assert.equal(offsets.markerOffset, records.slice(0, 2).reduce(
+    (size, item) => size + Buffer.byteLength(JSON.stringify(item)) + 1,
+    0,
+  ));
+  const result = await waitForCompletion(directOptions(root, rollout, reply, { sessionsRoot: root }));
+  assert.equal(result.token, "unavailable");
+  assert.ok(result.diagnostics.some((item) => item.code === "dispatch-history-abandoned"));
+});
+
+await test("a successor preserving the dispatch still vetoes stale-page completion", async () => {
+  const root = caseDir("page-superseded");
+  const records = ownCompletedRecords();
+  const rollout = writeRollout(path.join(root, "predecessor"), records);
+  const reply = writeReply(path.join(root, `${dispatch}.reply.md`));
+  const lines = records.map((item) => JSON.stringify(item));
+  const markerEndOffset = lines
+    .slice(0, 3)
+    .reduce((size, line) => size + Buffer.byteLength(line) + 1, 0);
+  writeSuccessor(
+    root,
+    records,
+    markerEndOffset,
+    "44444444-4444-4444-8444-444444444444",
+  );
+  const result = await waitForCompletion(directOptions(root, rollout, reply, { sessionsRoot: root }));
+  assert.equal(result.token, "unavailable");
+  assert.ok(result.diagnostics.some((item) => item.code === "rollout-page-superseded"));
 });
 
 await test("a reused dispatch id makes an older primary reply unavailable", async () => {
@@ -656,6 +719,88 @@ await test("wait skips unchanged full reads and revalidates at the budget edge",
   assert.equal(fullReads, 2, "initial and budget-edge certification reads only");
 });
 
+await test("a successor appearing during no-growth wait vetoes the bound page", async () => {
+  const root = caseDir("successor-during-no-growth");
+  const records = ownOpenRecords();
+  const rollout = writeRollout(path.join(root, "predecessor"), records);
+  const cutoff = fs.statSync(rollout).size;
+  let clock = 0;
+  let sleepCalls = 0;
+  let fullReads = 0;
+  const result = await waitForCompletion(
+    directOptions(root, rollout, path.join(root, "missing.md"), {
+      sessionsRoot: root,
+      budgetMs: 25,
+      intervalMs: 10,
+    }),
+    {
+      now: () => clock,
+      sleep: async (ms) => {
+        clock += ms;
+        sleepCalls += 1;
+        if (sleepCalls === 1) {
+          writeSuccessor(root, records, cutoff, "33333333-3333-4333-8333-333333333333");
+        }
+      },
+      readRolloutFile: (...args) => {
+        fullReads += 1;
+        return readRolloutFile(...args);
+      },
+    },
+  );
+  assert.equal(result.token, "unavailable");
+  assert.equal(sleepCalls, 1);
+  assert.equal(fullReads, 1);
+  assert.ok(result.diagnostics.some((item) => item.code === "rollout-page-superseded"));
+});
+
+await test("a successor appearing at the forced final read vetoes rollout fallback", async () => {
+  const root = caseDir("successor-at-final-read");
+  const records = ownOpenRecords();
+  const completion = [
+    event("agent_message", ownTurn, {
+      phase: "final_answer",
+      message: "must not escape stale page",
+    }),
+    event("task_complete", ownTurn, { last_agent_message: "must not escape stale page" }),
+  ];
+  const rollout = writeRollout(path.join(root, "predecessor"), records);
+  let clock = 0;
+  let fullReads = 0;
+  const result = await waitForCompletion(
+    directOptions(root, rollout, path.join(root, "missing.md"), {
+      sessionsRoot: root,
+      acceptRolloutFallback: true,
+      budgetMs: 25,
+      intervalMs: 10,
+    }),
+    {
+      now: () => clock,
+      sleep: async (ms) => { clock += ms; },
+      readRolloutFile: (...args) => {
+        fullReads += 1;
+        if (fullReads === 2) {
+          fs.appendFileSync(
+            rollout,
+            `${completion.map((item) => JSON.stringify(item)).join("\n")}\n`,
+          );
+          writeSuccessor(
+            root,
+            [...records, ...completion],
+            fs.statSync(rollout).size,
+            "33333333-3333-4333-8333-333333333333",
+          );
+        }
+        return readRolloutFile(...args);
+      },
+    },
+  );
+  assert.equal(result.token, "unavailable");
+  assert.equal(result.replySource, undefined);
+  assert.equal(fullReads, 2);
+  assert.ok(result.diagnostics.some((item) => item.code === "rollout-page-superseded"));
+});
+
 await test("sleep overshoot cannot combine stale rollout certification with a newly appeared reply", async () => {
   const root = caseDir("sleep-overshoot-stale-certification");
   const rollout = writeRollout(root, ownOpenRecords());
@@ -754,7 +899,7 @@ await test("wait fails closed when an unchanged path is physically replaced", as
   assert.equal(fullReads, 2);
 });
 
-await test("wait detects same-size tampering during forced edge revalidation", async () => {
+await test("page authority detects same-size tampering before forced edge revalidation", async () => {
   const root = caseDir("same-size-fast-path");
   const records = ownOpenRecords();
   const rollout = writeRollout(root, records);
@@ -785,8 +930,8 @@ await test("wait detects same-size tampering during forced edge revalidation", a
     },
   );
   assert.equal(result.token, "unavailable");
-  assert.equal(sleepCalls, 2, "one same-size observation must stay pending before the edge");
-  assert.equal(fullReads, 2, "the edge must perform a second full certification read");
+  assert.equal(sleepCalls, 1, "the unchanged-page veto must inspect authority on the next poll");
+  assert.equal(fullReads, 1, "page revalidation must fail closed without rereading a replaced owner");
 });
 
 await test("a distinct operator message inside a turn-id'd own turn blocks completion", async () => {
@@ -1088,6 +1233,10 @@ await test("positive-budget CLI exits within its bound without a lingering proce
   const elapsed = Date.now() - started;
   assertToken(result, "unavailable");
   assert.equal(result.error, undefined);
+  assert.match(
+    result.stderr,
+    /ROLLOUT-PATH: Supply the inspector's database-designated page with --rollout-path <path>\./,
+  );
   // correct = cold-start (2-3s loaded) + 25ms budget (~3.5s worst); wrong = lingering until the
   // 15000 spawn kill-switch. 9000 is >=2x the loaded correct path and 40% below the kill floor.
   assert.ok(elapsed < 9000, `bounded process took ${elapsed} ms`);
@@ -1156,10 +1305,10 @@ await test("A6: --status-exit-codes maps every determination; flagless stays all
   assert.equal(badFlag.status, 1);
 });
 
-await test("single-shot wait validates one snapshot: no second locator/full-file read", async () => {
-  // Phase-2 verifier gap (i): prove the single-shot path opens the rollout exactly twice — once for
-  // the locator's first-record identity check and once for the single validated full-file read —
-  // with no re-locate or second full read after lifecycle classification.
+await test("single-shot wait uses one locator read, one full read, and one page-authority read", async () => {
+  // The supersession veto adds one first-record authority revalidation after the existing locator
+  // and full-file reads. It must not re-locate, repeat the full read, or reopen the bound page as a
+  // discovery candidate.
   const root = caseDir("read-count-spy");
   const rollout = writeRollout(root, [...ownOpenRecords(), event("task_complete", ownTurn)]);
   const reply = writeReply(path.join(root, `${dispatch}.reply.md`));
@@ -1179,7 +1328,7 @@ await test("single-shot wait validates one snapshot: no second locator/full-file
     fs.openSync = originalOpen;
   }
   assert.equal(result.token, "done");
-  assert.equal(rolloutOpens, 2);
+  assert.equal(rolloutOpens, 3);
 });
 
 await test("post-locator wait read remains bound to the requested rollout owner", async () => {

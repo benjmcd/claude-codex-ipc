@@ -243,8 +243,9 @@ a `root` or warned `legacy-root-assumed` classification, and a nonempty stored m
 archived, non-root, empty-model, malformed, contradictory, or ambiguous state refuses before host
 policy or pipe contact with `confirmation=not-attempted`; no refusal attempts to repair the
 thread. When a parent is known for a refused non-root target, the wrapper prints its UUID. The
-snapshot records the database-designated rollout page; downstream observation remains separately
-bound until the rollout-page wiring lands.
+snapshot's database-designated rollout page is passed unchanged to pickup observation and to the
+printed waiter command. One inspection supplies both routes, including auto-load retry; neither
+route re-inspects or guesses a page.
 
 The wrapper treats `no-client-found` as authority to consider auto-load only when the parsed client
 result is structurally exact: failed result for this target, the exact router error, and exactly
@@ -374,16 +375,31 @@ candidate for that root (including when a trailing second UUID makes the legacy 
 the name to another root), or an unreadable subtree. The token-collision exception is a recognized
 paginated basename whose page ID merely equals the target while its root is another session. The
 scan never discards unresolved diagnostics to select the valid file. Polling remains bound to the
-selected physical file, so automatic page rollover from N to N+1 is not certified or supported.
+selected physical file. It never auto-hops or stitches records onto a successor. After each
+certifying read, and during no-growth waits, a SQLite-free veto scans the configured sessions root
+for one direct paginated successor whose first complete `session_meta` links
+`history_base.thread_id` to the bound page ID. Its `end_byte_offset` must be a safe integer, fall
+on a newline record boundary, and not exceed the bound page size. One verified successor makes the
+old page non-authoritative: a dispatch marker at or beyond the cutoff is
+`dispatch-history-abandoned`; an earlier marker is `rollout-page-superseded`. Malformed,
+incomplete, or multiple successor claims are `page-supersession-unproven`. All three veto positive
+observer, waiter, and rollout-fallback results without changing the page being read.
 A renamed or copied mismatch yields `unavailable` rather than reading the wrong thread. A
 target-thread ID that Desktop internally remaps to a differently owned physical rollout is likewise
 `unavailable`: no trusted alias authority exists, so rollout observation/fallback never follows the
 remap heuristically. File-primary replies and the preserved file-drop envelope are unaffected. The
 standalone observer, waiter, and harvester accept but do not derive the DB-designated path; pass
-their exact `--rollout-path` when it is known, or accept root-only discovery ambiguity. Cursor
-polling revalidates the canonical path, physical identity, complete first-record anchor, and a
-SHA-256 digest of every byte in the consumed prefix; every certifying locator-to-reader handoff
-also carries the expected owner and physical identity, so an in-place historical rewrite or path
+their exact `--rollout-path` when it is known, or accept root-only discovery ambiguity. Missing
+page authority emits the fixed `ROLLOUT-PATH:` guidance, while page vetoes emit a fixed
+`ROLLOUT-PAGE:` line. Windows namespace spellings are normalized only at the CLI boundary; owner,
+canonical-path, physical-identity, and cursor checks remain unchanged. The read-only reply viewer
+accepts `--rollout-path` for a UUID-scoped `-c` view, or `--derive-rollout-path` to call the trusted
+inspector exactly once; the modes are mutually exclusive and are refused for filedrop or
+session-wide views. A primary reply remains visible under page uncertainty with a stale-body
+caution, but rollout fallback is refused. Cursor polling revalidates the canonical path, physical
+identity, complete first-record anchor, and a SHA-256 digest of every byte in the consumed prefix;
+every certifying locator-to-reader handoff also carries the expected owner and physical identity,
+so an in-place historical rewrite or path
 swap fails closed. Intermediate polls may use a metadata-only no-growth check when a complete
 cursor's canonical path, physical identity, and size are unchanged, but that check can only
 continue pending. Growth and change run the full certifying reader; so do

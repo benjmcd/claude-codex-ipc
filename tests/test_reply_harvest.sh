@@ -54,18 +54,24 @@ const basic = path.join(
 );
 const tmp = process.env.TMPDIR_TEST;
 const dispatch = "1000000000-1-abcdef0123456789";
+const cleanDir = path.join(tmp, "clean-page");
+const uniqueDir = path.join(tmp, "unique-page");
+const mirroredDir = path.join(tmp, "mirrored-page");
+for (const directory of [cleanDir, uniqueDir, mirroredDir]) {
+  fs.mkdirSync(directory, { recursive: true });
+}
 const cleanBasic = path.join(
-  tmp,
+  cleanDir,
   "rollout-clean-11111111-1111-4111-8111-111111111111.jsonl",
 );
 const basicRecords = fs.readFileSync(basic, "utf8").trimEnd().split(/\r?\n/);
 fs.writeFileSync(cleanBasic, `${basicRecords.slice(0, -1).join("\n")}\n`);
 const uniqueBasic = path.join(
-  tmp,
+  uniqueDir,
   "rollout-unique-11111111-1111-4111-8111-111111111111.jsonl",
 );
 const mirroredBasic = path.join(
-  tmp,
+  mirroredDir,
   "rollout-mirrored-11111111-1111-4111-8111-111111111111.jsonl",
 );
 const uniqueTurn = "33333333-3333-4333-8333-333333333333";
@@ -112,6 +118,63 @@ fs.writeFileSync(mirroredBasic, `${[
   },
   { type: "event_msg", payload: { type: "task_complete", turn_id: uniqueTurn, last_agent_message: "mirrored final" } },
 ].map((item) => JSON.stringify(item)).join("\n")}\n`);
+
+function pageFixture(name) {
+  const root = path.join(tmp, name);
+  const predecessorDir = path.join(root, "2026", "09", "28");
+  const successorDir = path.join(root, "2026", "09", "30");
+  const threadId = "55555555-5555-4555-8555-555555555555";
+  const pageId = "66666666-6666-4666-8666-666666666666";
+  const turnId = "77777777-7777-4777-8777-777777777777";
+  const dispatchId = "8800000000-8-abcdef0123456789";
+  fs.mkdirSync(predecessorDir, { recursive: true });
+  fs.mkdirSync(successorDir, { recursive: true });
+  const predecessorPath = path.join(predecessorDir, `rollout-predecessor-${threadId}.jsonl`);
+  const records = [
+    { type: "session_meta", payload: { id: threadId } },
+    { type: "event_msg", payload: { type: "task_started", turn_id: turnId } },
+    {
+      type: "event_msg",
+      payload: {
+        type: "user_message",
+        turn_id: turnId,
+        message: `read C:/handoff/${dispatchId}.task.md and proceed`,
+      },
+    },
+    {
+      type: "event_msg",
+      payload: {
+        type: "agent_message",
+        turn_id: turnId,
+        phase: "final_answer",
+        message: "page-bound final",
+      },
+    },
+    {
+      type: "event_msg",
+      payload: { type: "task_complete", turn_id: turnId, last_agent_message: "page-bound final" },
+    },
+  ];
+  const lines = records.map((item) => JSON.stringify(item));
+  const markerOffset = lines
+    .slice(0, 2)
+    .reduce((size, line) => size + Buffer.byteLength(line) + 1, 0);
+  fs.writeFileSync(predecessorPath, `${lines.join("\n")}\n`);
+  const successorPath = path.join(
+    successorDir,
+    `rollout-successor-${threadId}_${pageId}.jsonl`,
+  );
+  fs.writeFileSync(successorPath, `${JSON.stringify({
+    type: "session_meta",
+    payload: {
+      id: threadId,
+      session_id: threadId,
+      history_mode: "paginated",
+      history_base: { thread_id: threadId, end_byte_offset: markerOffset },
+    },
+  })}\n`);
+  return { root, predecessorPath, threadId, dispatchId };
+}
 
 async function swapAfterLocatorValidation(target, replacementRecords, action) {
   const originalOpen = fs.openSync;
@@ -470,7 +533,7 @@ await test("partial-tail supersession evidence stays pending and diagnostic", ()
   assert.ok(result.diagnostics.some((item) => item.code === "rollout-read-not-at-eof"));
 });
 
-await test("unavailable rollout authority is explicit while primary remains authoritative", () => {
+await test("missing page authority cautions while preserving the primary reply", () => {
   const threadId = "33333333-3333-4333-8333-333333333333";
   const dispatchId = "5060000000-5-abcdef0123456789";
   const reply = path.join(tmp, `${dispatchId}.reply.md`);
@@ -484,8 +547,8 @@ await test("unavailable rollout authority is explicit while primary remains auth
   assert.equal(result.source, "reply-file");
   assert.equal(result.replySuperseded, false);
   assert.equal(result.replySupersessionStatus, "unavailable");
-  assert.equal(result.replySupersessionCaution, false);
-  assert.ok(result.diagnostics.length > 0);
+  assert.equal(result.replySupersessionCaution, true);
+  assert.ok(result.diagnostics.some((item) => item.code === "rollout-page-required"));
 });
 
 await test("non-benign discovery failure cautions while primary remains authoritative", () => {
@@ -604,7 +667,7 @@ await test("a unique completed rollout is selected only when primary is unavaila
     threadId: "11111111-1111-4111-8111-111111111111",
     rolloutPath: uniqueBasic,
   });
-  assert.equal(result.source, "rollout-fallback");
+  assert.equal(result.source, "rollout-fallback", JSON.stringify(result));
   assert.equal(Buffer.from(result.bodyBase64, "base64").toString("utf8"), "latest final");
   assert.equal(result.duplicateCount, 1);
 });
@@ -625,12 +688,14 @@ await test("terminal binding selects one body while unbound conflicts and schema
   const threadId = "11111111-1111-4111-8111-111111111111";
   const turnId = "22222222-2222-4222-8222-222222222222";
   const dispatchId = "8600000000-8-abcdef0123456789";
+  const root = path.join(tmp, "terminal-binding");
+  fs.mkdirSync(root, { recursive: true });
   const prefix = [
     { type: "session_meta", payload: { id: threadId } },
     { type: "event_msg", payload: { type: "task_started", turn_id: turnId } },
     { type: "event_msg", payload: { type: "user_message", turn_id: turnId, message: `read C:/x/${dispatchId}.task.md and proceed` } },
   ];
-  const selectedPath = path.join(tmp, `rollout-body-terminal-selected-${threadId}.jsonl`);
+  const selectedPath = path.join(root, `rollout-body-terminal-selected-${threadId}.jsonl`);
   fs.writeFileSync(selectedPath, `${[
     ...prefix,
     { type: "event_msg", payload: { type: "agent_message", phase: "final_answer", message: "SAFE" } },
@@ -643,7 +708,7 @@ await test("terminal binding selects one body while unbound conflicts and schema
     replyPath: path.join(tmp, "selected-absent.reply.md"),
     rolloutPath: selectedPath,
   });
-  assert.equal(selected.source, "rollout-fallback");
+  assert.equal(selected.source, "rollout-fallback", JSON.stringify(selected));
   assert.equal(selected.reason, null);
   assert.equal(Buffer.from(selected.bodyBase64, "base64").toString("utf8"), "SAFE");
   // Owner ruling D-34 / OD-11 (2026-09-03): a fallback served after the terminal copy chose among
@@ -659,7 +724,7 @@ await test("terminal binding selects one body while unbound conflicts and schema
     "the disclosure must not carry the rejected body",
   );
 
-  const unboundPath = path.join(tmp, `rollout-body-unbound-${threadId}.jsonl`);
+  const unboundPath = path.join(root, `rollout-body-unbound-${threadId}.jsonl`);
   fs.writeFileSync(unboundPath, `${[
     ...prefix,
     { type: "event_msg", payload: { type: "agent_message", phase: "final_answer", message: "SAFE" } },
@@ -676,7 +741,7 @@ await test("terminal binding selects one body while unbound conflicts and schema
   assert.equal(unbound.reason, "unavailable");
   assert.equal(unbound.bodyBase64, "");
 
-  const driftPath = path.join(tmp, `rollout-body-drift-${threadId}.jsonl`);
+  const driftPath = path.join(root, `rollout-body-drift-${threadId}.jsonl`);
   fs.writeFileSync(driftPath, `${[
     ...prefix,
     { type: "event_msg", payload: { type: "future_lifecycle_event", turn_id: turnId } },
@@ -829,8 +894,10 @@ await test("a terminal-selected supersession annotates without replacing the pri
   const threadId = "11111111-1111-4111-8111-111111111111";
   const turnId = "22222222-2222-4222-8222-222222222222";
   const dispatchId = "8700000000-8-abcdef0123456789";
+  const root = path.join(tmp, "supersession-binding");
+  fs.mkdirSync(root, { recursive: true });
   const reply = path.join(tmp, `${dispatchId}.reply.md`);
-  const rollout = path.join(tmp, `rollout-supersession-conflict-${threadId}.jsonl`);
+  const rollout = path.join(root, `rollout-supersession-conflict-${threadId}.jsonl`);
   const supersession = "REPLY-SUPERSEDED\nThis candidate conflicts with another final.";
   fs.writeFileSync(reply, "PRIMARY-UNCHANGED");
   fs.writeFileSync(rollout, `${[
@@ -857,8 +924,10 @@ await test("an unbound supersession body cannot annotate a primary reply", () =>
   const threadId = "11111111-1111-4111-8111-111111111111";
   const turnId = "22222222-2222-4222-8222-222222222222";
   const dispatchId = "8710000000-8-abcdef0123456789";
+  const root = path.join(tmp, "supersession-binding");
+  fs.mkdirSync(root, { recursive: true });
   const reply = path.join(tmp, `${dispatchId}.reply.md`);
-  const rollout = path.join(tmp, `rollout-supersession-unbound-${threadId}.jsonl`);
+  const rollout = path.join(root, `rollout-supersession-unbound-${threadId}.jsonl`);
   const supersession = "REPLY-SUPERSEDED\nThis candidate conflicts with another final.";
   fs.writeFileSync(reply, "PRIMARY-UNCHANGED");
   fs.writeFileSync(rollout, `${[
@@ -965,6 +1034,42 @@ await test("distinct physical candidates fail visible as ambiguous", () => {
   assert.equal(result.reason, "ambiguous");
 });
 
+await test("observer checks page authority after a markerless full read", async () => {
+  const target = path.join(
+    tmp,
+    "rollout-markerless-page-check-11111111-1111-4111-8111-111111111111.jsonl",
+  );
+  fs.writeFileSync(
+    target,
+    `${JSON.stringify({ type: "session_meta", payload: { id: "11111111-1111-4111-8111-111111111111" } })}\n`,
+  );
+  let clock = 0;
+  let assessmentCalls = 0;
+  const result = await observeRollout(
+    {
+      threadId: "11111111-1111-4111-8111-111111111111",
+      dispatchId: "8000000001-8-abcdef0123456789",
+      rolloutPath: target,
+      budgetMs: 10,
+      intervalMs: 10,
+    },
+    {
+      now: () => clock,
+      sleep: async (ms) => { clock += ms; },
+      assessRolloutPageSupersession: () => {
+        assessmentCalls += 1;
+        return {
+          status: "superseded",
+          diagnostics: [{ code: "rollout-page-superseded" }],
+        };
+      },
+    },
+  );
+  assert.equal(result.token, "rollout-unavailable");
+  assert.equal(assessmentCalls, 1);
+  assert.ok(result.diagnostics.some((item) => item.code === "rollout-page-superseded"));
+});
+
 await test("observer reports admission hit without requiring completion", async () => {
   const target = path.join(tmp, "rollout-observe-11111111-1111-4111-8111-111111111111.jsonl");
   fs.writeFileSync(target, `${JSON.stringify({ type: "session_meta", payload: { id: "11111111-1111-4111-8111-111111111111" } })}\n`);
@@ -991,6 +1096,51 @@ await test("observer reports admission hit without requiring completion", async 
   );
   assert.equal(result.token, "rollout-hit");
   assert.equal(sleeps, 1);
+});
+
+await test("observer refuses an admission abandoned by a direct successor page", async () => {
+  const fixture = pageFixture("observer-page-abandoned");
+  let clock = 0;
+  const result = await observeRollout({
+    threadId: fixture.threadId,
+    dispatchId: fixture.dispatchId,
+    rolloutPath: fixture.predecessorPath,
+    sessionsRoot: fixture.root,
+    budgetMs: 10,
+    intervalMs: 2,
+  }, { now: () => clock, sleep: async (ms) => { clock += ms; } });
+  assert.equal(result.token, "rollout-unavailable");
+  assert.ok(result.diagnostics.some((item) => item.code === "dispatch-history-abandoned"));
+});
+
+await test("harvester fallback refuses a completed body from an abandoned page", () => {
+  const fixture = pageFixture("harvester-page-abandoned");
+  const result = harvestDispatch({
+    threadId: fixture.threadId,
+    dispatchId: fixture.dispatchId,
+    rolloutPath: fixture.predecessorPath,
+    sessionsRoot: fixture.root,
+  });
+  assert.equal(result.source, "none");
+  assert.equal(result.reason, "unavailable");
+  assert.ok(result.diagnostics.some((item) => item.code === "dispatch-history-abandoned"));
+});
+
+await test("primary reply remains visible but cautioned when its page lost authority", () => {
+  const fixture = pageFixture("primary-page-abandoned");
+  const replyPath = path.join(fixture.root, `${fixture.dispatchId}.reply.md`);
+  fs.writeFileSync(replyPath, "retained primary reply");
+  const result = harvestDispatch({
+    threadId: fixture.threadId,
+    dispatchId: fixture.dispatchId,
+    replyPath,
+    rolloutPath: fixture.predecessorPath,
+    sessionsRoot: fixture.root,
+  });
+  assert.equal(result.source, "reply-file");
+  assert.equal(result.replySupersessionStatus, "unavailable");
+  assert.equal(result.replySupersessionCaution, true);
+  assert.ok(result.diagnostics.some((item) => item.code === "dispatch-history-abandoned"));
 });
 
 await test("repair RED: current response compaction is inert during admission observation", async () => {
@@ -1320,7 +1470,7 @@ await test("observer skips unchanged intermediate polls but forces a final full 
   assert.equal(fullReads, 2);
 });
 
-await test("observer final full read catches a same-size rewrite hidden from no-growth metadata", async () => {
+await test("observer page authority catches a same-size rewrite before the final full read", async () => {
   const threadId = "11111111-1111-4111-8111-111111111111";
   const rewrittenThreadId = "22222222-2222-4222-8222-222222222222";
   const target = path.join(tmp, `rollout-observer-same-size-rewrite-${threadId}.jsonl`);
@@ -1356,8 +1506,8 @@ await test("observer final full read catches a same-size rewrite hidden from no-
   });
   assert.equal(result.token, "rollout-unavailable", JSON.stringify(result));
   assert.equal(noGrowthChecks, 1);
-  assert.equal(fullReads, 2);
-  assert.ok(result.diagnostics.some((item) => item.code === "consumed-prefix-changed"));
+  assert.equal(fullReads, 1);
+  assert.ok(result.diagnostics.some((item) => item.code === "page-supersession-unproven"));
 });
 
 await test("observer rejects admission from an integrity-failed read", async () => {
@@ -1593,7 +1743,7 @@ WRONG_B64="$(printf 'WRONG-TURN-FINAL' | base64 | tr -d '\n=')"
   || no "harvester served a wrong-turn final (rc=$MM_RC out=$(printf '%s' "$MM_OUT" | cut -c1-80))"
 
 echo "== Observer CLI contract =="
-BASIC="$TMP/rollout-unique-11111111-1111-4111-8111-111111111111.jsonl"
+BASIC="$TMP/unique-page/rollout-unique-11111111-1111-4111-8111-111111111111.jsonl"
 OBS_HIT="$TMP/rollout-observer-cli-hit-11111111-1111-4111-8111-111111111111.jsonl"
 cat >"$OBS_HIT" <<'JSONL'
 {"type":"session_meta","payload":{"id":"11111111-1111-4111-8111-111111111111"}}
@@ -1608,6 +1758,19 @@ OUT="$(CODEX_IPC_OBSERVE_INTERVAL_MS=0 node "$OBSERVER" \
   || no "observer hit/stdout/warning contract (rc=$RC out=$OUT)"
 OUT="$(node "$OBSERVER" --thread bad --dispatch x 2>"$ERR")"; RC=$?
 [[ $RC -ne 0 && -z "$OUT" ]] && ok "usage error is nonzero with no outcome token" || no "usage error contract (rc=$RC out=$OUT)"
+OUT="$(CODEX_IPC_SESSIONS_ROOT="$TMP/missing-observer-pages" node "$OBSERVER" \
+  --thread 11111111-1111-4111-8111-111111111111 --dispatch missing-page \
+  --budget-ms 1 --interval-ms 1 2>"$ERR")"; RC=$?
+[[ $RC -eq 0 && "$OUT" == "rollout-unavailable" ]] \
+  && grep -Fxq "ROLLOUT-PATH: Supply the inspector's database-designated page with --rollout-path <path>." "$ERR" \
+  && ok "observer gives fixed inspector-page guidance when no page can be located" \
+  || no "observer missing-page guidance (rc=$RC out=$OUT)"
+OUT="$(CODEX_IPC_SESSIONS_ROOT="$TMP/missing-harvest-pages" node "$HARVESTER" \
+  --thread 11111111-1111-4111-8111-111111111111 --dispatch missing-page 2>"$ERR")"; RC=$?
+[[ $RC -eq 0 && "$OUT" == $'none\tunavailable\t0\t0\t0\t-\t' ]] \
+  && grep -Fxq "ROLLOUT-PATH: Supply the inspector's database-designated page with --rollout-path <path>." "$ERR" \
+  && ok "harvester gives fixed inspector-page guidance when no page can be located" \
+  || no "harvester missing-page guidance (rc=$RC out=$OUT)"
 OUT="$(CODEX_IPC_ROLLOUT_MAX_RECORD_BYTES=1 node "$OBSERVER" \
   --thread 11111111-1111-4111-8111-111111111111 --dispatch 8888888888-8-abcdef0123456789 \
   --rollout-path "$OBS_HIT" --budget-ms 50 --interval-ms 10 2>"$ERR")"; RC=$?
@@ -1683,9 +1846,10 @@ OUT="$(CODEX_IPC_SESSIONS_ROOT="$TMP/missing-cli-sessions" node "$HARVESTER" \
   --thread 33333333-3333-4333-8333-333333333333 --dispatch "$NO_CANDIDATE_CLI_DISPATCH" \
   --reply-path "$TMP/$NO_CANDIDATE_CLI_DISPATCH.reply.md" 2>"$NO_CANDIDATE_CLI_ERR")"; RC=$?
 [[ $RC -eq 0 && "$OUT" == reply-file$'\t'* ]] \
-  && ! grep -q $'^REPLY_SUPERSESSION_UNCERTAIN\t' "$NO_CANDIDATE_CLI_ERR" \
-  && ok "ordinary CLI no-candidate status emits diagnostics without a caution" \
-  || no "harvester no-candidate warning noise (rc=$RC out=$OUT)"
+  && grep -Fxq $'REPLY_SUPERSESSION_UNCERTAIN\tunavailable\tselected primary may be stale; freshness and supersession could not be certified.' "$NO_CANDIDATE_CLI_ERR" \
+  && grep -Fxq "ROLLOUT-PATH: Supply the inspector's database-designated page with --rollout-path <path>." "$NO_CANDIDATE_CLI_ERR" \
+  && ok "ordinary CLI no-candidate status preserves the primary with a fixed page caution" \
+  || no "harvester no-candidate page caution (rc=$RC out=$OUT)"
 
 echo "== Viewer dual-source integration =="
 IPCROOT="$TMP/ipc"; SESSIONS="$TMP/sessions"; SID=s1; THREAD=11111111-1111-4111-8111-111111111111
@@ -1791,9 +1955,10 @@ printf 'PRIMARY-WITHOUT-ROLLOUT' > "$IPCROOT/$SID/$NO_CANDIDATE_THREAD/$NO_CANDI
 OUT="$(CODEX_IPC_ROOT="$IPCROOT" CODEX_IPC_SESSIONS_ROOT="$SESSIONS" \
   CLAUDE_CODE_SESSION_ID="$SID" bash "$VIEWER" -c "$NO_CANDIDATE_THREAD" 2>&1)"; RC=$?
 [[ $RC -eq 0 && "$OUT" == *"source=reply-file"* && "$OUT" == *"PRIMARY-WITHOUT-ROLLOUT"* \
-  && "$OUT" != *"REPLY-SUPERSESSION-UNAVAILABLE"* && "$OUT" != *"REPLY-SUPERSESSION-PENDING"* ]] \
-  && ok "viewer keeps ordinary no-candidate supersession status quiet" \
-  || no "viewer no-candidate supersession noise contract (rc=$RC)"
+  && "$OUT" == *"ROLLOUT-PATH: Supply the inspector's database-designated page with --rollout-path <path>."* \
+  && "$OUT" == *"[CAUTION: REPLY-SUPERSESSION-UNAVAILABLE] Selected primary may be stale; freshness and supersession could not be certified."* ]] \
+  && ok "viewer preserves a primary while surfacing missing page authority" \
+  || no "viewer missing-page authority contract (rc=$RC)"
 
 UNREADABLE_SESSIONS_ROOT="$TMP/sessions-root-is-a-file"
 printf 'not a directory' > "$UNREADABLE_SESSIONS_ROOT"

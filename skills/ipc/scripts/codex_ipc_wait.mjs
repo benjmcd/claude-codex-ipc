@@ -4,12 +4,17 @@ import os from "node:os";
 import path from "node:path";
 import { realpathSync } from "node:fs";
 import {
+  assessRolloutPageSupersession,
   createDispatchCorrelator,
   DEFAULT_MAX_RECORD_BYTES,
   inspectRolloutNoGrowth,
   isCompleteReaderCursor,
   locateRollout,
+  normalizeRolloutCliPath,
   readRolloutFile,
+  ROLLOUT_PATH_GUIDANCE,
+  rolloutDiagnosticLines,
+  rolloutPageGuidance,
 } from "./codex_ipc_rollout_reader.mjs";
 
 export const DEFAULT_WAIT_BUDGET_MS = 0;
@@ -316,6 +321,7 @@ export async function waitForCompletion(options, injected = {}) {
   const sleep = injected.sleep || defaultSleep;
   const readRollout = injected.readRolloutFile || readRolloutFile;
   const inspectNoGrowth = injected.inspectRolloutNoGrowth || inspectRolloutNoGrowth;
+  const assessPage = injected.assessRolloutPageSupersession || assessRolloutPageSupersession;
   const budgetMs = Number.isSafeInteger(options.budgetMs) && options.budgetMs >= 0
     ? options.budgetMs
     : DEFAULT_WAIT_BUDGET_MS;
@@ -336,6 +342,23 @@ export async function waitForCompletion(options, injected = {}) {
   // parseable, we simply did not finish observing it. That is `pending`, never `unavailable`.
   let deadlineOnlyReadFailure = false;
   let readerAtCompleteEof = false;
+  let pageGuidanceRecorded = false;
+
+  const pageIsCurrent = (lifecycle) => {
+    if (!candidatePath || !cursor) return false;
+    const assessment = assessPage({
+      threadId: options.threadId,
+      rolloutPath: candidatePath,
+      sessionsRoot: options.sessionsRoot,
+      expectedIdentityKey: candidateIdentityKey,
+      expectedSize: cursor.size,
+      dispatchMarkerByteOffset: lifecycle?.latestOccurrence?.markerByteOffset ?? null,
+      deadlineAt,
+      now,
+    });
+    diagnostics.push(...(assessment.diagnostics || []));
+    return assessment.status === "current";
+  };
 
   for (let iteration = 0; iteration < maxIterations; iteration += 1) {
     const iterationStartedAt = iteration === 0 ? startedAt : now();
@@ -349,6 +372,10 @@ export async function waitForCompletion(options, injected = {}) {
         now,
       });
       diagnostics.push(...(lastLocation.diagnostics || []));
+      if (!pageGuidanceRecorded) {
+        diagnostics.push(...rolloutPageGuidance(lastLocation, options.rolloutPath));
+        pageGuidanceRecorded = true;
+      }
       if (lastLocation.status === "ambiguous") {
         return { token: "unavailable", diagnostics };
       }
@@ -368,7 +395,10 @@ export async function waitForCompletion(options, injected = {}) {
         cursor &&
         !forceCertifyingRead &&
         inspectNoGrowth(candidatePath, cursor).unchanged;
-      if (!unchangedWithoutCertification) {
+      if (unchangedWithoutCertification) {
+        const lifecycle = dispatchLifecycle(records, diagnostics, options.dispatchId);
+        if (!pageIsCurrent(lifecycle)) return { token: "unavailable", diagnostics };
+      } else {
         const parsed = readRollout(candidatePath, {
           ...(cursor ? { cursor } : {}),
           rolloutThreadId: options.threadId,
@@ -397,6 +427,7 @@ export async function waitForCompletion(options, injected = {}) {
 
         if (readerAtCompleteEof) {
           const lifecycle = dispatchLifecycle(records, diagnostics, options.dispatchId);
+          if (!pageIsCurrent(lifecycle)) return { token: "unavailable", diagnostics };
           const resolved = resolveCompletion(lifecycle, options);
           if (resolved.token !== "pending") {
             return {
@@ -429,6 +460,7 @@ export async function waitForCompletion(options, injected = {}) {
     return { token: "pending", diagnostics };
   }
   const lifecycle = dispatchLifecycle(records, diagnostics, options.dispatchId);
+  if (!pageIsCurrent(lifecycle)) return { token: "unavailable", diagnostics };
   const resolved = resolveCompletion(lifecycle, options);
   return {
     token: resolved.token,
@@ -572,7 +604,7 @@ export function parseWaitArgs(argv, env = process.env) {
       replyPath: raw.replyPath,
       transportRoot,
       sessionId: raw.sessionId,
-      rolloutPath: raw.rolloutPath,
+      rolloutPath: raw.rolloutPath ? normalizeRolloutCliPath(raw.rolloutPath) : null,
       sessionsRoot: raw.sessionsRoot || path.join(os.homedir(), ".codex", "sessions"),
       budgetMs: nonNegativeInteger(
         budgetSource,
@@ -598,6 +630,7 @@ async function main(argv) {
     parsed = parseWaitArgs(argv);
   } catch (error) {
     console.error(`ERROR ${serializeDiagnostic({ code: "usage-error", message: error.message })}`);
+    if (error?.code === "IPC_ROLLOUT_PATH_INVALID") console.error(ROLLOUT_PATH_GUIDANCE);
     console.error(usage());
     process.exitCode = 1;
     return;
@@ -606,6 +639,7 @@ async function main(argv) {
   for (const warning of parsed.warnings) console.error(warning);
   try {
     const result = await waitForCompletion(parsed.options);
+    for (const line of rolloutDiagnosticLines(result.diagnostics)) console.error(line);
     for (const item of result.diagnostics) {
       console.error(`WAIT_DIAGNOSTIC ${serializeDiagnostic(item)}`);
     }

@@ -208,6 +208,122 @@ RUNARGS=(); run CLAUDE_CODE_SESSION_ID=s22 PATH="/usr/bin:/bin"
 [[ $RC -eq 0 ]] && printf '%s' "$OUT" | grep -Fq '\x1B' && printf '%s' "$OUT" | grep -Fq '\xFF' \
   && ok "safe primary rendering still works without Node" || no "T22 no-Node safe renderer (rc=$RC)"
 
+echo "== T22b explicit and inspector-derived rollout page binding =="
+reset
+PAGE_DIR="$TMP/page22"; mkdir -p "$PAGE_DIR"
+PAGE22="$PAGE_DIR/rollout-page-$U1.jsonl"
+DISP22="9200000000-2-abcdef0123456789"
+mktask s22b "$U1" "$DISP22"
+mkreply s22b "$U1" "$DISP22" 2000 "PAGE-BOUND-PRIMARY"
+node - "$PAGE22" "$U1" "$DISP22" <<'NODE'
+const fs = require("node:fs");
+const [target, threadId, dispatchId] = process.argv.slice(2);
+const turnId = "33333333-3333-4333-8333-333333333333";
+const records = [
+  { type: "session_meta", payload: { id: threadId } },
+  { type: "event_msg", payload: { type: "task_started", turn_id: turnId } },
+  { type: "event_msg", payload: { type: "user_message", turn_id: turnId, message: `read C:/handoff/${dispatchId}.task.md and proceed` } },
+  { type: "event_msg", payload: { type: "agent_message", turn_id: turnId, phase: "final_answer", message: "ordinary final" } },
+  { type: "event_msg", payload: { type: "task_complete", turn_id: turnId, last_agent_message: "ordinary final" } },
+];
+fs.writeFileSync(target, `${records.map((item) => JSON.stringify(item)).join("\n")}\n`);
+NODE
+RUNARGS=(-c "$U1" --rollout-path "$PAGE22"); run CLAUDE_CODE_SESSION_ID=s22b
+[[ $RC -eq 0 && "$OUT" == *"PAGE-BOUND-PRIMARY"* \
+  && "$OUT" != *"ROLLOUT-PATH:"* && "$OUT" != *"REPLY-SUPERSESSION-UNAVAILABLE"* ]] \
+  && ok "explicit inspector page reaches primary supersession checks without warning" \
+  || no "T22b explicit rollout page (rc=$RC)"
+
+RUNARGS=(--rollout-path "$PAGE22"); run CLAUDE_CODE_SESSION_ID=s22b
+[[ $RC -eq 1 && "$OUT" == *"requires -c with a Codex conversation UUID"* ]] \
+  && ok "rollout page is refused for a session-wide view" || no "T22b session-wide page refusal"
+RUNARGS=(-c filedrop --rollout-path "$PAGE22"); run CLAUDE_CODE_SESSION_ID=s22b
+[[ $RC -eq 1 && "$OUT" == *"requires -c with a Codex conversation UUID"* ]] \
+  && ok "rollout page is refused for filedrop" || no "T22b filedrop page refusal"
+RUNARGS=(-c "$U1" --rollout-path "$PAGE22" --derive-rollout-path); run CLAUDE_CODE_SESSION_ID=s22b
+[[ $RC -eq 1 && "$OUT" == *"mutually exclusive"* ]] \
+  && ok "explicit and derived page modes are mutually exclusive" || no "T22b mutual exclusion"
+
+VIEW22="$TMP/view22"; mkdir -p "$VIEW22"
+cp "$SCRIPT" "$VIEW22/codex_ipc_replies.sh"
+cp "$DIR/../skills/ipc/scripts/codex_ipc_safe_render.sh" "$VIEW22/codex_ipc_safe_render.sh"
+cp "$DIR/../skills/ipc/scripts/codex_ipc_reply_harvest.mjs" "$VIEW22/codex_ipc_reply_harvest.mjs"
+cp "$DIR/../skills/ipc/scripts/codex_ipc_rollout_reader.mjs" "$VIEW22/codex_ipc_rollout_reader.mjs"
+INSPECT_COUNT="$TMP/inspect22.count"; INSPECT_ARGS="$TMP/inspect22.args"
+cat > "$VIEW22/codex_ipc_session_inspect.mjs" <<'NODE'
+import fs from "node:fs";
+fs.appendFileSync(process.env.INSPECT_COUNT, "1\n");
+fs.writeFileSync(process.env.INSPECT_ARGS, process.argv.slice(2).join("\t"));
+if (process.env.INSPECT_MODE === "fail") {
+  console.error("PRIVATE-INSPECTOR-PATH-C:/secret");
+  process.exit(7);
+}
+const threadId = process.env.INSPECT_THREAD;
+const page = process.env.DERIVED_PAGE;
+process.stdout.write(JSON.stringify({
+  ok: true,
+  dbThread: {
+    exists: true,
+    readOnlyOpenOk: true,
+    thread: { exists: true, id: threadId, rolloutPath: page },
+  },
+  rollout: {
+    selection: { status: "found", authority: "db.rollout_path", path: page },
+    primary: { parsedOk: true },
+  },
+}));
+NODE
+before="$(manifest)"
+OUT="$(env CODEX_IPC_ROOT="$IPCROOT" CLAUDE_CODE_SESSION_ID=s22b \
+  INSPECT_COUNT="$INSPECT_COUNT" INSPECT_ARGS="$INSPECT_ARGS" INSPECT_THREAD="$U1" \
+  DERIVED_PAGE="$PAGE22" bash "$VIEW22/codex_ipc_replies.sh" -c "$U1" \
+  --derive-rollout-path 2>&1)"; RC=$?
+after="$(manifest)"; [[ "$before" == "$after" ]] || no "READ-ONLY VIOLATION: derived-page viewer changed IPC manifest"
+[[ $RC -eq 0 && "$OUT" == *"PAGE-BOUND-PRIMARY"* \
+  && "$OUT" != *"ROLLOUT-PATH:"* && "$OUT" != *"REPLY-SUPERSESSION-UNAVAILABLE"* \
+  && "$(wc -l < "$INSPECT_COUNT" | tr -d ' ')" -eq 1 \
+  && "$(cat "$INSPECT_ARGS")" == $'--thread\t'$U1$'\t--tail-events\t1\t--summary' ]] \
+  && ok "derived mode calls the inspector once with the narrow summary contract" \
+  || no "T22b inspector-derived page (rc=$RC)"
+
+DISP22F="9200000001-2-abcdef0123456789"
+PAGE22F="$PAGE_DIR/rollout-fallback-$U1.jsonl"
+mktask s22c "$U1" "$DISP22F"
+node - "$PAGE22F" "$U1" "$DISP22F" <<'NODE'
+const fs = require("node:fs");
+const [target, threadId, dispatchId] = process.argv.slice(2);
+const turnId = "33333333-3333-4333-8333-333333333333";
+const body = "DERIVED-FALLBACK-BODY";
+const records = [
+  { type: "session_meta", payload: { id: threadId } },
+  { type: "event_msg", payload: { type: "task_started", turn_id: turnId } },
+  { type: "event_msg", payload: { type: "user_message", turn_id: turnId, message: `read C:/handoff/${dispatchId}.task.md and proceed` } },
+  { type: "event_msg", payload: { type: "agent_message", turn_id: turnId, phase: "final_answer", message: body } },
+  { type: "event_msg", payload: { type: "task_complete", turn_id: turnId, last_agent_message: body } },
+];
+fs.writeFileSync(target, `${records.map((item) => JSON.stringify(item)).join("\n")}\n`);
+NODE
+INSPECT_COUNT_F="$TMP/inspect22f.count"; INSPECT_ARGS_F="$TMP/inspect22f.args"
+OUT="$(env CODEX_IPC_ROOT="$IPCROOT" CLAUDE_CODE_SESSION_ID=s22c \
+  INSPECT_COUNT="$INSPECT_COUNT_F" INSPECT_ARGS="$INSPECT_ARGS_F" INSPECT_THREAD="$U1" \
+  DERIVED_PAGE="$PAGE22F" bash "$VIEW22/codex_ipc_replies.sh" -c "$U1" \
+  --derive-rollout-path 2>&1)"; RC=$?
+[[ $RC -eq 0 && "$OUT" == *"source=rollout-fallback"* \
+  && "$OUT" == *"DERIVED-FALLBACK-BODY"* \
+  && "$OUT" != *"ROLLOUT-PATH:"* && "$OUT" != *"REPLY-SUPERSESSION-UNAVAILABLE"* \
+  && "$(wc -l < "$INSPECT_COUNT_F" | tr -d ' ')" -eq 1 ]] \
+  && ok "derived page reaches fallback when the primary reply is absent" \
+  || no "T22b inspector-derived fallback (rc=$RC)"
+OUT="$(env CODEX_IPC_ROOT="$IPCROOT" CLAUDE_CODE_SESSION_ID=s22b INSPECT_MODE=fail \
+  INSPECT_COUNT="$INSPECT_COUNT" INSPECT_ARGS="$INSPECT_ARGS" INSPECT_THREAD="$U1" \
+  DERIVED_PAGE="$PAGE22" bash "$VIEW22/codex_ipc_replies.sh" -c "$U1" \
+  --derive-rollout-path 2>&1)"; RC=$?
+[[ $RC -eq 1 \
+  && "$OUT" == "ERROR: --derive-rollout-path could not obtain a trusted database-designated page." \
+  && "$OUT" != *"PRIVATE-INSPECTOR-PATH"* ]] \
+  && ok "inspector failure is fixed and suppresses private diagnostics" \
+  || no "T22b inspector failure privacy (rc=$RC out=$OUT)"
+
 echo "== Static audit: no write/lock idioms =="
 if grep -nE 'mkdir|mktemp|[^-]mv |[^_]rm |touch |-delete|flock|>>?[^&].*IPC_ROOT' "$SCRIPT" | grep -v '^\s*#' >/dev/null 2>&1; then
   no "static audit: found a write/lock idiom (review grep hits)"; grep -nE 'mkdir|mktemp|mv |rm |touch |-delete|flock' "$SCRIPT" | grep -v '^\s*#'
