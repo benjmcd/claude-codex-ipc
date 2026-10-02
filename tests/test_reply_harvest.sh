@@ -1855,16 +1855,34 @@ OUT="$(node "$HARVESTER" --thread 22222222-2222-4222-8222-222222222222 \
   && diagnostics_are_control_safe "$HARVEST_ERR" \
   && ok "harvester diagnostics fail closed and escape C0/C1 without changing stdout shape" \
   || no "harvester diagnostic byte hygiene (rc=$RC out=$OUT)"
-# This asserts diagnostic encoding, not pickup latency. Leave enough wall-clock budget for a
-# loaded Windows runner to parse the tiny fixture before its deadline checks fire.
+# Advance this CLI process's clock only during sleep, as the observer unit tests do.
+# Diagnostic encoding must not depend on real-time read or page-authority deadlines.
+OBSERVE_CLOCK="$TMP/observe-clock.cjs"
+cat > "$OBSERVE_CLOCK" <<'NODE'
+let clock = 0;
+Date.now = () => clock;
+globalThis.setTimeout = (callback, ms) => {
+  clock += ms;
+  queueMicrotask(callback);
+};
+NODE
 OBSERVE_ERR="$TMP/observe-diagnostic.err"
-OUT="$(node "$OBSERVER" --thread 22222222-2222-4222-8222-222222222222 \
+OUT="$(node --require "$OBSERVE_CLOCK" "$OBSERVER" --thread 22222222-2222-4222-8222-222222222222 \
   --dispatch 8300000000-8-abcdef0123456789 --rollout-path "$DIAGNOSTIC_ROLLOUT" \
-  --budget-ms 1000 --interval-ms 10 2>"$OBSERVE_ERR")"; RC=$?
+  --budget-ms 50 --interval-ms 10 2>"$OBSERVE_ERR")"; RC=$?
 [[ $RC -eq 0 && "$OUT" == "rollout-unavailable" && "$OUT" != *$'\n'* ]] \
   && diagnostics_are_control_safe "$OBSERVE_ERR" \
   && ok "observer diagnostics fail closed and escape C0/C1 without changing its token" \
-  || no "observer diagnostic byte hygiene (rc=$RC out=$OUT)"
+  || {
+    no "observer diagnostic byte hygiene (rc=$RC out=$OUT)"
+    node - "$OBSERVE_ERR" <<'NODE'
+const fs = require("node:fs");
+console.error(JSON.stringify(fs.readFileSync(process.argv[2], "utf8")).replace(
+  /[\u007f-\u009f]/gu,
+  (character) => `\\u${character.codePointAt(0).toString(16).padStart(4, "0")}`,
+));
+NODE
+  }
 
 SUPERSEDED_DISPATCH=8400000000-8-abcdef0123456789
 SUPERSEDED_REPLY="$TMP/$SUPERSEDED_DISPATCH.reply.md"
