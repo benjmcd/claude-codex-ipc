@@ -41,6 +41,9 @@ NOREPO="$TMP/norepo"; mkdir -p "$NOREPO" || fatal "could not create non-reposito
 UUID="00000000-0000-4000-8000-000000000000"
 REAL_NODE="$(command -v node 2>/dev/null)" || fatal "node is required"
 [[ -n "$REAL_NODE" ]] || fatal "node resolved empty"
+# Capture the real Windows executable before PATH stubs are installed. Only the
+# exact helper branch below may use it, with every mock and -DryRun supplied.
+REAL_PS="$(command -v powershell.exe 2>/dev/null || true)"
 
 # --- stubs on PATH (node records argv; codex/powershell are no-ops) ---
 cat > "$BIN/node" <<EOF
@@ -324,7 +327,7 @@ cat > "$BIN2/node" <<EOF
 #!/usr/bin/env bash
 FG="$FGDIR"
 no_client(){
-  echo '{"ok":false,"targetThreadId":"$UUIDF","sentRequests":[{"name":"thread-follower-start-turn","json":{"method":"thread-follower-start-turn","params":{"conversationId":"$UUIDF"}}}],"response":{"resultType":"error","error":"no-client-found"}}'
+  echo '{"ok":false,"targetThreadId":"$UUIDF","sentRequests":[{"name":"thread-follower-start-turn","json":{"method":"thread-follower-start-turn","params":{"conversationId":"$UUIDF"}}}],"response":{"resultType":"error","error":"no-client-found"}}' | tee "\$FG/no-client.json"
 }
 client_success(){
   echo '{"ok":true,"targetThreadId":"$UUIDF","sentRequests":[{"name":"thread-follower-start-turn","json":{"method":"thread-follower-start-turn","params":{"conversationId":"$UUIDF"}}}],"response":{"resultType":"success"}}'
@@ -344,6 +347,7 @@ deep_error(){
 case "\$*" in
   *codex_ipc_client.mjs*)
     printf '%s\n' "\$*" >> "\$FG/nodeargs.log"
+    printf '%s\0' "\$@" > "\$FG/client.args"
     printf '%s\n' client >> "\$FG/eventlog"
     n=\$(cat "\$FG/send_count" 2>/dev/null || echo 0); n=\$((n+1)); echo "\$n" > "\$FG/send_count"
     mode=\$(cat "\$FG/client_mode" 2>/dev/null || echo always-ok)
@@ -459,6 +463,21 @@ case "$base" in
     printf '%s\n' "$*" >> "$FG/pslog"
     printf '%s\n' helper >> "$FG/eventlog"
     [[ ! -f "$FG/helper_stderr" ]] || cat "$FG/helper_stderr" >&2
+    if [[ -f "$FG/compose-inventory.json" ]]; then
+      # No generic PowerShell passthrough: require this worktree's exact helper.
+      [[ "$script" == "$COMPOSE_HELPER" && -n "$REAL_PS" ]] || exit 97
+      args=("$@" -DryRun
+        -MockInventoryJson "$(cat "$FG/compose-inventory.json")"
+        -MockPackageJson "$(cat "$FG/compose-package.json")"
+        -MockRegistrationJson "$(cat "$FG/compose-registration.json")"
+        -MockForegroundProcess explorer -MockForegroundPath 'C:\Windows\explorer.exe')
+      printf '%s\0' "${args[@]}" > "$FG/compose-helper.args"
+      "$REAL_PS" "${args[@]}" > "$FG/compose-helper.out" 2>&1
+      rc=$?
+      printf '%s\n' "$rc" > "$FG/compose-helper.status"
+      cat "$FG/compose-helper.out"
+      exit "$rc"
+    fi
     exit "$(cat "$FG/pscode" 2>/dev/null || echo 0)";;
   *) echo "unexpected PowerShell script: $base" >&2; exit 97;;
 esac
@@ -478,7 +497,7 @@ fgreset(){ # fgreset <client_mode> [inspect_mode] [pscode] [observe_mode] [polic
   rm -f "$FGDIR"/send_count "$FGDIR"/inspect_count "$FGDIR"/nodeargs.log "$FGDIR"/pslog \
         "$FGDIR"/observe_count "$FGDIR"/observe_args.log "$FGDIR"/policy_count \
         "$FGDIR"/policylog "$FGDIR"/eventlog "$FGDIR"/policy_stderr "$FGDIR"/powershell_count \
-        "$FGDIR"/helper_stderr
+        "$FGDIR"/helper_stderr "$FGDIR"/no-client.json "$FGDIR"/client.args "$FGDIR"/compose-*
   echo "${1}" > "$FGDIR/client_mode"
   echo "${2:-ok}" > "$FGDIR/inspect_mode"
   echo "${3:-0}" > "$FGDIR/pscode"
@@ -496,6 +515,37 @@ assert_tax(){ # every RESULT line in $OUT must match the parser-compatible taxon
   bad="$(printf '%s\n' "$OUT" | grep '^RESULT:' | grep -vE "$TAX_RE" || true)"
   [[ -z "$bad" ]] && ok "$1: all RESULT lines parser-compatible" || { no "$1: non-conforming RESULT line"; printf '%s\n' "$bad"; }
 }
+fg_task_for(){
+  FG_TASKS=()
+  local file
+  while IFS= read -r file; do
+    grep -Fxq "$1" "$file" && FG_TASKS+=("$file")
+  done < <(find "$IPCROOT/fgsess/$UUIDF" -name '*.task.md' -type f 2>/dev/null)
+}
+assert_unsafe_refusal(){ # task text, exact result, expected inspection count
+  fg_task_for "$1"
+  [[ $RC -eq 1 && "${#FG_TASKS[@]}" -eq 1 ]] \
+    && printf '%s\n' "$OUT" | grep -Fxq "RESULT: $2 -- confirmation=not-attempted" \
+    && [[ "$(printf '%s\n' "$OUT" | grep -c '^RESULT:')" -eq 1 ]] \
+    && ! printf '%s\n' "$OUT" | grep -Eq '^(FALLBACK|    read |WAIT:|Open the thread)' \
+    && [[ "$(cat "$FGDIR/inspect_count" 2>/dev/null || echo 0)" -eq "$3" ]] \
+    && [[ ! -e "$FGDIR/policy_count" && ! -e "$FGDIR/send_count" \
+          && ! -e "$FGDIR/powershell_count" && ! -e "$FGDIR/pslog" \
+          && ! -e "$FGDIR/observe_count" && ! -e "$FGDIR/codexargs.log" ]] \
+    && ok "$1: one retained envelope, exact refusal, no pickup/WAIT or downstream contact" \
+    || no "$1: unsafe refusal containment failed (rc=$RC out=$OUT)"
+}
+assert_safe_pickup(){
+  fg_task_for "$1"
+  local path=""
+  [[ "${#FG_TASKS[@]}" -ne 1 ]] || path="$(cygpath -m "${FG_TASKS[0]}" 2>/dev/null || printf '%s' "${FG_TASKS[0]}")"
+  [[ -n "$path" ]] \
+    && printf '%s\n' "$OUT" | grep -Fxq "    read \"$path\" and proceed" \
+    && [[ "$(printf '%s\n' "$OUT" | grep -c '^    read ')" -eq 1 ]] \
+    && ! printf '%s\n' "$OUT" | grep -q '^WAIT:' \
+    && ok "$1: one safe pickup binds the retained envelope, without WAIT" \
+    || no "$1: safe pickup missing, duplicated, or unbound"
+}
 assert_no_codex_cli(){
   local bad
   bad="$(
@@ -506,20 +556,21 @@ assert_no_codex_cli(){
 }
 
 echo "== 13b. shared host policy gates every live send =="
-fgreset always-ok ok 0 rollout-hit refuse-other
-fgrun --ipc "$UUIDF" "t13b initial host refusal"
+for refusal in refuse-other:other-desktop-host-running refuse-missing:intended-host-not-running; do
+fgreset always-ok ok 0 rollout-hit "${refusal%%:*}"
+fgrun --ipc "$UUIDF" "t13b initial ${refusal%%:*}"
 [[ $RC -ne 0 ]] \
   && printf '%s' "$OUT" | grep -q 'HOST-WARNING:' \
-  && printf '%s' "$OUT" | grep -q 'RESULT: gui-unowned -- reason=other-desktop-host-running -- confirmation=not-attempted' \
+  && printf '%s' "$OUT" | grep -Fxq "RESULT: gui-unowned -- reason=${refusal#*:} -- confirmation=not-attempted" \
   && [[ "$(cat "$FGDIR/inspect_count" 2>/dev/null || echo 0)" == "1" ]] \
   && [[ "$(cat "$FGDIR/policy_count" 2>/dev/null || echo 0)" == "1" ]] \
-  && [[ ! -f "$FGDIR/send_count" && ! -f "$FGDIR/pslog" ]] \
+  && [[ ! -f "$FGDIR/send_count" && ! -f "$FGDIR/pslog" && ! -f "$FGDIR/observe_count" ]] \
   && [[ "$(tr '\n' ' ' < "$FGDIR/eventlog")" == 'inspect policy ' ]] \
   && ok "initial host refusal happens after envelope publication and before client/helper contact" \
   || no "initial host refusal escaped the pre-send gate (rc=$RC)"
-t13b=""; while IFS= read -r f; do grep -qx 't13b initial host refusal' "$f" && { t13b="$f"; break; }; done < <(find "$IPCROOT/fgsess" -name '*.task.md' 2>/dev/null)
-[[ -n "$t13b" ]] && ok "host-refused send retains its envelope" || no "host-refused send lost its envelope"
+assert_safe_pickup "t13b initial ${refusal%%:*}"
 assert_tax "t13b-refusal"
+done
 
 fgreset always-fail ok 0 rollout-hit eligible-off
 fgrun --ipc "$UUIDF" "t13b default off"
@@ -533,6 +584,96 @@ fgrun --ipc "$UUIDF" "t13b default off"
   && ok "default-off exact no-client uses one preflight, then stops without activation or retry" \
   || no "default-off no-client path activated or retried (rc=$RC)"
 assert_tax "t13b-default-off"
+assert_safe_pickup "t13b default off"
+
+# The first inventory permits the exact no-client send; the real recovery helper
+# then sees changed synthetic inventory and refuses before foreground handling.
+if [[ "$OSTYPE" == msys* || "$OSTYPE" == cygwin* || "${OS:-}" == Windows_NT ]]; then
+  [[ -n "$REAL_PS" ]] || fatal "Windows recovery composition requires real powershell.exe"
+  COMPOSE_HELPER="$(cygpath -m "$(dirname "$SCRIPT")/codex_ipc_autoload.ps1")"
+  COMPOSE_PARENT_ROOT="$IPCROOT"
+  for recovery in alternate empty; do
+    fgreset always-fail ok 0 rollout-hit eligible-codex-uri
+    IPCROOT="$TMP/recovery-$recovery/ipc"
+    recovery_home="$TMP/recovery-$recovery/home"
+    mkdir -p "$IPCROOT" "$recovery_home" || fatal "could not isolate recovery case"
+    if [[ "$recovery" == alternate ]]; then
+      printf '%s\n' '{"complete":true,"packageRootsComplete":true,"packageRoots":[],"errors":[],"processes":[{"pid":201,"parentPid":1,"name":"ChatGPT.exe","executable":"C:\\Alt\\Host\\ChatGPT.exe"}]}' > "$FGDIR/compose-inventory.json"
+    else
+      printf '%s\n' '{"complete":true,"packageRootsComplete":true,"packageRoots":[],"errors":[],"processes":[]}' > "$FGDIR/compose-inventory.json"
+    fi
+    printf '%s\n' '{"state":"clear","runningPackageFullName":"OpenAI.Codex_26.707.3563.0_x64__2p2nqsd0c76g0","runningVersion":"26.707.3563.0","higherVersions":[],"evidence":"mock"}' > "$FGDIR/compose-package.json"
+    printf '%s\n' '{"state":"matches","handler":"AppXcodex","packageFullName":"OpenAI.Codex_26.707.3563.0_x64__2p2nqsd0c76g0","evidence":"mock"}' > "$FGDIR/compose-registration.json"
+    OUT="$( cd "$REPO" && env -u CODEX_IPC_AUTOLOAD -u CODEX_IPC_INTENDED_HOST \
+      -u CODEX_IPC_FOREGROUND_POLICY -u CODEX_IPC_FOREGROUND_SWITCH_STANDING_APPROVAL \
+      -u NODE_OPTIONS -u NODE_PATH -u BASH_ENV -u ENV \
+      HOME="$recovery_home" USERPROFILE="$recovery_home" \
+      TEMP="$recovery_home" TMP="$recovery_home" TMPDIR="$recovery_home" \
+      CODEX_IPC_ROOT="$IPCROOT" CODEX_IPC_RETENTION_DAYS=0 CLAUDE_CODE_SESSION_ID=fgsess \
+      REAL_PS="$REAL_PS" COMPOSE_HELPER="$COMPOSE_HELPER" PATH="$BIN2:$PATH" \
+      bash "$SCRIPT" --ipc "$UUIDF" --autoload codex-uri --intended-host package -- \
+      "t13b composed $recovery" 2>&1 )"; RC=$?
+    reason_tokens='send-ineligible,intended-host-not-running'
+    [[ "$recovery" != alternate ]] || reason_tokens+=',other-desktop-host-running'
+    [[ $RC -eq 1 ]] \
+      && printf '%s\n' "$OUT" | grep -Fxq 'RESULT: gui-unowned -- reason=autoload-policy-refused -- confirmation=not-attempted' \
+      && [[ "$(printf '%s\n' "$OUT" | grep -c '^RESULT:')" -eq 1 ]] \
+      && [[ "$(cat "$FGDIR/compose-helper.status" 2>/dev/null)" == 6 ]] \
+      && tr -s '[:space:]' ' ' < "$FGDIR/compose-helper.out" | grep -Fq "phase=pre-foreground reason=send-ineligible reasons=$reason_tokens" \
+      && ! grep -Eq 'action=(switch-deeplink|deeplink-snapback)' "$FGDIR/compose-helper.out" \
+      && ! printf '%s\n' "$OUT" | grep -Eq 'ACTION:|C:\\Alt\\Host' \
+      && [[ "$(cat "$FGDIR/inspect_count")" == 1 && "$(cat "$FGDIR/policy_count")" == 1 \
+            && "$(cat "$FGDIR/send_count")" == 1 && "$(cat "$FGDIR/powershell_count")" == 2 \
+            && ! -e "$FGDIR/observe_count" && ! -e "$FGDIR/codexargs.log" ]] \
+      && [[ "$(tr '\n' ' ' < "$FGDIR/eventlog")" == 'inspect policy client helper ' ]] \
+      && ok "$recovery recovery: real helper exit 6 at pre-foreground, one send, no retry/observer/activation" \
+      || no "$recovery recovery composition failed (rc=$RC helper=$(cat "$FGDIR/compose-helper.out" 2>/dev/null) out=$OUT)"
+    "$REAL_NODE" - "$FGDIR/compose-helper.args" "$FGDIR/no-client.json" "$UUIDF" "$FGDIR/client.args" "$IPCROOT" \
+      "$FGDIR/compose-inventory.json" "$FGDIR/compose-package.json" "$FGDIR/compose-registration.json" <<'NODE'
+const fs = require("node:fs");
+const path = require("node:path");
+const [argsPath, responsePath, thread, clientPath, ipcRoot, ...mockPaths] = process.argv.slice(2);
+const args = fs.readFileSync(argsPath, "utf8").split("\0").filter(Boolean);
+const one = (flag) => args.filter((item) => item === flag).length === 1;
+const value = (flag) => one(flag) ? args[args.indexOf(flag) + 1] : undefined;
+const response = JSON.parse(fs.readFileSync(responsePath, "utf8"));
+const follower = response.sentRequests?.[0];
+const client = fs.readFileSync(clientPath, "utf8").split("\0").filter(Boolean);
+const clientValue = (flag) => client.filter((arg) => arg === flag).length === 1 ? client[client.indexOf(flag) + 1] : undefined;
+const pickup = /^read "(.+\.task\.md)" and proceed$/.exec(clientValue("--task") ?? "");
+if (!one("-DryRun") || value("-ConversationId") !== thread || value("-Autoload") !== "codex-uri" ||
+    value("-IntendedHost") !== "package" || value("-MockForegroundProcess") !== "explorer" ||
+    path.resolve(value("-IpcRoot") ?? "") !== path.resolve(ipcRoot) || clientValue("--thread") !== thread ||
+    !pickup || path.dirname(path.resolve(pickup[1])) !== path.resolve(ipcRoot, "fgsess", thread) || !fs.existsSync(pickup[1]) ||
+    value("-MockForegroundPath") !== "C:\\Windows\\explorer.exe" ||
+    !["-MockInventoryJson", "-MockPackageJson", "-MockRegistrationJson"].every((flag, i) =>
+      value(flag) === fs.readFileSync(mockPaths[i], "utf8").trim()) ||
+    response.ok !== false || response.targetThreadId !== thread || response.sentRequests.length !== 1 ||
+    follower?.name !== "thread-follower-start-turn" || follower?.json?.method !== "thread-follower-start-turn" ||
+    follower?.json?.params?.conversationId !== thread || response.response?.resultType !== "error" ||
+    response.response?.error !== "no-client-found") process.exit(1);
+NODE
+    [[ $? -eq 0 ]] && ok "$recovery recovery binds exact no-client, thread, DryRun and all mock arguments" \
+      || no "$recovery recovery lost its exact transport/mock binding"
+    assert_safe_pickup "t13b composed $recovery"
+    printf '  EVIDENCE: recovery=%s helper-exit=%s events=%s reasons=%s\n' \
+      "$recovery" "$(cat "$FGDIR/compose-helper.status")" "$(tr '\n' ',' < "$FGDIR/eventlog")" "$reason_tokens"
+    sha256sum "$FGDIR/no-client.json" "$FGDIR/compose-inventory.json" "$FGDIR/compose-helper.args" "$FGDIR/compose-helper.out"
+    IPCROOT="$COMPOSE_PARENT_ROOT"
+  done
+else
+  echo "PLATFORM: Windows recovery composition inapplicable here; real helper rows not executed or counted as PASS."
+fi
+
+fgreset always-fail ok 0 rollout-hit eligible-alt-uri
+fgrun --ipc "$UUIDF" --autoload codex-uri --intended-host 'C:\Alt\Host\ChatGPT.exe' -- "t13b alternate no-client"
+[[ $RC -eq 1 ]] \
+  && printf '%s\n' "$OUT" | grep -Fxq 'RESULT: gui-unowned -- reason=protocol-host-not-package -- confirmation=not-attempted' \
+  && [[ "$(cat "$FGDIR/send_count")" == 1 && ! -e "$FGDIR/pslog" && ! -e "$FGDIR/observe_count" ]] \
+  && [[ "$(tr '\n' ' ' < "$FGDIR/eventlog")" == 'inspect policy client ' ]] \
+  && ok "alternate-host exact no-client refuses protocol activation before helper/retry" \
+  || no "alternate-host no-client recovery escaped containment (rc=$RC out=$OUT)"
+assert_safe_pickup "t13b alternate no-client"
 
 fgreset fail-then-ok ok 0 rollout-hit change-on-retry
 fgrun --ipc "$UUIDF" "t13b retry recheck"
@@ -625,9 +766,7 @@ fgrun --ipc "$UUIDF" --foreground-policy switch -- "t15 switch no ack"
 [[ $RC -ne 0 ]] && printf '%s' "$OUT" | grep -q "RESULT: gui-unowned -- reason=foreground-switch-unacknowledged -- confirmation=not-attempted" && ok "switch-no-ack refuses as gui-unowned" || no "switch-no-ack (rc=$RC)"
 [[ ! -f "$FGDIR/nodeargs.log" ]] && ok "no live send attempted" || no "live send attempted despite missing ack"
 [[ ! -f "$FGDIR/pslog" ]] && ok "no autoload attempted" || no "autoload attempted despite missing ack"
-printf '%s' "$OUT" | grep -qx 'FALLBACK -- file-drop is ready.' \
-  && printf '%s' "$OUT" | grep -Fqx "Open the thread in your intended Desktop host's window, then paste:" \
-  && ok "operator-owned fallback preserved" || no "operator-owned fallback lines missing"
+assert_unsafe_refusal "t15 switch no ack" "gui-unowned -- reason=foreground-switch-unacknowledged" 0
 assert_tax "t15"
 
 echo "== 16. switch with ack: autoload gets policy args; delivery reports foreground-switched =="
@@ -736,6 +875,25 @@ fgrun --ipc "$UUIDF" --foreground-policy bogus -- "t19 invalid policy"
 tf19=""; while IFS= read -r f; do grep -qx "t19 invalid policy" "$f" && { tf19="$f"; break; }; done < <(find "$IPCROOT/fgsess" -name '*.task.md' 2>/dev/null)
 [[ -n "$tf19" ]] && ok "envelope written before policy failure" || no "envelope missing on policy failure"
 assert_tax "t19"
+assert_unsafe_refusal "t19 invalid policy" "failed-closed -- reason=invalid-foreground-policy" 0
+
+echo "== 19b. Node availability refusal precedes inspection and suppresses pickup =="
+fgreset always-ok ok 0
+NODE_ENV="$TMP/node-unavailable.sh"
+cat > "$NODE_ENV" <<'EOF'
+command() {
+  if [[ "$#" -eq 2 && "$1" == -v && "$2" == node ]]; then
+    builtin printf 'node-unavailable\n' >> "$NODE_LOOKUP_LOG"
+    return 1
+  fi
+  builtin command "$@"
+}
+EOF
+NODE_LOOKUP_LOG="$FGDIR/node-lookup.log" BASH_ENV="$NODE_ENV" \
+  fgrun --ipc "$UUIDF" -- "t19b node unavailable"
+[[ -s "$FGDIR/node-lookup.log" ]] && ok "Node-unavailable command lookup shim was exercised" \
+  || no "Node-unavailable branch was not reached"
+assert_unsafe_refusal "t19b node unavailable" "failed-closed -- reason=node-unavailable" 0
 
 echo "== 20. target preflight refuses unsafe identity/model state before any send gate =="
 for m in \
@@ -761,7 +919,7 @@ for m in \
     fi
     [[ $RC -ne 0 ]] \
       && printf '%s' "$OUT" | grep -q "RESULT: failed-closed -- reason=${want} -- confirmation=not-attempted" \
-      && printf '%s' "$OUT" | grep -q 'FALLBACK -- file-drop is ready' \
+      && ! printf '%s' "$OUT" | grep -Eq '^(FALLBACK|    read |Open the thread)' \
       && ! printf '%s' "$OUT" | grep -q '^WAIT:' \
       && [[ "$parent_ok" -eq 1 ]] \
       && [[ "$(cat "$FGDIR/inspect_count" 2>/dev/null || echo 0)" == "1" ]] \
@@ -770,6 +928,7 @@ for m in \
       && [[ "$(tr '\n' ' ' < "$FGDIR/eventlog")" == 'inspect ' ]] \
       && ok "inspect=$imode -> $want before policy/client/helper" \
       || no "inspect=$imode escaped the pre-send refusal (rc=$RC, want=$want, events=$(tr '\n' ' ' < "$FGDIR/eventlog" 2>/dev/null))"
+    assert_unsafe_refusal "t20 $imode" "failed-closed -- reason=$want" 1
 done
 assert_tax "t20"
 
@@ -798,6 +957,7 @@ manual_task=""; while IFS= read -r f; do grep -qx "t20b manual page" "$f" && { m
   && printf '%s\n' "$OUT" | grep -q -- "--thread $UUIDF" \
   && printf '%s\n' "$OUT" | grep -q -- '--reply-path ' \
   && printf '%s\n' "$OUT" | grep -q -- "--rollout-path C:/ipc-fixture/rollout-current-$UUIDF.jsonl" \
+  && printf '%s\n' "$OUT" | grep '^WAIT:' | grep -Fq -- '--sessions-root C:/ipc-fixture' \
   && ! printf '%s\n' "$OUT" | grep -Eq '^(POLICY:|RESULT:|Injecting pickup|\[ Delivered)' \
   && [[ "$(cat "$FGDIR/inspect_count" 2>/dev/null || echo 0)" == "1" ]] \
   && [[ ! -f "$FGDIR/send_count" && ! -f "$FGDIR/powershell_count" \
@@ -876,6 +1036,7 @@ fgrun --ipc "$UUIDF" --deliver live --foreground-policy bogus -- "t20f invalid l
   && [[ ! -f "$FGDIR/inspect_count" && ! -f "$FGDIR/send_count" && ! -f "$FGDIR/powershell_count" ]] \
   && ok "explicit live invalid-policy refusal still precedes inspection" \
   || no "explicit live invalid policy lost its precedence (rc=$RC out=$OUT)"
+assert_unsafe_refusal "t20f invalid live policy" "failed-closed -- reason=invalid-foreground-policy" 0
 fgreset always-ok child 0
 fgrun --ipc "$UUIDF" --deliver live --foreground-policy switch -- "t20f live switch no ack"
 [[ $RC -ne 0 ]] \
@@ -883,6 +1044,7 @@ fgrun --ipc "$UUIDF" --deliver live --foreground-policy switch -- "t20f live swi
   && [[ ! -f "$FGDIR/inspect_count" && ! -f "$FGDIR/send_count" && ! -f "$FGDIR/powershell_count" ]] \
   && ok "explicit live switch acknowledgement refusal still precedes inspection" \
   || no "explicit live switch refusal lost its precedence (rc=$RC out=$OUT)"
+assert_unsafe_refusal "t20f live switch no ack" "gui-unowned -- reason=foreground-switch-unacknowledged" 0
 
 echo "== 21. autoload ok but retry never succeeds: gui-unowned, not gui-delivered =="
 fgreset always-fail ok 0

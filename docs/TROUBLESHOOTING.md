@@ -26,7 +26,7 @@ Before force replacement, run the matching preview: `./install.sh --dry-run --fo
 | `reason=host-inventory-incomplete` / `other-desktop-host-running` | Identity evidence was unreadable, mixed, or duplicated. Close the unintended GUI host or restore readable process/package evidence; do not bypass the gate. |
 | Helper reports `foreground-alternate-host` | A readable foreground `Codex` or `ChatGPT` executable did not match the intended host inventory. The helper refuses immediately under every foreground policy; inspect the current hosts and do not retry or bypass the gate. |
 | The thread appears to belong to the wrong Desktop host | Treat that as a hypothesis, not a conclusion from diagnostics. Re-inspect the exact target and local state. The operator closes the wrong host and performs pickup in the intended host; opening the thread there only establishes a follower, and Retry creates another rollout page. Do not automate host lifecycle or resend from symptoms alone. |
-| `reason=target-non-root` | The pre-send inspector found sub-agent, guardian-review, or other child evidence. Direct delivery is refused before host policy or pipe contact. Use the printed file-drop line with the known root parent when appropriate; the wrapper prints `Target parent thread:` when that identity is available. |
+| `reason=target-non-root` | The pre-send inspector found sub-agent, guardian-review, or other child evidence. It retains the envelope but prints no pickup or WAIT. `Target parent thread:` is guidance for a new root-target inspection, not permission to paste or retarget the refused envelope. |
 | `reason=target-model-empty` | The stored thread model is null, empty, or whitespace. No send was attempted and the toolkit does not repair settings. Select a healthy root thread or repair the target in its intended Desktop host, then issue a new dispatch. |
 | `reason=target-inspection-ambiguous` | Target existence, identity, archive state, root classification, or model safety could not be established from one trusted read-only snapshot. No send was attempted. Inspect the target; do not bypass or treat locator hints as authority. |
 | Client says `--model/--effort require --ack-thread-settings-change` | Those direct-client values persist as stored-thread settings. Supply the acknowledgement only when the operator explicitly intends the change. Values empty after trimming are always rejected. The maintained wrapper omits both fields. |
@@ -34,7 +34,8 @@ Before force replacement, run the matching preview: `./install.sh --dry-run --fo
 | `--ipc` → `failed-closed` with pipe/connect errors | The host gate passed, but the private router attempt failed or drifted. Run `codex_ipc_revalidate.mjs`; suspect drift before suspecting the target. This is post-attempt ambiguity, so do not resend. |
 | `reason=autoload-disabled` / `protocol-host-not-package` | Guarded recovery stopped because activation is off (the default), or the intended host is alternate and therefore never package-activated. The category does not independently prove current ownership. Use the printed file-drop line in the intended host. |
 | `reason=autoload-policy-refused` | The helper's fresh activation gate refused. Current real-machine readers do not qualify package-update clearance or the effective protocol handler, so this is the expected result for an unowned real package thread even with `--autoload codex-uri`. Revalidation or historical proof does not override it. |
-| `--ipc` → `gui-unowned` repeatedly | `gui-unowned` alone never authorizes a retry. Require the original structured proof of non-admission (`confirmation=not-attempted` with a printed pickup line), confirm current target/host state, and use that file-drop line if delivery is still required. Do not open the protocol URI manually to bypass the policy. |
+| `--ipc` → `gui-unowned` repeatedly | Neither `gui-unowned` nor `confirmation=not-attempted` alone authorizes pickup or retry. Pickup needs eligible target inspection and non-admission; eligible-target host refusals and exact no-client recovery retain the printed safe line. Confirm current target/host state before using it. Do not open the protocol URI manually to bypass the policy. |
+| Early invalid foreground policy, missing switch acknowledgement, or `node-unavailable`; missing/archived/child/empty-model/ambiguous target | The envelope is retained without pickup or WAIT. Correct preparation and rerun inspection against a safe root target. Do not paste the refused envelope or edit its pickup to name another thread. |
 | `confirmation=rollout-hit` | The exact dispatch pickup was observed in a rollout user message. This confirms admission only; inspect completion/reply state separately. |
 | `confirmation=rollout-pending` | At least one authoritative rollout candidate was readable/parseable, but no pickup was observed within the bounded budget. Do not infer non-delivery or resend automatically; inspect current thread state first. |
 | `confirmation=rollout-unavailable` | Observation could not make a determination because no authoritative candidate was usable or ambiguity/schema drift intervened. The accepted send remains `gui-delivered`; inspect current state without automatic resend. |
@@ -102,11 +103,18 @@ correlated facts, not proof of host ownership or permission to retry.
 | `multiple-final-message-bodies` | Distinct final bodies that the terminal copy could **not** resolve. The turn refuses. |
 
 Path aliases are deliberately narrow: inspector accepts `CODEX_IPC_SESSIONS_ROOT`; waiter accepts
-that alias plus `CODEX_IPC_ROLLOUT_PATH`; observer accepts the rollout alias plus its existing
-environment-only sessions root; harvester retains both. A corresponding explicit flag wins over a
+that alias plus `CODEX_IPC_ROLLOUT_PATH`; observer accepts both aliases and explicit
+`--sessions-root`/`--rollout-path`; harvester retains both aliases. A corresponding explicit flag wins over a
 nonempty environment value, then the existing default/discovery applies. `CODEX_HOME` is not an
 alias. The locator's `--since-*` filters are discovery aids over current timestamps; reset/revert
 can make an older thread match, so inspect the selected target before any delivery.
+
+For an explicit page outside the default sessions tree, supply its complete containing sessions
+root, not just its date directory. Observer/waiter take `--sessions-root`; set
+`CODEX_IPC_SESSIONS_ROOT` for inspector/harvester/viewer. The wrapper passes inspector
+`rollout.sessionsRoot` to the observer and printed WAIT. A page path alone cannot establish the
+scope needed to discover successors across dates, so an omitted or mismatched root refuses
+certification.
 
 Forked threads whose first record carries `forked_from_id` with no
 `subagent_history_start_ordinal` and no top-level `ordinal` are read as ordinary rollouts. If such

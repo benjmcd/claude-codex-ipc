@@ -116,6 +116,16 @@ function main() {
   ];
   const hasWaiterContract = (relPath) => waiterContractSentences.every((sentence) => contains(relPath, sentence));
   const handoffText = readText("scripts/handoff_to_codex.sh");
+  const unsafePickupPaths = [
+    'echo "RESULT: failed-closed -- reason=invalid-foreground-policy',
+    'echo "RESULT: gui-unowned -- reason=foreground-switch-unacknowledged',
+    'echo "RESULT: failed-closed -- reason=node-unavailable',
+    'echo "RESULT: failed-closed -- reason=${TARGET_REFUSAL_REASON}',
+  ].map((marker) => {
+    const start = handoffText.indexOf(marker);
+    const end = handoffText.indexOf("exit 1", start);
+    return start >= 0 && end > start ? handoffText.slice(start, end + 6) : "";
+  });
   const inspectedTargetClassifier =
     handoffText.match(
       /(?:^|\n)[ \t]*classify_inspected_target\(\)[ \t]*\{([\s\S]*?)(?=\n[ \t]*# Safe manual preparation)/,
@@ -200,18 +210,19 @@ function main() {
         ok: contains("SKILL.md", "Do not infer a different target from title"),
       },
     ]),
-    check("REQ-004", "IPC path is fallback-backed by writing file-drop first.", [
+    check("REQ-004", "IPC publishes an envelope first; pickup additionally requires target eligibility and non-admission.", [
       {
         label: "IPC branch writes OUTBOUND before live delivery",
         file: "scripts/handoff_to_codex.sh",
         ok: contains("scripts/handoff_to_codex.sh", '| atomic_write "$OUTBOUND_MSYS"'),
       },
       {
-        label: "IPC branch has fallback function and file-drop instruction",
+        label: "IPC retains safe fallback instructions without equating publication with pickup eligibility",
         file: "scripts/handoff_to_codex.sh",
         ok:
           contains("scripts/handoff_to_codex.sh", "fallback()") &&
-          contains("scripts/handoff_to_codex.sh", "FALLBACK -- file-drop is ready"),
+          contains("scripts/handoff_to_codex.sh", "FALLBACK -- file-drop is ready") &&
+          contains("scripts/handoff_to_codex.sh", "Safe fallback requires an inspected eligible target AND proven non-admission."),
       },
     ]),
     check("REQ-005", "Claude session context is available but transcript paths are opt-in.", [
@@ -404,7 +415,7 @@ function main() {
             /classification\.kind\s*===\s*"ambiguous"/,
             /classification\.kind\s*===\s*"non-root"/,
             /typeof\s+thread\.model\s*!==\s*"string"\s*\|\|\s*thread\.model\.trim\(\)\s*===\s*""/,
-            /process\.stdout\.write\(\[state, parent, legacy, rolloutPath\]\.join\("\\t"\)\)/,
+            /process\.stdout\.write\(\[state, parent, legacy, rolloutPath, sessionsRoot\]\.join\("\\t"\)\)/,
           ].every((anchor) => anchor.test(inspectedTargetClassifier)) &&
           contains("scripts/handoff_to_codex.sh", "INSPECT_FIELDS=$(classify_inspected_target)") &&
           contains(
@@ -412,6 +423,12 @@ function main() {
             "IFS=$'\\t' read -r INSPECT_CLASS INSPECT_PARENT INSPECT_WARNING",
           ) &&
           contains("scripts/handoff_to_codex.sh", 'TARGET_REFUSAL_REASON="target-inspection-ambiguous"'),
+      },
+      {
+        label: "all four early or unsafe refusal sites retain the envelope without pickup or WAIT",
+        file: "scripts/handoff_to_codex.sh",
+        ok: unsafePickupPaths.every((block) => block.includes("Envelope retained;") &&
+          !/\bfallback\b|\bprint_wait_hint\b|FALLBACK|Open the thread|    read /.test(block)),
       },
       {
         label: "inspector derives root status from every available child and parent indicator",
@@ -524,7 +541,8 @@ function main() {
       {
         label: "SKILL.md documents the taxonomy format",
         file: "SKILL.md",
-        ok: contains("SKILL.md", "-- reason=<token> -- confirmation=<token>"),
+        ok: contains("SKILL.md", "-- reason=<token> -- confirmation=<token>") &&
+          contains("SKILL.md", "`gui-unowned` and `confirmation=not-attempted` alone do not authorize pickup."),
       },
       {
         label: "unknown autoload exit codes fail closed instead of falling through",
@@ -721,6 +739,12 @@ function main() {
     ], "Static easy-path/reference lock only: it proves the wait references and OQ-4 caveat bytes are present, not their runtime effect."),
     check("REQ-020", "Every live attempt is bound to one intended running Desktop host; activation is separately opt-in and fail-closed.", [
       {
+        label: "host-policy refusal preserves pickup after target eligibility is established",
+        file: "scripts/handoff_to_codex.sh",
+        ok: /report_host_policy_refusal\(\) \{\n[^\n]*\n[^\n]*confirmation=not-attempted[^\n]*\n\s*fallback\n\s*\}/.test(handoffText) &&
+          handoffText.indexOf('if [[ -n "$TARGET_REFUSAL_REASON" ]]') < handoffText.indexOf("report_host_policy_refusal()"),
+      },
+      {
         label: "shared host policy defaults to autoload off and the package intended host",
         file: "scripts/codex_ipc_host_policy.ps1",
         ok:
@@ -900,13 +924,16 @@ function main() {
     ], "Static instruction checks only: they prove the required guidance bytes are present, not that an agent obeyed them. Hermetic wrapper and payload-parity suites prove default-off and explicit opt-in rendering without live IPC."),
     check("REQ-023", "DB-designated rollout pages propagate end to end and direct successor pages fail closed without auto-hopping.", [
       {
-        label: "wrapper admits only a parsed DB-designated page and passes it to observation and the waiter",
+        label: "wrapper passes the parsed DB-designated page and inspector discovery scope to observation and the waiter",
         file: "scripts/handoff_to_codex.sh",
         ok:
           contains("scripts/handoff_to_codex.sh", 'selection?.authority === "db.rollout_path"') &&
           contains("scripts/handoff_to_codex.sh", "value?.rollout?.primary?.parsedOk === true") &&
           contains("scripts/handoff_to_codex.sh", 'observe_args+=(--rollout-path "$INSPECT_ROLLOUT_PATH")') &&
-          contains("scripts/handoff_to_codex.sh", '--rollout-path %q --accept-rollout-fallback'),
+          contains("scripts/handoff_to_codex.sh", 'wait_args+=(--rollout-path "$INSPECT_ROLLOUT_PATH")') &&
+          contains("scripts/handoff_to_codex.sh", 'const sessionsRoot = portablePath(value?.rollout?.sessionsRoot);') &&
+          contains("scripts/handoff_to_codex.sh", 'observe_args+=(--sessions-root "$INSPECT_SESSIONS_ROOT")') &&
+          contains("scripts/handoff_to_codex.sh", 'wait_args+=(--sessions-root "$INSPECT_SESSIONS_ROOT")'),
       },
       {
         label: "reader owns the SQLite-free direct-successor veto and its fixed diagnostic codes",
@@ -1054,11 +1081,12 @@ function main() {
           contains("scripts/codex_ipc_wait.mjs", "same meaning as --sessions-root; flag wins"),
       },
       {
-        label: "observer adds only the rollout alias while harvester documents its retained aliases",
+        label: "observer accepts explicit discovery scope before its alias while harvester retains both aliases",
         file: "scripts/codex_ipc_rollout_observe.mjs",
         ok:
           contains("scripts/codex_ipc_rollout_observe.mjs", "raw.rolloutPath || process.env.CODEX_IPC_ROLLOUT_PATH || null") &&
-          contains("scripts/codex_ipc_rollout_observe.mjs", "sessionsRoot: process.env.CODEX_IPC_SESSIONS_ROOT || undefined") &&
+          contains("scripts/codex_ipc_rollout_observe.mjs", "sessionsRoot: raw.sessionsRoot || process.env.CODEX_IPC_SESSIONS_ROOT || undefined") &&
+          contains("scripts/codex_ipc_rollout_observe.mjs", 'case "--sessions-root":') &&
           contains("scripts/codex_ipc_reply_harvest.mjs", "rolloutPath: process.env.CODEX_IPC_ROLLOUT_PATH || null") &&
           contains("scripts/codex_ipc_reply_harvest.mjs", "sessionsRoot: process.env.CODEX_IPC_SESSIONS_ROOT || undefined") &&
           contains("scripts/codex_ipc_reply_harvest.mjs", "same validation as --rollout-path; flag wins"),

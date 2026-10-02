@@ -198,8 +198,8 @@ observation and reports `confirmation=rollout-hit|rollout-pending|rollout-unavai
 run `codex_ipc_revalidate.mjs` on your own machine before first use and after every Desktop
 update.
 
-`handoff_to_codex.sh --ipc <conversationId> "task"` writes the file-drop first (so the fallback is
-always ready), then injects the pickup line into the live Desktop GUI thread via the Desktop app's
+`handoff_to_codex.sh --ipc <conversationId> "task"` writes the envelope first, then proves target
+eligibility before injecting the pickup line into the live Desktop GUI thread via the Desktop app's
 IPC router named pipe (`\\.\pipe\codex-ipc`, `thread-follower-start-turn`). This route is built on
 **private Codex Desktop internals** and can break in any Codex Desktop update; revalidate with
 `codex_ipc_revalidate.mjs` (and, if needed, a controlled `codex_ipc_write_proof.mjs` run) after
@@ -211,7 +211,8 @@ Every live `--ipc` send reports exactly one result:
   thread is already loaded in the app. The shared host gate runs before the initial attempt and
   before every retry, so ownership alone never bypasses host identity.
 - `gui-unowned` — structured policy or router evidence established non-admission and the wrapper
-  returns with `confirmation=not-attempted` plus the file-drop pickup line. The category can arise
+  returns with `confirmation=not-attempted`. Pickup additionally requires an inspected eligible
+  target; an early unacknowledged foreground switch has no pickup. The category can arise
   before router contact from host-policy refusal, or after an exact `no-client-found` followed by
   refused/incomplete recovery; it is not a general claim about current ownership. The default
   `autoload=off`, alternate-host no-activation rule, foreground deferral, and incomplete package
@@ -239,8 +240,9 @@ hermetic DryRun mocks exercise the positive decision path without granting live 
 When activation is eventually eligible, a non-Codex foreground path saves the foreground window,
 fires the package link, and verifies focus snapback. A `switch` path leaves the visible app on the
 target thread. The file-drop **envelope** is preserved in every outcome; the
-**pickup line** is printed only when structured evidence proves no follower was admitted.
-`confirmation=not-attempted` names that state, although an exact `no-client-found` router request
+**pickup line** requires an inspected eligible target and structured proof that no follower was
+admitted. Neither `gui-unowned` nor `confirmation=not-attempted` alone establishes eligibility.
+An exact `no-client-found` router request
 may have occurred. After an ambiguous post-attempt result (`confirmation=unknown`) pickup is
 suppressed and resending is forbidden.
 
@@ -279,7 +281,7 @@ reclassify an accepted send and never trigger an automatic resend. A thread-tail
 inform diagnosis, but a negative bounded/recent-tail result cannot prove non-admission or
 authorize a resend.
 
-Target authority is structural and precedes every live route. After publishing the fallback
+Target authority is structural and precedes every live route. After publishing the retained
 envelope, the wrapper runs one read-only inspector snapshot before its first pipe contact and reuses
 that snapshot across guarded auto-load recovery. The snapshot must prove a successful read-only DB
 open, one exact active row, a `root` or warned `legacy-root-assumed` classification, and a
@@ -287,7 +289,11 @@ nonempty stored model. Explicit sub-agent or guardian-review evidence is `non-ro
 source is assumed root only when every available child indicator is absent. Conflicting, invalid,
 or unreadable indicators are ambiguous. Missing, archived, non-root, empty-model, malformed, or
 ambiguous targets fail with `confirmation=not-attempted` before the fresh host gate or any pipe
-contact. Known parent identity is reported, while locator hints remain discovery-only.
+contact, without a pickup or `WAIT:` line. Early invalid foreground policy, missing switch
+acknowledgement, and Node-unavailable refusals likewise retain only the envelope. Correct the
+preparation and rerun inspection against a safe root target. Known parent identity is reported
+as guidance, not a replacement pickup target; locator hints remain discovery-only. Host-policy
+refusal after target eligibility, and exact no-client recovery, keep the safe intended-host pickup.
 
 Activation authority is likewise structural. The wrapper accepts `no-client-found` only from a
 parsed failed client response for the exact target with exactly one matching follower request;
@@ -367,8 +373,12 @@ do not follow a target-thread ID to a differently owned physical rollout:
 without a trusted alias authority that remap is `unavailable`, not inferred. This limits rollout
 observation/fallback only; file-primary replies and the preserved file-drop envelope remain usable.
 They accept `--rollout-path` but do not derive it from the DB; pass the exact
-designated path when known, or accept that root-only discovery can be ambiguous. The maintained
-wrapper propagates its single trusted inspector page to both observation and the printed waiter.
+designated path when known, or accept that root-only discovery can be ambiguous. An external page
+requires its containing sessions root for the recursive successor scan; its date directory is too
+narrow. Observer/waiter accept `--sessions-root`; inspector, harvester and viewer can use
+`CODEX_IPC_SESSIONS_ROOT`. A page outside the configured/default root fails certification even
+when the page is explicit. The maintained wrapper propagates its single trusted inspector page
+and normalized `rollout.sessionsRoot` to both observation and the printed waiter.
 The read-only reply viewer accepts an explicit page for a UUID-scoped `-c` view or can derive it
 once with `--derive-rollout-path`; session-wide and filedrop views cannot select a page. Missing
 authority prints fixed `ROLLOUT-PATH:` guidance, page vetoes print fixed `ROLLOUT-PAGE:` guidance,
@@ -380,7 +390,7 @@ Local path configuration is deliberately narrow:
 |---|---|---|
 | Inspector | `--sessions-root` / `CODEX_IPC_SESSIONS_ROOT` | Flag, nonempty environment, existing home default |
 | Waiter | `--rollout-path` / `CODEX_IPC_ROLLOUT_PATH`; `--sessions-root` / `CODEX_IPC_SESSIONS_ROOT` | Flag, nonempty environment, existing default/discovery |
-| Observer | `--rollout-path` / `CODEX_IPC_ROLLOUT_PATH`; existing environment-only `CODEX_IPC_SESSIONS_ROOT` | Rollout flag wins; sessions root remains environment-only |
+| Observer | `--rollout-path` / `CODEX_IPC_ROLLOUT_PATH`; `--sessions-root` / `CODEX_IPC_SESSIONS_ROOT` | Flag, nonempty environment, existing default/discovery |
 | Harvester | `--rollout-path` / `CODEX_IPC_ROLLOUT_PATH`; existing `CODEX_IPC_SESSIONS_ROOT` | Rollout flag wins; retained aliases do not add authority |
 
 The viewer has no independent environment option, although its harvester child inherits the

@@ -712,16 +712,16 @@ fi
 # Desktop host. If no renderer owns the thread, optional package activation is handled
 # only by codex_ipc_autoload.ps1 after its own fresh gate; the public default is off.
 # Model/reasoning are renderer-controlled: this CANNOT change the thread's model
-# or reasoning effort, nor any other session's. Falls back to the file-drop pickup
-# line ONLY when the router contract proves that no follower was admitted; after an ambiguous
+# or reasoning effort, nor any other session's. Prints a thread-bound pickup line
+# ONLY for an inspected eligible target with proven non-admission; after an ambiguous
 # post-attempt result the envelope is preserved but pickup is suppressed (no resend).
 # Result taxonomy: gui-delivered | gui-unowned | failed-closed.
 if [[ "$MODE" == "ipc" ]]; then
     printf '%s\n' "$PAYLOAD" | atomic_write "$OUTBOUND_MSYS"
     echo "[ Handoff written to ${OUTBOUND} ]"
     SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-    # Safe fallback: ONLY when no follower admission was accepted
-    # (confirmation=not-attempted). An exact no-client response may still mean a router request
+    # Safe fallback requires an inspected eligible target AND proven non-admission.
+    # confirmation=not-attempted alone is insufficient. An exact no-client response may mean a router request
     # occurred; the token describes non-admission, not absence of every wire attempt.
     fallback() {
         echo "" >&2
@@ -751,20 +751,20 @@ if [[ "$MODE" == "ipc" ]]; then
         # standing approval can never act silently.
         echo "POLICY: foreground=${FOREGROUND_POLICY} (source: ${FOREGROUND_POLICY_SOURCE}) ack=${ACK_SOURCE}"
         # Semantic policy validation AFTER the envelope write (file-drop-first invariant):
-        # a valid UUID/task invocation always leaves a usable fallback behind.
+        # a valid UUID/task invocation retains its envelope; target eligibility is not yet known.
         case "$FOREGROUND_POLICY" in
             defer|switch|restore-if-known) : ;;
             *)
                 echo "RESULT: failed-closed -- reason=invalid-foreground-policy -- confirmation=not-attempted" >&2
                 echo "('${FOREGROUND_POLICY}' is not one of: defer, switch, restore-if-known.)" >&2
-                fallback
+                echo "Envelope retained; correct the preparation and rerun inspection against a safe root target." >&2
                 exit 1;;
         esac
         if [[ "$FOREGROUND_POLICY" == "switch" && "$ACK_FOREGROUND_SWITCH" -ne 1 ]]; then
             echo "RESULT: gui-unowned -- reason=foreground-switch-unacknowledged -- confirmation=not-attempted" >&2
             echo "(--foreground-policy switch requires --ack-foreground-switch or" >&2
             echo " CODEX_IPC_FOREGROUND_SWITCH_STANDING_APPROVAL=1; it visibly navigates the Codex app.)" >&2
-            fallback
+            echo "Envelope retained; correct the preparation and rerun inspection against a safe root target." >&2
             exit 1
         fi
     fi
@@ -775,7 +775,7 @@ if [[ "$MODE" == "ipc" ]]; then
         fi
         echo "ERROR: node not found; live --ipc needs Node." >&2
         echo "RESULT: failed-closed -- reason=node-unavailable -- confirmation=not-attempted" >&2
-        fallback
+        echo "Envelope retained; correct the preparation and rerun inspection against a safe root target." >&2
         exit 1
     fi
     classify_inspected_target() {
@@ -940,7 +940,7 @@ process.stdout.write([state, parent, legacy, rolloutPath, sessionsRoot].join("\t
         fi
         echo "RESULT: failed-closed -- reason=${TARGET_REFUSAL_REASON} -- confirmation=not-attempted" >&2
         echo "$TARGET_REFUSAL_DETAIL" >&2
-        fallback
+        echo "Envelope retained; correct the preparation and rerun inspection against a safe root target." >&2
         exit 1
     fi
     if [[ "$DELIVERY" == "manual" ]]; then

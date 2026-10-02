@@ -319,9 +319,14 @@ All three preserve `gui-delivered` and exit 0 after an accepted send. Observer f
 `rollout-unavailable`; pending/unavailable never cause an automatic resend.
 See [references/architecture.md](references/architecture.md) for the full taxonomy, the gated
 activation/focus behavior (experimental, Windows-only), and its disclosed residues. The file-drop
-**envelope** is preserved in every outcome; the **pickup line** is printed only when the failure is
-structurally proven not to have admitted a follower. `confirmation=not-attempted` names that
-non-admission state; an exact `no-client-found` router request may still have occurred. After an
+**envelope** is preserved in every outcome; the **pickup line** requires both an inspected eligible
+root target and structurally proven non-admission.
+`gui-unowned` and `confirmation=not-attempted` alone do not authorize pickup.
+Early foreground-policy/acknowledgement or Node refusals and missing, archived, child,
+empty-model, or ambiguous targets retain the envelope without pickup or `WAIT:`. Correct the
+preparation and inspect a safe root target again. Eligible-target host refusals and exact
+`no-client-found` recovery retain the safe pickup instruction for the intended host; that router
+request may still have occurred. After an
 ambiguous post-attempt result (`confirmation=unknown`) pickup is suppressed and resending is
 forbidden — the turn may already have been admitted.
 
@@ -428,7 +433,13 @@ target-thread ID that Desktop internally remaps to a differently owned physical 
 `unavailable`: no trusted alias authority exists, so rollout observation/fallback never follows the
 remap heuristically. File-primary replies and the preserved file-drop envelope are unaffected. The
 standalone observer, waiter, and harvester accept but do not derive the DB-designated path; pass
-their exact `--rollout-path` when it is known, or accept root-only discovery ambiguity. Missing
+their exact `--rollout-path` when it is known, or accept root-only discovery ambiguity.
+An external page also requires its containing sessions root: pass `--sessions-root` to the
+observer/waiter or set `CODEX_IPC_SESSIONS_ROOT` for the inspector, harvester, and viewer.
+Use the complete sessions root, not the page's date directory: the successor scan spans dates.
+The wrapper passes the inspector's normalized `rollout.sessionsRoot` explicitly to its observer
+and printed `WAIT:`. A page outside the configured/default root cannot certify observation or
+completion; a page path alone does not establish a complete discovery scope. Missing
 page authority emits the fixed `ROLLOUT-PATH:` guidance, while page vetoes emit a fixed
 `ROLLOUT-PAGE:` line. Windows namespace spellings are normalized only at the CLI boundary; owner,
 canonical-path, physical-identity, and cursor checks remain unchanged. The read-only reply viewer
@@ -460,7 +471,7 @@ Local path aliases are intentionally component-scoped:
 |---|---|---|
 | Inspector | `--sessions-root` / `CODEX_IPC_SESSIONS_ROOT` | Flag, nonempty environment, existing home default |
 | Waiter | `--rollout-path` / `CODEX_IPC_ROLLOUT_PATH`; `--sessions-root` / `CODEX_IPC_SESSIONS_ROOT` | Flag, nonempty environment, existing default/discovery |
-| Observer | `--rollout-path` / `CODEX_IPC_ROLLOUT_PATH`; existing environment-only `CODEX_IPC_SESSIONS_ROOT` | Rollout flag wins; sessions root remains environment-only |
+| Observer | `--rollout-path` / `CODEX_IPC_ROLLOUT_PATH`; `--sessions-root` / `CODEX_IPC_SESSIONS_ROOT` | Flag, nonempty environment, existing default/discovery |
 | Harvester | `--rollout-path` / `CODEX_IPC_ROLLOUT_PATH`; existing `CODEX_IPC_SESSIONS_ROOT` | Rollout flag wins; retained aliases do not add authority |
 
 The reply viewer has no independent path environment option, although its harvester child inherits

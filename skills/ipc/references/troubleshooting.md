@@ -8,7 +8,7 @@ Repo-level triage lives in `docs/TROUBLESHOOTING.md`; this is the bundled quick 
 |---|---|---|
 | `node:sqlite is unavailable` from inspector/locator/snapshot | Node.js without `node:sqlite` support (needs ≥ 22.5; older 22.x/23.x lines may require `--experimental-sqlite`) | Upgrade Node, or skip inspection — file-drop handoff works without it |
 | `--app/--open/--exec was removed in v0.1.8` | CLI-backed modes removed | Use the default file-drop handoff or `--ipc <conversationId>`; neither invokes the Codex CLI |
-| `--ipc` says `node not found` | Node.js missing | Install Node. A live invocation prints its structurally safe fallback; manual mode retains the envelope but prints no actionable pickup because target inspection did not run |
+| `--ipc` says `node not found` | Node.js missing | Install Node and rerun preparation/inspection. Live and manual modes retain the envelope without pickup because target eligibility was not established |
 | Inspector says `State DB was not found` | No Codex Desktop state on this machine (or non-default path) | Pass `--db`/`--sessions-root`, or accept that inspection is unavailable |
 | `autoload helper unavailable` | Not Windows, `powershell.exe` missing, or helper missing | Use file-drop; do not launch the protocol manually to bypass the shared policy |
 | Thread appears to belong to the wrong Desktop host | Symptoms from diagnostics or local state; not proof of ownership | Re-inspect the exact target. The operator closes the wrong host and pastes pickup into the intended host; opening it there only establishes a follower, and Retry creates another rollout page. Do not automate host lifecycle or resend from symptoms alone |
@@ -68,12 +68,16 @@ page before issuing any new dispatch.
 2. `RESULT: gui-unowned` — structured policy or router evidence established non-admission, so the
    live path stopped with `confirmation=not-attempted`. This category does not by itself prove the
    thread's current owner: policy can refuse before router contact, or an exact `no-client-found`
-   can be followed by a refused recovery. Use the printed file-drop pickup line in the intended
+   can be followed by a refused recovery. Pickup additionally requires an inspected eligible
+   target. Eligible-target host refusal and exact no-client recovery keep the printed pickup;
+   early switch-acknowledgement refusal does not. Use only a printed safe pickup in the intended
    host. Do not open the protocol URI manually to bypass the gate or automatically rerun `/ipc`.
 3. `RESULT: failed-closed` with `confirmation=not-attempted` — structured evidence proves that no
-   follower was admitted (target missing/archived, invalid arguments, refused policy, or exact
-   `no-client-found` followed by a later refusal). A router request may have occurred, but no turn
-   was admitted, so the printed file-drop pickup line is safe to paste.
+   follower was admitted, but that alone does not establish target eligibility. Invalid foreground
+   policy, Node absence, and missing/archived/child/empty-model/ambiguous targets retain the
+   envelope without pickup or `WAIT:`. Correct preparation and inspect a safe root target again;
+   do not paste the refused envelope or manually retarget its pickup. A known parent is guidance
+   for a new inspection. Exact no-client recovery after eligible inspection retains safe pickup.
 4. `RESULT: failed-closed` with `confirmation=unknown` — router/pipe failure *after* a send was
    attempted (app closed, timeout, protocol drift). **The envelope is preserved but no pickup line
    is printed, and you must not paste one or resend** — the turn may already have been admitted,
@@ -178,11 +182,17 @@ The waiter writes detail as `WAIT_DIAGNOSTIC` on stderr; the harvester writes
 
 These are correlated diagnostic data, not proof of host ownership or permission to retry. Local
 path aliases are likewise narrow: inspector accepts `CODEX_IPC_SESSIONS_ROOT`; waiter accepts that
-plus `CODEX_IPC_ROLLOUT_PATH`; observer accepts the rollout alias plus its existing environment-only
-sessions root; harvester retains both. A corresponding flag wins over a nonempty environment value,
+plus `CODEX_IPC_ROLLOUT_PATH`; observer accepts both aliases and explicit `--sessions-root`;
+harvester retains both aliases. A corresponding flag wins over a nonempty environment value,
 then the existing default/discovery applies. `CODEX_HOME` is unsupported. Locator `--since-*`
 filters use current indexed timestamps; reset/revert can make an older thread match, so inspect the
 candidate before delivery.
+
+An explicit external page needs its complete containing sessions root for successor discovery
+across dates. Use observer/waiter `--sessions-root`, or `CODEX_IPC_SESSIONS_ROOT` for the
+inspector/harvester/viewer. The wrapper passes inspector `rollout.sessionsRoot` into its observer
+and printed WAIT. An omitted or mismatched scope refuses certification; a page's date directory
+is not a substitute for the complete root.
 
 ## Encoding and mojibake recovery
 

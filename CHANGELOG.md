@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- Suppressed thread-bound pickup and WAIT on early foreground-policy/Node refusals and unsafe
+  target inspection. Envelopes and known-parent guidance remain available; eligible-target host
+  refusal and exact no-client recovery still print one safe pickup for the intended host.
+  Composed fixtures cover real multi-page observation and printed-WAIT pending correlation,
+  plus Windows DryRun helper refusals after an eligible no-client send sees changed inventory.
+- Passed inspector sessions-root scope alongside its designated page to observer and WAIT.
+  External pages require their containing sessions root; observer flags override environment
+  aliases and recursive supersession checks retain coverage across date directories.
+
 - Required backend role and GUI ancestry evidence before exempting resource or Electron
   processes from the host inventory. Cyclic, broken, unreadable and orphan backend chains
   refuse, including lone backend claims under a package root. Plain renamed package GUIs
