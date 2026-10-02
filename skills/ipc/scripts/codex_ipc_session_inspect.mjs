@@ -362,6 +362,19 @@ function parseJsonColumn(value) {
   }
 }
 
+// Native scalar SessionSource enums are stored bare; structured variants remain JSON.
+const BENIGN_SESSION_SOURCES = new Set(["cli", "vscode", "exec", "mcp"]);
+
+function parseSessionSource(value) {
+  if (BENIGN_SESSION_SOURCES.has(value)) return value;
+  const parsed = parseJsonColumn(value);
+  // SQL NULL/absent/empty is legacy absence; JSON null is not a native source enum.
+  if (parsed === null && value !== null && value !== undefined && value !== "") {
+    return { unparsed: String(value) };
+  }
+  return parsed;
+}
+
 function summarizeThread(row) {
   if (!row) {
     return { exists: false };
@@ -372,7 +385,7 @@ function summarizeThread(row) {
     rolloutPath: row.rollout_path || null,
     cwd: row.cwd || null,
     title: row.title || null,
-    source: parseJsonColumn(row.source),
+    source: parseSessionSource(row.source),
     modelProvider: row.model_provider ?? null,
     model: row.model ?? null,
     reasoningEffort: row.reasoning_effort || null,
@@ -466,7 +479,7 @@ function classifyTarget(dbThread, rollout, rolloutSelection) {
   const threadSource = thread.threadSource;
   if (threadSource === null || threadSource === undefined) {
     // Legacy rows are decided only after every other available child indicator is checked.
-  } else if (threadSource === "user") {
+  } else if (threadSource === "user" || threadSource === "agent_created_thread") {
     explicitRoot = true;
     addReason("thread-source-root");
   } else if (threadSource === "subagent" || threadSource === "guardian_review") {
@@ -512,6 +525,14 @@ function classifyTarget(dbThread, rollout, rolloutSelection) {
       }
     }
   } else if (
+    source &&
+    typeof source === "object" &&
+    !Array.isArray(source) &&
+    Object.prototype.hasOwnProperty.call(source, "internal")
+  ) {
+    childIndicator = true;
+    addReason("source-internal");
+  } else if (
     source !== null &&
     source !== undefined &&
     typeof source !== "string" &&
@@ -519,6 +540,9 @@ function classifyTarget(dbThread, rollout, rolloutSelection) {
   ) {
     ambiguous = true;
     addReason("source-invalid");
+  } else if (source !== null && source !== undefined && !BENIGN_SESSION_SOURCES.has(source)) {
+    ambiguous = true;
+    addReason("source-unknown");
   }
 
   for (const field of ["agentNickname", "agentRole", "agentPath"]) {

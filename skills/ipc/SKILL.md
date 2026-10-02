@@ -140,11 +140,15 @@ reply-writability prediction. A blocked reply write is expected, not an error. F
 `--ipc` dispatch, `codex_ipc_wait --accept-rollout-fallback` certifies named-dispatch completion
 and `replySource=rollout-fallback` but intentionally emits no body; retrieve and render the body
 with the existing read-only dual-source `scripts/codex_ipc_replies.sh` viewer. Also inspect
-`targetClassification`, `threadSource`, and any parent facts. Explicit `subagent` and
-`guardian_review` sources, source JSON or agent metadata that marks a child, a spawn edge, or a
-rollout parent make the target non-root. A null legacy source is allowed only when every available
-child indicator is absent; it is labelled `legacy-root-assumed` and warned. Contradictory,
-invalid, or unreadable classification evidence is ambiguous and refuses delivery. Locator
+`targetClassification`, `threadSource`, and any parent facts. Exact `user` and
+`agent_created_thread` declarations identify roots only after all other evidence passes inspection.
+Native `source` enums `cli`, `vscode`, `exec`, and `mcp` accept bare or JSON-quoted storage. Explicit
+`subagent` and `guardian_review` declarations, `subagent` or `internal` source JSON, agent metadata
+that marks a child, a spawn edge, or a rollout parent veto root admission. Unknown source strings,
+objects, other thread declarations (including `agent_forked_thread`), and encoded JSON null refuse.
+A null legacy source is allowed only when every available child indicator is absent; it is labelled
+`legacy-root-assumed` and warned. Contradictory, invalid, or unreadable classification evidence is
+ambiguous and refuses delivery. Locator
 `targetKindHint` values are discovery hints only; the pre-send inspector remains authoritative.
 Display is capped at 4096 bytes by default; if truncation is reported, rerun with a sufficient
 `--max-bytes`. This is never a policy gate. Identify the latest
@@ -526,8 +530,8 @@ If the user created a clearly titled waiting thread, narrow with `--title-contai
 `--require-single`. A locator result is only candidate discovery, not send authority.
 Its `--since-*` filters compare current indexed timestamps. Reset/revert can rewrite those values
 and make an older thread match, so time-filter inclusion never proves new-thread provenance.
-`targetKindHint` marks explicit `user` rows as `root`, explicit child rows as `non-root`, and
-null-source rows as `legacy-unknown`; it never applies the full classification. If exactly one
+`targetKindHint` marks exact `user` and `agent_created_thread` rows as `root`, explicit child rows as
+`non-root`, and null-source rows as `legacy-unknown`; it never applies the full classification. If exactly one
 intended candidate remains, run `codex_ipc_session_inspect.mjs` on that conversationId and then
 apply the existing-session send rule. If no candidate or multiple plausible candidates remain, fall
 back to the file-drop handoff and ask the user to select/create the Desktop thread and paste the

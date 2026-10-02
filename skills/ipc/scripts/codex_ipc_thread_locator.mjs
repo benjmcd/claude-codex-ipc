@@ -272,7 +272,7 @@ function summarizeThread(row) {
     targetKindHint:
       row.thread_source === "subagent" || row.thread_source === "guardian_review"
         ? "non-root"
-        : row.thread_source === "user"
+        : row.thread_source === "user" || row.thread_source === "agent_created_thread"
           ? "root"
           : row.thread_source === null || row.thread_source === undefined
             ? "legacy-unknown"

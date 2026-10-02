@@ -1715,7 +1715,8 @@ cat > "$CLASSIFY_DB_BUILDER" <<'EOF'
 import { DatabaseSync } from "node:sqlite";
 import fs from "node:fs";
 
-const [dbPath, threadId, rolloutPath, scenario, parentId] = process.argv.slice(2);
+const [dbPath, threadId, rolloutPath, scenario, parentId,
+  sourceColumn = "__keep__", declaredSource = "__keep__"] = process.argv.slice(2);
 const row = {
   source: JSON.stringify("vscode"),
   threadSource: "user",
@@ -1726,6 +1727,10 @@ const row = {
 };
 switch (scenario) {
   case "root": break;
+  case "bare-user": row.source = "vscode"; break;
+  case "quoted-created": row.threadSource = "agent_created_thread"; break;
+  case "forked": row.threadSource = "agent_forked_thread"; break;
+  case "unknown-thread": row.threadSource = "unknown"; break;
   case "subagent": row.threadSource = "subagent"; break;
   case "guardian": row.threadSource = "guardian_review"; break;
   case "source-child":
@@ -1760,8 +1765,13 @@ switch (scenario) {
   case "root-child-conflict": row.agentRole = "worker"; break;
   case "malformed-source": row.threadSource = null; row.source = "{not-json"; break;
   case "parent-conflict": row.threadSource = null; row.source = null; break;
+  case "edge-unreadable": break;
+  case "edge-invalid": break;
+  case "db-untrusted": break;
   default: throw new Error(`unknown scenario: ${scenario}`);
 }
+if (sourceColumn !== "__keep__") row.source = sourceColumn;
+if (declaredSource !== "__keep__") row.threadSource = declaredSource === "null" ? null : declaredSource;
 fs.rmSync(dbPath, { force: true });
 const db = new DatabaseSync(dbPath);
 try {
@@ -1775,10 +1785,14 @@ try {
     row.source, row.threadSource, row.agentNickname, row.agentRole, row.agentPath,
     '{"type":"disabled"}', "never",
   );
-  if (scenario === "edge" || scenario === "parent-conflict") {
+  if (scenario === "edge" || scenario === "parent-conflict" || scenario === "edge-invalid") {
     db.exec("create table thread_spawn_edges (parent_thread_id text, child_thread_id text, status text)");
-    db.prepare("insert into thread_spawn_edges values (?,?,?)").run(parentId, threadId, "completed");
+    db.prepare("insert into thread_spawn_edges values (?,?,?)").run(
+      scenario === "edge-invalid" ? "not-a-uuid" : parentId, threadId, "completed",
+    );
   }
+  if (scenario === "edge-unreadable") db.exec("create table thread_spawn_edges (status text)");
+  if (scenario === "db-untrusted") db.exec("drop table threads");
 } finally {
   db.close();
 }
@@ -1795,22 +1809,31 @@ assert.deepEqual(summary.targetClassification, full.targetClassification,
   "summary classification differs from full output");
 assert.equal(summary.dbThread.thread.threadSource, full.dbThread.thread.threadSource,
   "summary threadSource differs from full output");
+assert.equal(full.targetClassification.kind, expectedKind, "classification kind mismatch");
+assert.ok(full.targetClassification.reasons.includes(expectedReason),
+  `missing reason ${expectedReason}`);
+if (expectedReason === "db-thread-untrusted") {
+  assert.equal(full.dbThread.readOnlyOpenOk, false, "untrusted DB gained authority");
+  process.exit(0);
+}
 assert.equal(full.dbThread.thread.threadSource, expectedSource === "null" ? null : expectedSource,
   "threadSource mismatch");
 assert.equal(full.dbThread.thread.model, "synthetic-model", "stored model changed");
-assert.equal(full.targetClassification.kind, expectedKind, "classification kind mismatch");
 assert.equal(full.targetClassification.parentThreadId,
   expectedParent === "null" ? null : expectedParent, "parent mismatch");
-assert.ok(full.targetClassification.reasons.includes(expectedReason),
-  `missing reason ${expectedReason}`);
+if (["cli", "vscode", "exec", "mcp"].includes(full.dbThread.thread.source)) {
+  assert.deepEqual(full.dbThread.thread.sandboxPolicy, { type: "disabled" },
+    "source parsing changed the generic policy parser");
+}
 if (expectedKind === "legacy-root-assumed") {
   assert.ok(full.targetClassification.warnings.includes("legacy-null-source"),
     "legacy classification warning missing");
 }
 EOF
 
-assert_classification(){ # scenario kind thread-source parent reason [rollout-parent]
+assert_classification(){ # scenario kind thread-source parent reason [rollout-parent source-column declared-source]
   local scenario="$1" kind="$2" source="$3" parent="$4" reason="$5" rollout_parent="${6:-}"
+  local source_column="${7-__keep__}" declared_source="${8-__keep__}"
   local case_dir="$TMP/classify-$scenario" rollout="$TMP/classify-$scenario/rollout-$scenario-$THREAD.jsonl"
   mkdir -p "$case_dir/sessions"
   rollout="$case_dir/sessions/rollout-$scenario-$THREAD.jsonl"
@@ -1819,7 +1842,8 @@ assert_classification(){ # scenario kind thread-source parent reason [rollout-pa
   else
     printf '%s\n' "{\"type\":\"session_meta\",\"payload\":{\"id\":\"$THREAD\"}}" > "$rollout"
   fi
-  "$NODE_BIN" "$CLASSIFY_DB_BUILDER" "$case_dir/state.sqlite" "$THREAD" "$rollout" "$scenario" "$OTHER_THREAD" >/dev/null 2>&1
+  "$NODE_BIN" "$CLASSIFY_DB_BUILDER" "$case_dir/state.sqlite" "$THREAD" "$rollout" "$scenario" \
+    "$OTHER_THREAD" "$source_column" "$declared_source" >/dev/null 2>&1 || { no "classification fixture failed: $scenario"; return; }
   "$NODE_BIN" "$INSPECT" --db "$case_dir/state.sqlite" --sessions-root "$case_dir/sessions" \
     --thread "$THREAD" > "$case_dir/full.json" 2>"$case_dir/full.err"; local full_rc=$?
   "$NODE_BIN" "$INSPECT" --db "$case_dir/state.sqlite" --sessions-root "$case_dir/sessions" \
@@ -1827,7 +1851,7 @@ assert_classification(){ # scenario kind thread-source parent reason [rollout-pa
   if [[ $full_rc -eq 0 && $summary_rc -eq 0 ]] && \
       "$NODE_BIN" "$CLASSIFY_ASSERT" "$case_dir/full.json" "$case_dir/summary.json" \
         "$kind" "$source" "$parent" "$reason" 2>"$case_dir/assert.err"; then
-    ok "$scenario -> $kind with identical full/summary facts"
+    ok "$scenario ($source, source=$source_column) -> $kind with identical full/summary facts"
   else
     no "$scenario classification mismatch (full=$full_rc summary=$summary_rc)"
     sed -n '1,5p' "$case_dir/assert.err" 2>/dev/null
@@ -1836,6 +1860,8 @@ assert_classification(){ # scenario kind thread-source parent reason [rollout-pa
 
 echo "== 23t. A2 target classification is fail-closed and provenance-preserving =="
 assert_classification root root user null thread-source-root
+assert_classification bare-user root user null thread-source-root
+assert_classification quoted-created root agent_created_thread null thread-source-root
 assert_classification subagent non-root subagent null thread-source-child
 assert_classification guardian non-root guardian_review null thread-source-child
 assert_classification source-child non-root null "$OTHER_THREAD" source-subagent
@@ -1851,6 +1877,53 @@ assert_classification rollout-parent non-root null "$OTHER_THREAD" rollout-paren
 assert_classification root-child-conflict ambiguous user null root-child-conflict
 assert_classification malformed-source ambiguous null null source-malformed
 assert_classification parent-conflict ambiguous null null parent-conflict "$HISTORY_BASE"
+
+echo "== 23t1. native source encodings and exact root declarations stay bounded =="
+for declaration in user agent_created_thread; do
+  for native_source in cli vscode exec mcp; do
+    for encoded_source in "$native_source" "\"$native_source\""; do
+      assert_classification root root "$declaration" null thread-source-root "" "$encoded_source" "$declaration"
+    done
+  done
+  assert_classification source-child ambiguous "$declaration" "$OTHER_THREAD" root-child-conflict "" __keep__ "$declaration"
+  assert_classification source-guardian ambiguous "$declaration" null root-child-conflict "" __keep__ "$declaration"
+  for internal_source in guardian_review memory_consolidation; do
+    assert_classification root ambiguous "$declaration" null root-child-conflict "" \
+      "{\"internal\":\"$internal_source\"}" "$declaration"
+  done
+  for metadata in agent-role agent-nickname agent-path; do
+    assert_classification "$metadata" ambiguous "$declaration" null root-child-conflict "" vscode "$declaration"
+  done
+  assert_classification edge ambiguous "$declaration" "$OTHER_THREAD" root-child-conflict "" vscode "$declaration"
+  assert_classification rollout-parent ambiguous "$declaration" "$OTHER_THREAD" root-child-conflict "$OTHER_THREAD" vscode "$declaration"
+  assert_classification source-parent-invalid ambiguous "$declaration" null source-parent-invalid "" __keep__ "$declaration"
+  assert_classification parent-conflict ambiguous "$declaration" null parent-conflict "$HISTORY_BASE" vscode "$declaration"
+  assert_classification rollout-parent ambiguous "$declaration" null rollout-parent-invalid not-a-uuid vscode "$declaration"
+  assert_classification edge-unreadable ambiguous "$declaration" null spawn-edge-unreadable "" vscode "$declaration"
+  assert_classification edge-invalid ambiguous "$declaration" null spawn-edge-invalid "" vscode "$declaration"
+  assert_classification db-untrusted ambiguous "$declaration" null db-thread-untrusted "" vscode "$declaration"
+done
+for internal_source in guardian_review memory_consolidation; do
+  assert_classification root non-root null null source-internal "" \
+    "{\"internal\":\"$internal_source\"}" null
+done
+for declaration in user agent_created_thread null; do
+  for unknown_source in unknown internal subagent guardian_review '"unknown"' '"internal"' '""' '{}' '{"feature":"unknown"}' '{"vscode":null}'; do
+    reason=source-unknown
+    [[ "$unknown_source" == [\"\{]* ]] || reason=source-malformed
+    assert_classification root ambiguous "$declaration" null "$reason" "" "$unknown_source" "$declaration"
+  done
+  for malformed_source in '{not-json' '"vscode' null; do
+    assert_classification root ambiguous "$declaration" null source-malformed "" "$malformed_source" "$declaration"
+  done
+  for invalid_source in '[]' 'false' '42'; do
+    assert_classification root ambiguous "$declaration" null source-invalid "" "$invalid_source" "$declaration"
+  done
+done
+for unknown_declaration in agent_forked_thread unknown; do
+  assert_classification root ambiguous "$unknown_declaration" null thread-source-unknown "" vscode "$unknown_declaration"
+done
+assert_classification root legacy-root-assumed null null legacy-indicators-absent "" '' null
 
 ROLLOUT_EVIDENCE_ASSERT="$TMP/assert-rollout-evidence.mjs"
 cat > "$ROLLOUT_EVIDENCE_ASSERT" <<'EOF'
@@ -1923,8 +1996,11 @@ assert_legacy_rollout_evidence multiple ambiguous rollout-selection-ambiguous
 assert_legacy_rollout_evidence owner-conflict ambiguous rollout-owner-untrusted
 
 echo "== 23v. A2 locator marks explicit non-root and legacy candidates =="
-for spec in root:root subagent:non-root guardian:non-root legacy:legacy-unknown; do
+for spec in root:root quoted-created:root subagent:non-root guardian:non-root legacy:legacy-unknown forked:unknown unknown-thread:unknown; do
   scenario="${spec%%:*}"; expected="${spec##*:}"
+  mkdir -p "$TMP/classify-$scenario"
+  "$NODE_BIN" "$CLASSIFY_DB_BUILDER" "$TMP/classify-$scenario/state.sqlite" "$THREAD" "" \
+    "$scenario" "$OTHER_THREAD" >/dev/null 2>&1 || { no "locator fixture failed: $scenario"; continue; }
   locator_out="$TMP/classify-$scenario/locator.json"
   if "$NODE_BIN" "$LOCATOR" --db "$TMP/classify-$scenario/state.sqlite" \
       --cwd C:/fixture/project --limit 1 > "$locator_out" 2>/dev/null \

@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- Recognized bare and JSON-quoted native `cli`, `vscode`, `exec`, and `mcp` session sources and the
+  exact `agent_created_thread` root declaration. All existing parent, spawn-edge, agent-metadata,
+  rollout, and database contradictions still veto root admission. Internal sources, unknown JSON
+  strings/objects, other feature declarations, and encoded JSON null now refuse; SQL-null legacy
+  behavior is preserved. Locator hints and hermetic full/summary classification tests agree.
 - Made standalone host-policy and activation-helper calls honor the public `~/.claude/ipc`
   descriptor default when no root flag or environment override is present. Empty environment roots
   fall back consistently, explicit blank roots refuse, and the matrix now proves the early mock
