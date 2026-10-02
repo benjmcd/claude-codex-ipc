@@ -3107,6 +3107,23 @@ function findUuidCandidates(root, threadId, options = {}) {
         return { matches, diagnostics, deadlineExceeded: true };
       }
       const candidate = path.join(directory, entry.name);
+      if (entry.isSymbolicLink()) {
+        // Excluded subtrees cannot prove absence of a successor. Regular file links still
+        // pass through the normal candidate-name, owner, physical-identity and page checks.
+        try {
+          const targetStat = fs.statSync(candidate);
+          if (!targetStat.isFile()) {
+            diagnostics.push(diagnostic(
+              targetStat.isDirectory() ? "directory-link-excluded" : "link-target-unresolved",
+              { path: candidate },
+            ));
+            continue;
+          }
+        } catch (error) {
+          diagnostics.push(diagnostic("link-target-unresolved", { path: candidate, message: error.message }));
+          continue;
+        }
+      }
       if (
         entry.isDirectory() &&
         !entry.isSymbolicLink() &&
@@ -3330,41 +3347,29 @@ export function assessRolloutPageSupersession(options = {}) {
   if (!UUID_RE.test(boundPageId || "")) return unproven("bound-page-id-invalid");
 
   const configuredRoot = options.sessionsRoot || path.join(os.homedir(), ".codex", "sessions");
-  const roots = [];
-  const configuredRootContainsBound =
-    typeof configuredRoot === "string" &&
-    configuredRoot.length > 0 &&
-    fs.existsSync(configuredRoot) &&
-    pathIsWithin(rolloutPath, configuredRoot);
-  if (configuredRootContainsBound) {
-    roots.push(configuredRoot);
+  // A directory-local search cannot prove absence of a successor on another date. Require the
+  // known discovery scope to contain the physical bound page before certifying its authority.
+  try {
+    if (typeof configuredRoot !== "string" || !fs.statSync(configuredRoot).isDirectory()) {
+      return unproven("discovery-root-unavailable");
+    }
+    const physicalRoot = fs.realpathSync.native(configuredRoot);
+    if (!pathIsWithin(bound.canonicalPath, physicalRoot)) {
+      return unproven("discovery-root-mismatch");
+    }
+  } catch {
+    return unproven("discovery-root-unavailable");
   }
-  const boundDirectory = path.dirname(rolloutPath);
-  if (roots.length === 0) roots.push(boundDirectory);
 
-  const rootKeys = new Set();
-  const matches = new Set();
-  const scanDiagnostics = [];
-  for (const root of roots) {
-    const key = canonicalPath(root);
-    if (rootKeys.has(key)) continue;
-    rootKeys.add(key);
-    const discovered = findUuidCandidates(root, threadId, {
-      now,
-      deadlineAt,
-      recursive: configuredRootContainsBound,
-    });
-    for (const item of discovered.matches) matches.add(item);
-    scanDiagnostics.push(...discovered.diagnostics);
-    if (discovered.deadlineExceeded) return unproven("deadline-exceeded");
-  }
-  if (scanDiagnostics.length > 0) {
-    return unproven("candidate-set-unresolved", { issueCount: scanDiagnostics.length });
+  const discovered = findUuidCandidates(configuredRoot, threadId, { now, deadlineAt });
+  if (discovered.deadlineExceeded) return unproven("deadline-exceeded");
+  if (discovered.diagnostics.length > 0) {
+    return unproven("candidate-set-unresolved", { issueCount: discovered.diagnostics.length });
   }
 
   const successors = [];
   const seenIdentities = new Set([bound.identityKey]);
-  for (const candidatePath of [...matches].sort((left, right) => left.localeCompare(right))) {
+  for (const candidatePath of discovered.matches.sort((left, right) => left.localeCompare(right))) {
     if (now() >= deadlineAt) return unproven("deadline-exceeded");
     // Discovery includes the bound page itself. It was just revalidated above, so skip its
     // ordinary spelling (and any canonical alias) before opening candidates. This preserves the

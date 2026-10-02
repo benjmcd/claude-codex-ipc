@@ -128,7 +128,7 @@ run_case(){
   shift
   mkdir -p "$case_root/sessions" "$case_root/transport" "$TMP/home"
   run_wait --thread "$THREAD" --dispatch "$DISPATCH" \
-    --sessions-root "$case_root/sessions" --transport-root "$case_root/transport" "$@"
+    --sessions-root "$case_root" --transport-root "$case_root/transport" "$@"
 }
 
 assert_token(){
@@ -305,7 +305,7 @@ CASE="$TMP/reply-env"; mkdir -p "$CASE"; write_done "$CASE/rollout-$THREAD.jsonl
 make_reply "$CASE/env-root/sid/$THREAD/$DISPATCH.reply.md"
 RUN_ENV=("CODEX_IPC_ROOT=$CASE/env-root")
 mkdir -p "$CASE/sessions"
-run_wait --thread "$THREAD" --dispatch "$DISPATCH" --sessions-root "$CASE/sessions" \
+run_wait --thread "$THREAD" --dispatch "$DISPATCH" --sessions-root "$CASE" \
   --rollout-path "$CASE/rollout-$THREAD.jsonl" --session sid
 assert_token done "CODEX_IPC_ROOT supplies the default transport root"
 
@@ -337,7 +337,13 @@ CASE="$TMP/rollout-explicit"; mkdir -p "$CASE"; make_reply "$CASE/reply.md"; wri
 printf '%s\n' 'not a sessions directory' >"$CASE/not-a-directory"
 run_wait --thread "$THREAD" --dispatch "$DISPATCH" --sessions-root "$CASE/not-a-directory" \
   --transport-root "$CASE/transport" --rollout-path "$CASE/explicit-$THREAD.jsonl" --reply-path "$CASE/reply.md"
-assert_token done "explicit rollout path wins without consulting the locator root"
+assert_token unavailable "an explicit page cannot certify authority through a non-directory discovery root"
+grep -q 'page-supersession-unproven' "$ERR_FILE" \
+  && ok "incomplete explicit-page scope has a distinct authority diagnostic" \
+  || no "explicit-page root failure lost its authority diagnostic"
+run_wait --thread "$THREAD" --dispatch "$DISPATCH" --sessions-root "$CASE" \
+  --transport-root "$CASE/transport" --rollout-path "$CASE/explicit-$THREAD.jsonl" --reply-path "$CASE/reply.md"
+assert_token done "the explicit page certifies with its known containing discovery root"
 
 CASE="$TMP/malformed"; mkdir -p "$CASE"; write_prefix "$CASE/rollout-$THREAD.jsonl"
 printf '{"type":"event_msg","payload":{"type":"agent_message","message":"bad:\001\200"}}\n' >>"$CASE/rollout-$THREAD.jsonl"

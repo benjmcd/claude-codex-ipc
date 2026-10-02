@@ -837,6 +837,18 @@ const legacy = classValid && classification.warnings.includes("legacy-null-sourc
   : "-";
 const selection = value?.rollout?.selection;
 const rawRolloutPath = thread?.rolloutPath;
+function portablePath(value) {
+  if (typeof value !== "string" || value.length === 0 || /[\u0000\r\n\t]/u.test(value)) {
+    return "-";
+  }
+  let result = value;
+  if (/^\\\\\?\\UNC\\/iu.test(result)) {
+    result = `//${result.slice(8)}`;
+  } else if (/^\\\\\?\\/u.test(result)) {
+    result = result.slice(4);
+  }
+  return result.replaceAll("\\\\", "/");
+}
 let rolloutPath = "-";
 if (
   typeof rawRolloutPath === "string" &&
@@ -847,26 +859,22 @@ if (
   selection?.path === rawRolloutPath &&
   value?.rollout?.primary?.parsedOk === true
 ) {
-  rolloutPath = rawRolloutPath;
-  if (/^\\\\\?\\UNC\\/iu.test(rolloutPath)) {
-    rolloutPath = `//${rolloutPath.slice(8)}`;
-  } else if (/^\\\\\?\\/u.test(rolloutPath)) {
-    rolloutPath = rolloutPath.slice(4);
-  }
-  rolloutPath = rolloutPath.replaceAll("\\\\", "/");
+  rolloutPath = portablePath(rawRolloutPath);
 }
-process.stdout.write([state, parent, legacy, rolloutPath].join("\t"));
+const sessionsRoot = portablePath(value?.rollout?.sessionsRoot);
+process.stdout.write([state, parent, legacy, rolloutPath, sessionsRoot].join("\t"));
 ' "$IPC_CID"
     }
     # Safe manual preparation and accepted live sends share one correlation-complete WAIT line.
     print_wait_hint() {
-        if [[ -n "$INSPECT_ROLLOUT_PATH" ]]; then
-            printf 'WAIT: node %q --thread %q --dispatch %q --reply-path %q --rollout-path %q --accept-rollout-fallback --budget-ms 1800000 --interval-ms 1000 --status-exit-codes\n' \
-                "${SCRIPT_DIR}/codex_ipc_wait.mjs" "$IPC_CID" "$DISPATCH_ID" "$INBOUND" "$INSPECT_ROLLOUT_PATH"
-        else
-            printf 'WAIT: node %q --thread %q --dispatch %q --reply-path %q --accept-rollout-fallback --budget-ms 1800000 --interval-ms 1000 --status-exit-codes\n' \
-                "${SCRIPT_DIR}/codex_ipc_wait.mjs" "$IPC_CID" "$DISPATCH_ID" "$INBOUND"
-        fi
+        local -a wait_args=(node "${SCRIPT_DIR}/codex_ipc_wait.mjs"
+            --thread "$IPC_CID" --dispatch "$DISPATCH_ID" --reply-path "$INBOUND")
+        [[ -z "$INSPECT_ROLLOUT_PATH" ]] || wait_args+=(--rollout-path "$INSPECT_ROLLOUT_PATH")
+        [[ -z "$INSPECT_SESSIONS_ROOT" ]] || wait_args+=(--sessions-root "$INSPECT_SESSIONS_ROOT")
+        wait_args+=(--accept-rollout-fallback --budget-ms 1800000 --interval-ms 1000 --status-exit-codes)
+        printf 'WAIT:'
+        printf ' %q' "${wait_args[@]}"
+        printf '\n'
     }
     # One read-only target snapshot gates both manual preparation and every possible send.
     # It is reused across live auto-load recovery. Inspector diagnostics are suppressed because
@@ -887,8 +895,9 @@ process.stdout.write([state, parent, legacy, rolloutPath].join("\t"));
         rm -f "$INSPECT_STDERR"
     fi
     INSPECT_FIELDS=$(classify_inspected_target)
-    IFS=$'\t' read -r INSPECT_CLASS INSPECT_PARENT INSPECT_WARNING INSPECT_ROLLOUT_PATH <<< "$INSPECT_FIELDS"
+    IFS=$'\t' read -r INSPECT_CLASS INSPECT_PARENT INSPECT_WARNING INSPECT_ROLLOUT_PATH INSPECT_SESSIONS_ROOT <<< "$INSPECT_FIELDS"
     [[ "$INSPECT_ROLLOUT_PATH" == "-" ]] && INSPECT_ROLLOUT_PATH=""
+    [[ "$INSPECT_SESSIONS_ROOT" == "-" ]] && INSPECT_SESSIONS_ROOT=""
     case "${INSPECT_STATUS}:${INSPECT_CLASS}" in
         0:active|0:legacy-root-assumed|0:archived|0:non-root|0:model-empty|1:missing) : ;;
         *) INSPECT_CLASS=ambiguous ;;
@@ -1195,6 +1204,7 @@ console.log(JSON.stringify({
         local observation=""
         local -a observe_args=(--thread "${IPC_CID}" --dispatch "${DISPATCH_ID}")
         [[ -z "$INSPECT_ROLLOUT_PATH" ]] || observe_args+=(--rollout-path "$INSPECT_ROLLOUT_PATH")
+        [[ -z "$INSPECT_SESSIONS_ROOT" ]] || observe_args+=(--sessions-root "$INSPECT_SESSIONS_ROOT")
         if observation=$(node "${SCRIPT_DIR}/codex_ipc_rollout_observe.mjs" "${observe_args[@]}"); then
             case "$observation" in
                 rollout-hit|rollout-pending|rollout-unavailable)

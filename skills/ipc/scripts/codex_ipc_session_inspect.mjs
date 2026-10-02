@@ -207,6 +207,7 @@ async function inspectSession(opts) {
     dbThread,
     targetClassification,
     rollout: {
+      sessionsRoot: opts.sessionsRoot,
       candidates: rolloutSelection.candidates,
       primary: rolloutSummary,
       candidatesAmbiguous: rolloutSelection.status === "ambiguous",
@@ -1292,6 +1293,7 @@ function projectSummary(result) {
       warnings: db.warnings,
     },
     rollout: {
+      sessionsRoot: rollout.sessionsRoot,
       candidates: (rollout.candidates || [])
         .slice(0, SUMMARY_CANDIDATE_CAP)
         .map(projectSummaryCandidate),

@@ -450,8 +450,9 @@ if [[ $E1_RC -eq 0 ]] && printf '%s' "$E1_OUT" | "$NODE_BIN" -e '
 const fs = require("node:fs");
 const value = JSON.parse(fs.readFileSync(0, "utf8"));
 process.exit(value.rollout?.primary?.path &&
-  fs.realpathSync.native(value.rollout.primary.path) === fs.realpathSync.native(process.argv[1]) ? 0 : 1);
-' "$E1_ENV_PAGE" >/dev/null 2>&1; then
+  fs.realpathSync.native(value.rollout.primary.path) === fs.realpathSync.native(process.argv[1]) &&
+  fs.realpathSync.native(value.rollout.sessionsRoot) === fs.realpathSync.native(process.argv[2]) ? 0 : 1);
+' "$E1_ENV_PAGE" "$E1_CASE/env" >/dev/null 2>&1; then
   ok "inspector accepts CODEX_IPC_SESSIONS_ROOT as the existing sessions-root option"
 else
   no "inspector ignored CODEX_IPC_SESSIONS_ROOT (rc=$E1_RC)"
@@ -463,8 +464,9 @@ if [[ $E1_RC -eq 0 ]] && printf '%s' "$E1_OUT" | "$NODE_BIN" -e '
 const fs = require("node:fs");
 const value = JSON.parse(fs.readFileSync(0, "utf8"));
 process.exit(value.rollout?.primary?.path &&
-  fs.realpathSync.native(value.rollout.primary.path) === fs.realpathSync.native(process.argv[1]) ? 0 : 1);
-' "$E1_FLAG_PAGE" >/dev/null 2>&1; then
+  fs.realpathSync.native(value.rollout.primary.path) === fs.realpathSync.native(process.argv[1]) &&
+  fs.realpathSync.native(value.rollout.sessionsRoot) === fs.realpathSync.native(process.argv[2]) ? 0 : 1);
+' "$E1_FLAG_PAGE" "$E1_CASE/flag" >/dev/null 2>&1; then
   ok "explicit inspector sessions-root overrides a conflicting environment alias"
 else
   no "explicit inspector sessions-root did not win (rc=$E1_RC)"
@@ -488,6 +490,20 @@ process.exit(path.resolve(value.rollout?.primary?.path || "") === path.resolve(p
   ok "unset sessions-root alias preserves the existing home default"
 else
   no "unset sessions-root alias changed the inspector default (rc=$E1_RC)"
+fi
+
+E1_OUT="$(env CODEX_IPC_SESSIONS_ROOT="$E1_CASE/env" "$NODE_BIN" "$INSPECT" \
+  --db "$E1_CASE/state.sqlite" --sessions-root "$E1_CASE/flag" \
+  --thread "$THREAD" --summary 2>/dev/null)"; E1_RC=$?
+if [[ $E1_RC -eq 0 ]] && printf '%s' "$E1_OUT" | "$NODE_BIN" -e '
+const fs = require("node:fs");
+const value = JSON.parse(fs.readFileSync(0, "utf8"));
+process.exit(fs.realpathSync.native(value.rollout.sessionsRoot) ===
+  fs.realpathSync.native(process.argv[1]) ? 0 : 1);
+' "$E1_CASE/flag" >/dev/null 2>&1; then
+  ok "inspector summary carries the same resolved discovery scope as full output"
+else
+  no "inspector summary lost the resolved discovery scope (rc=$E1_RC)"
 fi
 
 echo "== 2c. snapshot canonicalizes target/other/allowlist UUIDs and binds compare identity =="
@@ -2162,6 +2178,8 @@ const [mode, input, output] = process.argv.slice(2);
 const value = JSON.parse(fs.readFileSync(input, "utf8"));
 value.generatedAt = "NORMALIZED";
 if (mode === "current") {
+  // F1 adds the resolved discovery scope; compare every historical field unchanged.
+  delete value.rollout?.sessionsRoot;
   delete value.targetClassification;
   delete value.dbThread?.incomingSpawnEdges;
   for (const key of ["source", "modelProvider", "agentNickname", "agentRole", "agentPath"]) {

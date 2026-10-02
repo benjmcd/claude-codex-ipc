@@ -209,11 +209,11 @@ export async function observeRollout(options, injected = {}) {
 
 function usage() {
   return `Usage: node codex_ipc_rollout_observe.mjs --thread <uuid> --dispatch <dispatchId>
-       [--rollout-path <explicit>] [--budget-ms <n>] [--interval-ms <n>]
+       [--rollout-path <explicit>] [--sessions-root <path>] [--budget-ms <n>] [--interval-ms <n>]
 
 Environment:
   CODEX_IPC_ROLLOUT_PATH         same validation as --rollout-path; flag wins
-  CODEX_IPC_SESSIONS_ROOT        rollout locator root when no page is explicit
+  CODEX_IPC_SESSIONS_ROOT        discovery root for locator and bound-page authority; flag wins
   CODEX_IPC_OBSERVE_BUDGET_MS    bounded observation budget (default 20000, measurement-informed)
   CODEX_IPC_OBSERVE_INTERVAL_MS  positive poll interval (default 250)`;
 }
@@ -239,6 +239,7 @@ function parseArgs(argv) {
     threadId: null,
     dispatchId: null,
     rolloutPath: null,
+    sessionsRoot: null,
     budgetMs: undefined,
     intervalMs: undefined,
   };
@@ -253,6 +254,9 @@ function parseArgs(argv) {
         break;
       case "--rollout-path":
         raw.rolloutPath = takeValue(argv, ++index, arg);
+        break;
+      case "--sessions-root":
+        raw.sessionsRoot = takeValue(argv, ++index, arg);
         break;
       case "--budget-ms":
         raw.budgetMs = takeValue(argv, ++index, arg);
@@ -279,7 +283,7 @@ function parseArgs(argv) {
       threadId: raw.threadId.toLowerCase(),
       dispatchId: raw.dispatchId,
       rolloutPath: rolloutSource ? normalizeRolloutCliPath(rolloutSource) : null,
-      sessionsRoot: process.env.CODEX_IPC_SESSIONS_ROOT || undefined,
+      sessionsRoot: raw.sessionsRoot || process.env.CODEX_IPC_SESSIONS_ROOT || undefined,
       budgetMs: positiveOrDefault(
         budgetSource,
         DEFAULT_OBSERVE_BUDGET_MS,

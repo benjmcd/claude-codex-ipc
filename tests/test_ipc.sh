@@ -376,7 +376,7 @@ case "\$*" in
     mode=\$(cat "\$FG/inspect_mode" 2>/dev/null || echo ok)
     case "\$mode" in
       ok)         echo '{"ok":true,"dbThread":{"exists":true,"readOnlyOpenOk":true,"thread":{"exists":true,"id":"$UUIDF","archived":0,"model":"synthetic-model","threadSource":"user"}},"targetClassification":{"kind":"root","parentThreadId":null,"reasons":["thread-source-root"],"warnings":[]}}'; exit 0;;
-      page)       echo '{"ok":true,"dbThread":{"exists":true,"readOnlyOpenOk":true,"thread":{"exists":true,"id":"$UUIDF","archived":0,"model":"synthetic-model","threadSource":"user","rolloutPath":"C:/ipc-fixture/rollout-current-$UUIDF.jsonl"}},"targetClassification":{"kind":"root","parentThreadId":null,"reasons":["thread-source-root"],"warnings":[]},"rollout":{"primary":{"parsedOk":true,"path":"C:/ipc-fixture/rollout-current-$UUIDF.jsonl"},"selection":{"status":"found","reason":"db-rollout-path","authority":"db.rollout_path","path":"C:/ipc-fixture/rollout-current-$UUIDF.jsonl","candidateCount":2,"aliasCount":2}}}'; exit 0;;
+      page)       echo '{"ok":true,"dbThread":{"exists":true,"readOnlyOpenOk":true,"thread":{"exists":true,"id":"$UUIDF","archived":0,"model":"synthetic-model","threadSource":"user","rolloutPath":"C:/ipc-fixture/rollout-current-$UUIDF.jsonl"}},"targetClassification":{"kind":"root","parentThreadId":null,"reasons":["thread-source-root"],"warnings":[]},"rollout":{"sessionsRoot":"C:/ipc-fixture","primary":{"parsedOk":true,"path":"C:/ipc-fixture/rollout-current-$UUIDF.jsonl"},"selection":{"status":"found","reason":"db-rollout-path","authority":"db.rollout_path","path":"C:/ipc-fixture/rollout-current-$UUIDF.jsonl","candidateCount":2,"aliasCount":2}}}'; exit 0;;
       legacy)     echo '{"ok":true,"dbThread":{"exists":true,"readOnlyOpenOk":true,"thread":{"exists":true,"id":"$UUIDF","archived":0,"model":"synthetic-model","threadSource":null}},"targetClassification":{"kind":"legacy-root-assumed","parentThreadId":null,"reasons":["legacy-indicators-absent"],"warnings":["legacy-null-source"]}}'; exit 0;;
       child)      echo '{"ok":true,"dbThread":{"exists":true,"readOnlyOpenOk":true,"thread":{"exists":true,"id":"$UUIDF","archived":0,"model":"synthetic-model","threadSource":"subagent"}},"targetClassification":{"kind":"non-root","parentThreadId":"22222222-2222-4222-8222-222222222222","reasons":["thread-source-child","spawn-edge"],"warnings":[]}}'; exit 0;;
       guardian)   echo '{"ok":true,"dbThread":{"exists":true,"readOnlyOpenOk":true,"thread":{"exists":true,"id":"$UUIDF","archived":0,"model":"synthetic-model","threadSource":"guardian_review"}},"targetClassification":{"kind":"non-root","parentThreadId":null,"reasons":["thread-source-child"],"warnings":[]}}'; exit 0;;
@@ -975,16 +975,18 @@ fgrun --ipc "$UUIDF" "t27 pending no resend"
     && ok "pending adds one observation and no resend" || no "pending send/observe count"
 assert_tax "t27"
 
-echo "== 27b. DB-designated rollout page reaches observer and WAIT on both accepted routes =="
+echo "== 27b. DB-designated rollout page and discovery scope reach observer and WAIT on both accepted routes =="
 for client_mode in always-ok fail-then-ok; do
     fgreset "$client_mode" page 0 rollout-pending
     fgrun --ipc "$UUIDF" "t27b page propagation $client_mode"
     expected_page="C:/ipc-fixture/rollout-current-$UUIDF.jsonl"
     [[ $RC -eq 0 ]] \
         && grep -Fq -- "--rollout-path $expected_page" "$FGDIR/observe_args.log" \
+        && grep -Fq -- "--sessions-root C:/ipc-fixture" "$FGDIR/observe_args.log" \
         && printf '%s\n' "$OUT" | grep -Fq -- "--rollout-path $expected_page" \
-        && ok "$client_mode propagates the normalized DB page to observer and WAIT" \
-        || no "$client_mode lost the DB page (rc=$RC, args=$(cat "$FGDIR/observe_args.log" 2>/dev/null))"
+        && printf '%s\n' "$OUT" | grep '^WAIT:' | grep -Fq -- "--sessions-root C:/ipc-fixture" \
+        && ok "$client_mode propagates the normalized DB page and scope to observer and WAIT" \
+        || no "$client_mode lost the DB page or scope (rc=$RC, args=$(cat "$FGDIR/observe_args.log" 2>/dev/null))"
     [[ "$(cat "$FGDIR/inspect_count" 2>/dev/null || echo 0)" == "1" ]] \
         && ok "$client_mode reuses one inspector page snapshot" \
         || no "$client_mode repeated the inspector while propagating the page"

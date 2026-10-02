@@ -29,6 +29,7 @@ import { pathToFileURL } from "node:url";
 
 const waitPath = process.env.WAIT;
 const tmp = process.env.TMPDIR_TEST;
+let currentFixtureRoot = tmp;
 const thread = "11111111-1111-4111-8111-111111111111";
 const ownTurn = "00000000-0000-4000-8000-00000000c0de";
 const otherTurn = "22222222-2222-4222-8222-222222222222";
@@ -125,6 +126,7 @@ function writeReply(target, body = "verified reply") {
 function caseDir(name) {
   const target = path.join(tmp, name);
   fs.mkdirSync(target, { recursive: true });
+  currentFixtureRoot = target;
   return target;
 }
 
@@ -133,7 +135,7 @@ function directOptions(root, rolloutPath, replyPath, extra = {}) {
     threadId: thread,
     dispatchId: dispatch,
     rolloutPath,
-    sessionsRoot: path.join(root, "sessions"),
+    sessionsRoot: root,
     transportRoot: path.join(root, "transport"),
     replyPath,
     sessionId: null,
@@ -158,7 +160,7 @@ function cli(args, env = {}, timeout = 15000) {
       USERPROFILE: tmp,
       CODEX_IPC_ROOT: path.join(tmp, "default-transport"),
       CODEX_IPC_ROLLOUT_PATH: "",
-      CODEX_IPC_SESSIONS_ROOT: "",
+      CODEX_IPC_SESSIONS_ROOT: currentFixtureRoot,
       CODEX_IPC_WAIT_BUDGET_MS: "",
       CODEX_IPC_WAIT_INTERVAL_MS: "",
       ...env,
@@ -274,6 +276,88 @@ await test("a successor preserving the dispatch still vetoes stale-page completi
   const result = await waitForCompletion(directOptions(root, rollout, reply, { sessionsRoot: root }));
   assert.equal(result.token, "unavailable");
   assert.ok(result.diagnostics.some((item) => item.code === "rollout-page-superseded"));
+});
+
+await test("cross-date authority requires a known containing discovery root for primary and fallback", async () => {
+  const root = caseDir("cross-date-scope");
+  const records = ownCompletedRecords();
+  const rollout = writeRollout(path.join(root, "2026", "09", "28"), records);
+  const lines = records.map((item) => JSON.stringify(item));
+  const cutoff = lines.slice(0, 2).reduce((size, line) => size + Buffer.byteLength(line) + 1, 0);
+  writeSuccessor(path.join(root, "2026", "09", "30"), records, cutoff, otherTurn);
+  const wrongRoot = path.join(tmp, "wrong-scope");
+  fs.mkdirSync(wrongRoot);
+  const reply = writeReply(path.join(root, `${dispatch}.reply.md`));
+  for (const sessionsRoot of [undefined, wrongRoot, path.join(root, "missing")]) {
+    for (const replyPath of [reply, path.join(root, "absent.reply.md")]) {
+      const result = await waitForCompletion(directOptions(root, rollout, replyPath, {
+        sessionsRoot, acceptRolloutFallback: true,
+      }));
+      assert.equal(result.token, "unavailable");
+      assert.equal(result.replySource, undefined);
+      assert.ok(result.diagnostics.some((item) => item.code === "page-supersession-unproven"));
+    }
+  }
+  const result = await waitForCompletion(directOptions(root, rollout, reply, {
+    acceptRolloutFallback: true,
+  }));
+  assert.equal(result.token, "unavailable");
+  assert.ok(result.diagnostics.some((item) => item.code === "dispatch-history-abandoned"));
+});
+
+await test("a nested directory link blocks WAIT completion but preserves an independent primary harvest", async () => {
+  const root = caseDir("nested-link-wait");
+  const scope = path.join(root, "scope");
+  const records = ownCompletedRecords();
+  const rollout = writeRollout(scope, records);
+  const reply = writeReply(path.join(root, `${dispatch}.reply.md`));
+  const absent = path.join(root, "absent.reply.md");
+  const cutoff = records.slice(0, 2).reduce(
+    (size, item) => size + Buffer.byteLength(JSON.stringify(item)) + 1, 0,
+  );
+  const successor = writeSuccessor(path.join(root, "future"), records, cutoff, otherTurn);
+  for (const replyPath of [reply, absent]) {
+    const current = await waitForCompletion(directOptions(scope, rollout, replyPath, {
+      acceptRolloutFallback: true,
+    }));
+    assert.equal(current.token, "done");
+  }
+  const alias = path.join(root, "scope-alias");
+  fs.symlinkSync(scope, alias, process.platform === "win32" ? "junction" : "dir");
+  assert.equal((await waitForCompletion(directOptions(alias, rollout, reply))).token, "done");
+
+  fs.symlinkSync(path.dirname(successor.target), path.join(scope, "future"),
+    process.platform === "win32" ? "junction" : "dir");
+  for (const replyPath of [reply, absent]) {
+    const result = await waitForCompletion(directOptions(scope, rollout, replyPath, {
+      acceptRolloutFallback: true,
+    }));
+    assert.equal(result.token, "unavailable");
+    assert.equal(result.replySource, undefined);
+    assert.ok(result.diagnostics.some((item) => item.code === "page-supersession-unproven"
+      && item.reason === "candidate-set-unresolved"));
+  }
+  const { harvestDispatch } = await import(
+    pathToFileURL(path.join(path.dirname(waitPath), "codex_ipc_reply_harvest.mjs"))
+  );
+  const primary = harvestDispatch(directOptions(scope, rollout, reply));
+  assert.equal(primary.source, "reply-file");
+  assert.equal(primary.replyPath, reply);
+  assert.equal(primary.replySupersessionStatus, "unavailable");
+  assert.equal(primary.replySupersessionCaution, true);
+  assert.ok(primary.diagnostics.some((item) => item.code === "page-supersession-unproven"));
+  const fallback = harvestDispatch(directOptions(scope, rollout, absent));
+  assert.equal(fallback.source, "none");
+  assert.equal(fallback.reason, "unavailable");
+
+  const fileScope = path.join(root, "file-scope");
+  const fileRollout = writeRollout(fileScope, records);
+  fs.symlinkSync(successor.target, path.join(fileScope, path.basename(successor.target)), "file");
+  const fileResult = await waitForCompletion(directOptions(fileScope, fileRollout, absent, {
+    acceptRolloutFallback: true,
+  }));
+  assert.equal(fileResult.token, "unavailable");
+  assert.ok(fileResult.diagnostics.some((item) => item.code === "dispatch-history-abandoned"));
 });
 
 await test("a reused dispatch id makes an older primary reply unavailable", async () => {
@@ -713,11 +797,11 @@ await test("session derives reply under transport root and CODEX_IPC_ROOT suppli
 
 await test("explicit rollout path wins over ambiguous sessions-root candidates", () => {
   const root = caseDir("rollout-explicit-wins");
+  const sessions = path.join(root, "sessions");
   const explicit = writeRollout(
-    path.join(root, "explicit"),
+    path.join(sessions, "explicit"),
     [...ownOpenRecords(), event("task_complete", ownTurn)],
   );
-  const sessions = path.join(root, "sessions");
   writeRollout(path.join(sessions, "a"), ownOpenRecords(), thread, "first");
   writeRollout(path.join(sessions, "b"), ownOpenRecords(), thread, "second");
   const reply = writeReply(path.join(root, `${dispatch}.reply.md`));
@@ -727,6 +811,77 @@ await test("explicit rollout path wins over ambiguous sessions-root candidates",
     "--reply-path", reply,
   ]);
   assertToken(result, "done");
+});
+
+await test("canonical home discovery root certifies an explicit current page without a root flag", () => {
+  const sessions = path.join(tmp, ".codex", "sessions");
+  const rollout = writeRollout(path.join(sessions, "2026", "09", "28"), ownCompletedRecords());
+  const reply = path.join(tmp, "default-absent.reply.md");
+  const result = cli([
+    "--thread", thread, "--dispatch", dispatch, "--rollout-path", rollout,
+    "--reply-path", reply, "--accept-rollout-fallback",
+  ], { CODEX_IPC_SESSIONS_ROOT: "" });
+  assertToken(result, "done");
+  assert.match(result.stderr, /rollout-fallback/);
+});
+
+await test("wrapper observer and printed WAIT preserve the same inspector page and discovery scope", () => {
+  const root = caseDir("wrapper-scope");
+  const rollout = writeRollout(root, ownCompletedRecords());
+  const wrapperPath = path.join(path.dirname(waitPath), "handoff_to_codex.sh");
+  const source = fs.readFileSync(wrapperPath, "utf8").replace(/\r$/gm, "");
+  const extract = (start, end) => source.slice(source.indexOf(start), source.indexOf(end));
+  const functions = [
+    extract("    classify_inspected_target() {", "    # Safe manual preparation"),
+    extract("    print_wait_hint() {", "    # One read-only target snapshot"),
+    extract("    observe_rollout() {", "    print_confirmation_disclaimer() {"),
+  ].join("\n");
+  const quote = (value) => `'${String(value).replaceAll("'", "'\\''")}'`;
+  for (const sessionsRoot of [root, ...(process.platform === "win32" ? [path.toNamespacedPath(root)] : [])]) {
+    const pagePath = process.platform === "win32" ? path.toNamespacedPath(rollout) : rollout;
+    const inspected = {
+      ok: true,
+      dbThread: { exists: true, readOnlyOpenOk: true, thread: {
+        exists: true, id: thread, archived: 0, model: "synthetic", rolloutPath: pagePath,
+      } },
+      targetClassification: { kind: "root", parentThreadId: null, reasons: [], warnings: [] },
+      rollout: { sessionsRoot, primary: { parsedOk: true },
+        selection: { status: "found", authority: "db.rollout_path", path: pagePath } },
+    };
+    const script = `${functions}
+INSPECT_OUTPUT=${quote(JSON.stringify(inspected))}
+IPC_CID=${quote(thread)}
+INSPECT_FIELDS=$(classify_inspected_target)
+IFS=$'\\t' read -r INSPECT_CLASS INSPECT_PARENT INSPECT_WARNING INSPECT_ROLLOUT_PATH INSPECT_SESSIONS_ROOT <<< "$INSPECT_FIELDS"
+SCRIPT_DIR=${quote(path.dirname(waitPath))}
+DISPATCH_ID=${quote(dispatch)}
+INBOUND=${quote(path.join(root, "absent.reply.md"))}
+WAIT_LINE=$(print_wait_hint)
+printf '%s\\n' "$WAIT_LINE"
+node() { command node -e 'console.log(JSON.stringify(process.argv.slice(1)))' -- "$@"; }
+eval "\${WAIT_LINE#WAIT: }"
+node() { command node -e 'console.error("OBS_ARGS " + JSON.stringify(process.argv.slice(1)))' -- "$@"; printf 'rollout-pending\\n'; }
+observe_rollout
+`;
+    const scriptPath = path.join(root, "wrapper-check.sh");
+    fs.writeFileSync(scriptPath, script);
+    const result = spawnSync(process.platform === "win32" ? "C:/Program Files/Git/bin/bash.exe" : "bash",
+      ["--noprofile", "--norc", scriptPath], { encoding: "utf8", cwd: root, env: process.env });
+    assert.equal(result.status, 0, result.stderr);
+    const lines = result.stdout.trimEnd().split("\n");
+    assert.match(lines[0], /^WAIT: node /);
+    assert.equal(lines[2], "rollout-pending");
+    const waitArgs = JSON.parse(lines[1]);
+    const observerArgs = JSON.parse(result.stderr.split("\n").find((line) => line.startsWith("OBS_ARGS ")).slice(9));
+    for (const args of [waitArgs, observerArgs]) {
+      assert.ok(args.includes("--rollout-path") && args.includes("--sessions-root"),
+        JSON.stringify({ inspected, stdout: result.stdout, stderr: result.stderr }));
+      assert.equal(args[args.indexOf("--thread") + 1], thread);
+      assert.equal(args[args.indexOf("--dispatch") + 1], dispatch);
+      assert.equal(path.resolve(args[args.indexOf("--rollout-path") + 1]), path.resolve(rollout));
+      assert.equal(path.resolve(args[args.indexOf("--sessions-root") + 1]), path.resolve(root));
+    }
+  }
 });
 
 await test("sessions-root locator is used when no rollout path is explicit", () => {

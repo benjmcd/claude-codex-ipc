@@ -238,6 +238,53 @@ test("page successor assessment distinguishes preserved, abandoned, and unproven
   assert.equal(abandoned.status, "abandoned");
   assert.ok(abandoned.diagnostics.some((item) => item.code === "dispatch-history-abandoned"));
 
+  const wrongRoot = path.join(tmp, "other-scope");
+  fs.mkdirSync(wrongRoot);
+  const rootFile = path.join(tmp, "root-file");
+  fs.writeFileSync(rootFile, "not a directory");
+  for (const sessionsRoot of [undefined, wrongRoot, path.join(tmp, "missing-scope"), rootFile]) {
+    const result = assessRolloutPageSupersession({ ...base, sessionsRoot });
+    assert.equal(result.status, "unproven", String(sessionsRoot));
+    assert.ok(result.diagnostics.some((item) => item.code === "page-supersession-unproven"));
+  }
+
+  const originalReaddir = fs.readdirSync;
+  fs.readdirSync = (directory, ...args) => {
+    if (path.resolve(directory) === path.resolve(successorDir)) {
+      throw Object.assign(new Error("isolated unreadable date directory"), { code: "EACCES" });
+    }
+    return originalReaddir(directory, ...args);
+  };
+  try {
+    const result = assessRolloutPageSupersession(base);
+    assert.equal(result.status, "unproven");
+    assert.equal(result.diagnostics[0]?.reason, "candidate-set-unresolved");
+  } finally {
+    fs.readdirSync = originalReaddir;
+  }
+
+  if (process.platform === "win32") {
+    const extendedRoot = path.toNamespacedPath(root);
+    const extendedPage = path.toNamespacedPath(predecessorPath);
+    assert.equal(assessRolloutPageSupersession({
+      ...base, sessionsRoot: extendedRoot, rolloutPath: extendedPage,
+    }).status, "abandoned");
+  }
+  const aliasRoot = path.join(tmp, "root-alias");
+  fs.symlinkSync(root, aliasRoot, process.platform === "win32" ? "junction" : "dir");
+  assert.equal(assessRolloutPageSupersession({ ...base, sessionsRoot: aliasRoot }).status, "abandoned");
+  const apparentRoot = path.join(tmp, "apparent-scope");
+  fs.mkdirSync(apparentRoot);
+  const outsideAlias = path.join(apparentRoot, "outside-page");
+  fs.symlinkSync(predecessorDir, outsideAlias, process.platform === "win32" ? "junction" : "dir");
+  const escaped = assessRolloutPageSupersession({
+    ...base,
+    sessionsRoot: apparentRoot,
+    rolloutPath: path.join(outsideAlias, path.basename(predecessorPath)),
+  });
+  assert.equal(escaped.status, "unproven");
+  assert.ok(escaped.diagnostics.some((item) => item.code === "page-supersession-unproven"));
+
   writeSuccessor(markerOffset + 1);
   const midRecord = assessRolloutPageSupersession(base);
   assert.equal(midRecord.status, "unproven");
@@ -301,6 +348,85 @@ test("page successor assessment distinguishes preserved, abandoned, and unproven
   const ambiguous = assessRolloutPageSupersession(base);
   assert.equal(ambiguous.status, "unproven");
   assert.equal(ambiguous.diagnostics[0]?.reason, "successor-ambiguous");
+});
+
+test("nested directory links leave page discovery unresolved while regular file links retain authority checks", () => {
+  const threadId = "11111111-1111-4111-8111-111111111111";
+  const pageId = "22222222-2222-4222-8222-222222222222";
+  const root = path.join(tmp, "nested-link");
+  const outside = path.join(tmp, "linked-pages");
+  fs.mkdirSync(root);
+  fs.mkdirSync(outside);
+  const bound = path.join(root, path.basename(basicPath));
+  fs.copyFileSync(basicPath, bound);
+  const successor = path.join(outside, `rollout-successor-${threadId}_${pageId}.jsonl`);
+  fs.writeFileSync(successor, `${JSON.stringify({
+    type: "session_meta",
+    payload: {
+      id: threadId,
+      session_id: threadId,
+      history_mode: "paginated",
+      history_base: { thread_id: threadId, end_byte_offset: 0 },
+    },
+  })}\n`);
+  const base = { threadId, sessionsRoot: root, rolloutPath: bound, dispatchMarkerByteOffset: 0 };
+  assert.equal(assessRolloutPageSupersession(base).status, "current");
+
+  const nested = path.join(root, "future");
+  fs.symlinkSync(outside, nested, process.platform === "win32" ? "junction" : "dir");
+  const assessment = assessRolloutPageSupersession(base);
+  assert.equal(assessment.status, "unproven");
+  assert.equal(assessment.diagnostics[0]?.code, "page-supersession-unproven");
+  assert.equal(assessment.diagnostics[0]?.reason, "candidate-set-unresolved");
+  const located = locateRollout({ threadId, sessionsRoot: root });
+  assert.equal(located.status, "ambiguous");
+  assert.equal(located.reason, "candidate-set-unresolved");
+  assert.ok(located.diagnostics.some((item) => item.code === "directory-link-excluded" && item.path === nested));
+
+  const fileRoot = path.join(tmp, "file-link");
+  fs.mkdirSync(fileRoot);
+  const fileBound = path.join(fileRoot, path.basename(bound));
+  fs.copyFileSync(bound, fileBound);
+  const fileLink = path.join(fileRoot, path.basename(successor));
+  fs.symlinkSync(successor, fileLink, "file");
+  assert.equal(locateRollout({ threadId, rolloutPath: fileLink }).status, "found");
+  const fileAssessment = assessRolloutPageSupersession({
+    ...base, sessionsRoot: fileRoot, rolloutPath: fileBound,
+  });
+  assert.equal(fileAssessment.status, "abandoned");
+  assert.ok(fileAssessment.diagnostics.some((item) => item.code === "dispatch-history-abandoned"));
+});
+
+test("missing or unreadable link target types cannot certify a complete candidate search", () => {
+  const threadId = "11111111-1111-4111-8111-111111111111";
+  for (const kind of ["missing", "unreadable"]) {
+    const root = path.join(tmp, `${kind}-link`);
+    const outside = path.join(tmp, `${kind}-target`);
+    fs.mkdirSync(root);
+    if (kind === "unreadable") fs.mkdirSync(outside);
+    const bound = path.join(root, path.basename(basicPath));
+    fs.copyFileSync(basicPath, bound);
+    const nested = path.join(root, "future");
+    fs.symlinkSync(outside, nested, process.platform === "win32" ? "junction" : "dir");
+    const originalStat = fs.statSync;
+    fs.statSync = (target, ...args) => {
+      if (kind === "unreadable" && path.resolve(target) === path.resolve(nested)) {
+        throw Object.assign(new Error("isolated link target unavailable"), { code: "EACCES" });
+      }
+      return originalStat(target, ...args);
+    };
+    try {
+      const assessment = assessRolloutPageSupersession({ threadId, sessionsRoot: root, rolloutPath: bound });
+      assert.equal(assessment.status, "unproven", kind);
+      assert.equal(assessment.diagnostics[0]?.reason, "candidate-set-unresolved", kind);
+      const located = locateRollout({ threadId, sessionsRoot: root });
+      assert.equal(located.status, "ambiguous", kind);
+      assert.equal(located.reason, "candidate-set-unresolved", kind);
+      assert.ok(located.diagnostics.some((item) => item.code === "link-target-unresolved" && item.path === nested), kind);
+    } finally {
+      fs.statSync = originalStat;
+    }
+  }
 });
 
 test("record ownership ignores nested business data outside event item carriers", () => {
