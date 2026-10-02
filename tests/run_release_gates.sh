@@ -40,6 +40,7 @@
 #   run_release_gates.sh [suite ...]     # named suites + same unskippable outer gates
 #   run_release_gates.sh --no-safety [suite ...]  # skip safety only
 #   run_release_gates.sh --self-test-monitor      # exclusive watchdog self-test
+# Set IPC_GATE_LOG_DIR to a new private directory to retain complete child/enum evidence.
 set -uo pipefail
 
 TDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -174,7 +175,7 @@ classify_msys_endpoint() {
 # Builtins only: each PS-listed logical PID is read stat1 -> winpid1 -> stat2 -> winpid2.
 # A phase emits one explicit availability result; changing R/S is not identity churn.
 collect_msys_endpoints() {
-  local phase="$1" table="$2" line fields=() p stat1 stat2 win1 win2
+  local phase="$1" table="$2" line fields=() p stat1 stat2 win1 win2 key leaf read_rc failed
   local -A listed=()
   while IFS= read -r line; do
     read -r -a fields <<<"$line"
@@ -184,22 +185,25 @@ collect_msys_endpoints() {
   done <<<"$table"
   for p in "${!listed[@]}"; do
     stat1=""; stat2=""; win1=""; win2=""
-    if ! { IFS= read -r stat1 <"/proc/$p/stat" || [ -n "$stat1" ]; } 2>/dev/null; then
-      unreadable_msys_endpoint "$phase" "$p"; continue
-    fi
-    if ! { IFS= read -r win1 <"/proc/$p/winpid" || [ -n "$win1" ]; } 2>/dev/null; then
-      unreadable_msys_endpoint "$phase" "$p"; continue
-    fi
-    if ! { IFS= read -r stat2 <"/proc/$p/stat" || [ -n "$stat2" ]; } 2>/dev/null; then
-      unreadable_msys_endpoint "$phase" "$p"; continue
-    fi
-    if ! { IFS= read -r win2 <"/proc/$p/winpid" || [ -n "$win2" ]; } 2>/dev/null; then
-      unreadable_msys_endpoint "$phase" "$p"; continue
-    fi
+    failed=0
+    for key in stat1 win1 stat2 win2; do
+      read_rc=unattempted
+      if [ "$failed" -eq 0 ]; then
+        leaf=stat; [[ "$key" == win* ]] && leaf=winpid
+        printf 'READ %s %s %s\n' "$phase" "$p" "$key" >&8 || return 2
+        read_msys_endpoint_value "$key" "$p" "$leaf" 2>&8; read_rc=$?
+        [ "$read_rc" -eq 0 ] || [ -n "${!key}" ] || failed=1
+      fi
+      # NUL framing retains each original read value without shell evaluation.
+      printf '%s\0' "$phase" "$p" "$key" "$read_rc" "${!key}" >&7 || return 2
+    done
+    if [ "$failed" -ne 0 ]; then unreadable_msys_endpoint "$phase" "$p"; continue; fi
     printf '%s ' "$phase"
     classify_msys_endpoint "$p" "$stat1" "$win1" "$stat2" "$win2"
   done
 }
+
+read_msys_endpoint_value() { IFS= read -r "$1" <"/proc/$2/$3"; }
 
 # Pure classifier shared by live enumeration and deterministic ownership fixtures.
 # Input: PS <raw MSYS row>; PRE/POST <status> <pid> [<ppid> <start> <winpid>];
@@ -360,42 +364,122 @@ classify_windows_process_rows() {
     }'
 }
 
+# Only successful sample scratch is reused. A failed/incomplete sample is never
+# overwritten; the next index is selected with builtins, without an archival child.
+begin_enum_capture() {
+  local index prior stage
+  IFS= read -r index <"$RUNDIR/enum-next" && [[ "$index" =~ ^[0-9]+$ ]] || return 2
+  ENUM_FILE="$RUNDIR/enum-$index"
+  if [ -f "$ENUM_FILE.status" ]; then
+    IFS= read -r prior <"$ENUM_FILE.status" || return 2
+    if [ "$prior" != 0 ]; then
+      index=$((index + 1)); ENUM_FILE="$RUNDIR/enum-$index"
+      printf '%s\n' "$index" >"$RUNDIR/enum-next" || return 2
+    fi
+  fi
+  printf 'incomplete\n' >"$ENUM_FILE.status" || return 2
+  for stage in ps ps.err pre pre.err cim cim.err post post.err input output classifier.err endpoints endpoint.err; do
+    : >"$ENUM_FILE.$stage" || return 2
+  done
+}
+
+finish_enum_capture() {
+  local result="$1" capture_rc=0
+  printf 'context=%s\nrunner_pid=%s\nrunner_winpid=%s\nrunner_created=%s\nrunner_msys_start=%s\nenum_owner_pid=%s\nPS=%s\nPRE=%s\nCIM=%s\nPOST=%s\nCLASSIFIER=%s\n' \
+    "${ENUM_CONTEXT:-unspecified}" "$RUNNER_PID" "$RUNNER_WINPID" "$RUNNER_CREATED" "$RUNNER_MSYS_START" "$enum_owner_pid" \
+    "$ps_rc" "$pre_rc" "$cim_rc" "$post_rc" "$classifier_rc" >"$ENUM_FILE.meta" || capture_rc=2
+  [ "$capture_rc" -eq 0 ] && printf '%s\n' "$result" >"$ENUM_FILE.status" || capture_rc=2
+  if [ "$capture_rc" -ne 0 ]; then
+    echo "CAPTURE ERROR: incomplete enumeration evidence at $ENUM_FILE" >&2
+    [ "$result" -ne 0 ] || result=2
+  fi
+  if [ "$result" -ne 0 ]; then
+    printf 'enumeration evidence: %s (context=%s)\n' "$ENUM_FILE" "${ENUM_CONTEXT:-unspecified}" >&2
+  fi
+  return "$result"
+}
+
+enum_collection_error() {
+  printf '%s\n' "$1" >"$ENUM_FILE.output" || echo "CAPTURE ERROR: enumeration diagnostic incomplete" >&2
+  printf '%s\n' "$1"
+  finish_enum_capture 1
+}
+
 owned_process_rows() {
-  local enum_owner_pid="$BASHPID"
+  local enum_owner_pid="$BASHPID" ENUM_FILE ps_rc=unattempted pre_rc=unattempted
+  local cim_rc=unattempted post_rc=unattempted classifier_rc=unattempted result out
+  if ! begin_enum_capture; then
+    echo "CAPTURE ERROR: could not acquire enumeration scratch" >&2
+    return 2
+  fi
   if is_windows; then
     local pstab cimtab pretab posttab
     # Layer 1: MSYS process table (PID PPID PGID WINPID ... after a header line).
-    if ! pstab="$(ps -e)"; then
-      echo "ENUM_ERROR:MSYS ps enumeration failed (nonzero exit)"; return 1
+    ps -e >"$ENUM_FILE.ps" 2>"$ENUM_FILE.ps.err"; ps_rc=$?
+    if [ "$ps_rc" -ne 0 ]; then
+      enum_collection_error "ENUM_ERROR:MSYS ps enumeration failed (nonzero exit)"; return $?
     fi
-    pretab="$(collect_msys_endpoints PRE "$pstab")" || {
-      echo "ENUM_ERROR:MSYS PRE identity collection failed"; return 1;
+    pstab="$(<"$ENUM_FILE.ps")" || {
+      echo 'CAPTURE ERROR: original PS output unreadable' >&2; finish_enum_capture 2; return $?;
+    }
+    collect_msys_endpoints PRE "$pstab" >"$ENUM_FILE.pre" 2>"$ENUM_FILE.pre.err" \
+      7>"$ENUM_FILE.endpoints" 8>"$ENUM_FILE.endpoint.err"; pre_rc=$?
+    if [ "$pre_rc" -ne 0 ]; then
+      if [ "$pre_rc" -eq 2 ]; then
+        echo "CAPTURE ERROR: MSYS PRE collection incomplete" >&2
+        finish_enum_capture 2; return $?
+      fi
+      enum_collection_error "ENUM_ERROR:MSYS PRE identity collection failed"; return $?
+    fi
+    pretab="$(<"$ENUM_FILE.pre")" || {
+      echo 'CAPTURE ERROR: original PRE output unreadable' >&2; finish_enum_capture 2; return $?;
     }
     # Layer 2: all positive Win32 PIDs, including non-node intermediaries. PID 0 is
     # a sentinel with no usable identity; neither it nor absent parents are roots.
     # Normalize whitespace in names to retain strict token framing. Failure is NOT swallowed.
-    if ! cimtab="$(powershell.exe -NoProfile -NonInteractive -Command "\$ErrorActionPreference='Stop'; 'SELF {0}' -f \$PID; Get-CimInstance Win32_Process | Where-Object { \$_.ProcessId -gt 0 } | ForEach-Object { '{0} {1} {2} {3}' -f \$_.ProcessId, \$_.ParentProcessId, (\$_.Name -replace '\\s','_'), \$_.CreationDate.ToUniversalTime().ToString('yyyyMMddHHmmssffffff',[Globalization.CultureInfo]::InvariantCulture) }")"; then
-      echo "ENUM_ERROR:Win32_Process enumeration failed (powershell.exe nonzero exit)"; return 1
+    powershell.exe -NoProfile -NonInteractive -Command "\$ErrorActionPreference='Stop'; 'SELF {0}' -f \$PID; Get-CimInstance Win32_Process | Where-Object { \$_.ProcessId -gt 0 } | ForEach-Object { '{0} {1} {2} {3}' -f \$_.ProcessId, \$_.ParentProcessId, (\$_.Name -replace '\\s','_'), \$_.CreationDate.ToUniversalTime().ToString('yyyyMMddHHmmssffffff',[Globalization.CultureInfo]::InvariantCulture) }" \
+      >"$ENUM_FILE.cim" 2>"$ENUM_FILE.cim.err"; cim_rc=$?
+    if [ "$cim_rc" -ne 0 ]; then
+      enum_collection_error "ENUM_ERROR:Win32_Process enumeration failed (powershell.exe nonzero exit)"; return $?
     fi
-    posttab="$(collect_msys_endpoints POST "$pstab")" || {
-      echo "ENUM_ERROR:MSYS POST identity collection failed"; return 1;
+    collect_msys_endpoints POST "$pstab" >"$ENUM_FILE.post" 2>"$ENUM_FILE.post.err" \
+      7>>"$ENUM_FILE.endpoints" 8>>"$ENUM_FILE.endpoint.err"; post_rc=$?
+    if [ "$post_rc" -ne 0 ]; then
+      if [ "$post_rc" -eq 2 ]; then
+        echo "CAPTURE ERROR: MSYS POST collection incomplete" >&2
+        finish_enum_capture 2; return $?
+      fi
+      enum_collection_error "ENUM_ERROR:MSYS POST identity collection failed"; return $?
+    fi
+    posttab="$(<"$ENUM_FILE.post")" || {
+      echo 'CAPTURE ERROR: original POST output unreadable' >&2; finish_enum_capture 2; return $?;
     }
-    cimtab="$(printf '%s\n' "$cimtab" | tr -d '\r')"
+    cimtab="$(<"$ENUM_FILE.cim")" || {
+      echo 'CAPTURE ERROR: original CIM output unreadable' >&2; finish_enum_capture 2; return $?;
+    }
+    cimtab="${cimtab//$'\r'/}"
     {
-      printf '%s\n' "$pstab" | awk '{ print "PS", $0 }'
-      printf '%s\n' "$pretab"
-      printf '%s\n' "$cimtab" | awk 'NF { print "CIM", $0 }'
+      printf '%s\n' "$pstab" | awk '{ print "PS", $0 }' &&
+      printf '%s\n' "$pretab" &&
+      printf '%s\n' "$cimtab" | awk 'NF { print "CIM", $0 }' &&
       printf '%s\n' "$posttab"
-    } | classify_windows_process_rows "$enum_owner_pid"
+    } >"$ENUM_FILE.input" || { echo 'CAPTURE ERROR: classifier input unavailable' >&2; finish_enum_capture 2; return $?; }
+    classify_windows_process_rows "$enum_owner_pid" <"$ENUM_FILE.input" >"$ENUM_FILE.output" 2>"$ENUM_FILE.classifier.err"
+    classifier_rc=$?
   else
     local tab
-    if ! tab="$(sh -c 'printf "SELF %s\n" "$$"; exec ps -e -o pid=,ppid=,comm=')"; then
-      echo "ENUM_ERROR:ps enumeration failed (nonzero exit)"; return 1
+    sh -c 'printf "SELF %s\n" "$$"; exec ps -e -o pid=,ppid=,comm=' >"$ENUM_FILE.ps" 2>"$ENUM_FILE.ps.err"; ps_rc=$?
+    if [ "$ps_rc" -ne 0 ]; then
+      enum_collection_error "ENUM_ERROR:ps enumeration failed (nonzero exit)"; return $?
     fi
+    tab="$(<"$ENUM_FILE.ps")" || {
+      echo 'CAPTURE ERROR: original PS output unreadable' >&2; finish_enum_capture 2; return $?;
+    }
     if ! printf '%s\n' "$tab" | awk -v me="$RUNNER_PID" '$1==me{f=1} END{exit f?0:1}'; then
-      echo "ENUM_ERROR:runner pid $RUNNER_PID absent from ps snapshot (enumeration untrustworthy)"; return 1
+      enum_collection_error "ENUM_ERROR:runner pid $RUNNER_PID absent from ps snapshot (enumeration untrustworthy)"; return $?
     fi
-    printf '%s\n' "$tab" | awk -v me="$RUNNER_PID" -v enum="$enum_owner_pid" '
+    printf '%s\n' "$tab" >"$ENUM_FILE.input" || { echo 'CAPTURE ERROR: classifier input unavailable' >&2; finish_enum_capture 2; return $?; }
+    awk -v me="$RUNNER_PID" -v enum="$enum_owner_pid" '
       $1 == "SELF" { enumself = $2; next }
       { ppid[$1] = $2; comm[$1] = $3 }
       END {
@@ -418,8 +502,19 @@ owned_process_rows() {
           }
           if (hit && !bookkeeping && p != me && p != enumself) print p, comm[p]
         }
-      }'
+      }' <"$ENUM_FILE.input" >"$ENUM_FILE.output" 2>"$ENUM_FILE.classifier.err"
+    classifier_rc=$?
   fi
+  result=0; [ "$classifier_rc" -eq 0 ] || result=1
+  # A failed read must not become an empty owned set or mark this scratch reusable.
+  out="$(<"$ENUM_FILE.output")" || {
+    echo 'CAPTURE ERROR: original classifier output unreadable' >&2
+    [ "$result" -ne 0 ] || result=2
+    finish_enum_capture "$result"; return $?
+  }
+  finish_enum_capture "$result"; result=$?
+  printf '%s\n' "$out"
+  return "$result"
 }
 
 owned_descendant_pids() {
@@ -441,13 +536,15 @@ owned_node_pids() {
 }
 
 # count_owned_node: prints the owned count on success; on enumeration failure prints the
-# ENUM_ERROR reason to stderr and returns 1. Callers MUST treat rc!=0 as fatal (fail closed).
+# ENUM_ERROR reason to stderr and returns 1 (capture failure: 2). Callers fail closed.
 count_owned_node() {
   local out rc
   out="$(owned_node_pids)"; rc=$?
   if [ "$rc" -ne 0 ]; then
-    printf '%s\n' "$out" | grep '^ENUM_ERROR:' >&2 || echo "ENUM_ERROR:unknown enumeration failure" >&2
-    return 1
+    if [ "$rc" -ne 2 ]; then
+      printf '%s\n' "$out" | grep '^ENUM_ERROR:' >&2 || echo "ENUM_ERROR:unknown enumeration failure" >&2
+    fi
+    return "$rc"
   fi
   printf '%s\n' "$out" | sed '/^$/d' | grep -c . || true
 }
@@ -456,16 +553,16 @@ count_owned_descendants() {
   local out rc
   out="$(owned_descendant_pids)"; rc=$?
   if [ "$rc" -ne 0 ]; then
-    printf '%s\n' "$out" | grep '^ENUM_ERROR:' >&2 || echo "ENUM_ERROR:unknown enumeration failure" >&2
-    return 1
+    if [ "$rc" -ne 2 ]; then
+      printf '%s\n' "$out" | grep '^ENUM_ERROR:' >&2 || echo "ENUM_ERROR:unknown enumeration failure" >&2
+    fi
+    return "$rc"
   fi
   printf '%s\n' "$out" | sed '/^$/d' | grep -c . || true
 }
 
-# enum_abort: fail the whole run closed when the owned set cannot be measured.
-# enum_abort <context> [suite-child-pid]
-enum_abort() {
-  local ctx="$1" spid="${2:-}" k0
+reap_direct_child() {
+  local spid="${1:-}" k0
   if [ -n "$spid" ]; then
     k0=$SECONDS
     # $spid is the direct child returned by this shell, not inferred ancestry.
@@ -481,8 +578,23 @@ enum_abort() {
       echo "  ENUM ABORT: direct suite child $spid reaped" >&2
     fi
   fi
+}
+
+# enum_abort: fail the whole run closed when the owned set cannot be measured.
+# enum_abort <context> [suite-child-pid]
+enum_abort() {
+  local ctx="$1" spid="${2:-}"
+  reap_direct_child "$spid"
   echo "GATE ERROR: owned-Node enumeration failed ($ctx); the process bound cannot be measured — failing closed (exit 3). Suite child processes may need manual cleanup." >&2
   exit 3
+}
+
+measurement_abort() {
+  local rc="$1" ctx="$2" spid="${3:-}"
+  [ "$rc" -eq 2 ] || enum_abort "$ctx" "$spid"
+  reap_direct_child "$spid"
+  echo "GATE ABORT: required evidence capture failed ($ctx); incomplete evidence (exit 2)" >&2
+  exit 2
 }
 
 kill_owned_tree() {
@@ -593,7 +705,7 @@ record_fail() { FAILURES+=("$1"); echo "  GATE FAIL: $1"; }
 # run_monitored <label> <argv...>
 run_monitored() {
   local label="$1"; shift
-  local logf spid peak=0 owned t0 rc=0 timed_out=0 deadline remaining
+  local logf logfd spid peak=0 owned t0 rc=0 timed_out=0 deadline remaining ENUM_CONTEXT
   local d0 drained=0 residual captured="" captured_residual="" live_captured="" reasons=() skips sl text k0 pid skip_lines=()
   [ "$#" -gt 0 ] || { record_fail "$label: rc=2 empty argv"; INFRA_FAILURE=1; return 2; }
   MONITOR_COUNTER=$((MONITOR_COUNTER + 1))
@@ -606,15 +718,27 @@ run_monitored() {
   deadline="$MONITOR_TIMEOUT_S"
   [ "$remaining" -lt "$deadline" ] && deadline="$remaining"
   echo "== running $label =="
-  "$@" >"$logf" 2>&1 &
+  printf '  child log: %s -> %s\n' "$label" "$logf"
+  if ! printf '%s\t%s\n' "$label" "$logf" >>"$RUNDIR/children"; then
+    record_fail "$label: rc=2 child log mapping unavailable; child not launched"
+    INFRA_FAILURE=1; return 2
+  fi
+  if ! exec {logfd}>"$logf"; then
+    record_fail "$label: rc=2 child log unavailable; child not launched"
+    INFRA_FAILURE=1; return 2
+  fi
+  "$@" >&"$logfd" 2>&1 &
   spid=$!
+  exec {logfd}>&-
   t0=$SECONDS
   while kill -0 "$spid" 2>/dev/null; do
-    owned="$(count_owned_node)" || enum_abort "mid-child sample, $label" "$spid"
+    ENUM_CONTEXT="mid-child sample, $label"
+    owned="$(count_owned_node)" || measurement_abort "$?" "$ENUM_CONTEXT" "$spid"
     [ "$owned" -gt "$peak" ] && peak="$owned"
     if [ $((SECONDS - t0)) -ge "$deadline" ]; then
       timed_out=1; rc=124
-      captured="$(owned_descendant_pids)" || enum_abort "timeout snapshot, $label" "$spid"
+      ENUM_CONTEXT="timeout snapshot, $label"
+      captured="$(owned_descendant_pids)" || measurement_abort "$?" "$ENUM_CONTEXT" "$spid"
       echo "  MONITOR TIMEOUT: $label after ${deadline}s; captured descendant(s): ${captured:-<none>}" >&2
       k0=$SECONDS
       if is_windows; then
@@ -656,11 +780,13 @@ run_monitored() {
 
   d0=$SECONDS
   while [ $((SECONDS - d0)) -lt "$POST_SUITE_DRAIN_S" ]; do
-    residual="$(count_owned_descendants)" || enum_abort "post-child drain, $label"
+    ENUM_CONTEXT="post-child drain, $label"
+    residual="$(count_owned_descendants)" || measurement_abort "$?" "$ENUM_CONTEXT"
     if [ "$residual" -eq 0 ]; then drained=1; break; fi
     sleep 0.25
   done
-  residual="$(count_owned_descendants)" || enum_abort "post-child residual, $label"
+  ENUM_CONTEXT="post-child residual, $label"
+  residual="$(count_owned_descendants)" || measurement_abort "$?" "$ENUM_CONTEXT"
   if [ "$residual" -ne 0 ]; then kill_owned_tree || true; fi
 
   [ "$rc" -eq 0 ] || reasons+=("child-exit=$rc")
@@ -744,23 +870,33 @@ run_monitor_self_test() {
 # Allows fixtures to load the production classifier without enumeration or process control.
 if [ "${BASH_SOURCE[0]}" != "$0" ]; then return 0; fi
 
-RUNDIR="$(mktemp -d)" && [ -n "$RUNDIR" ] && [ -d "$RUNDIR" ] \
-  || { echo "GATE ABORT: could not create runner temporary directory" >&2; exit 2; }
-trap 'rm -rf "$RUNDIR"' EXIT
+if [ "${IPC_GATE_LOG_DIR+x}" = x ]; then
+  RUNDIR="$IPC_GATE_LOG_DIR"
+  [ -n "$RUNDIR" ] && (umask 077; mkdir -- "$RUNDIR") \
+    || { echo "GATE ABORT: IPC_GATE_LOG_DIR must be a new writable directory under an existing parent" >&2; exit 2; }
+  echo "retained gate evidence: $RUNDIR"
+else
+  RUNDIR="$(mktemp -d)" && [ -n "$RUNDIR" ] && [ -d "$RUNDIR" ] \
+    || { echo "GATE ABORT: could not create runner temporary directory" >&2; exit 2; }
+  trap 'rm -rf "$RUNDIR"' EXIT
+fi
+printf '0\n' >"$RUNDIR/enum-next" || { echo 'GATE ABORT: runner evidence directory is unwritable' >&2; exit 2; }
 LAYOUT_T0=$SECONDS
 
 echo "=== release gate runner ==="
 # Fail-closed self-check: owned-Node enumeration must work BEFORE any suite runs; a broken
 # enumerator must never let a suite pass against a fabricated 0-measurement.
 if is_windows; then
-  RUNNER_SNAPSHOT="$(owned_process_rows)" || enum_abort "startup identity pin"
+  ENUM_CONTEXT="startup identity pin"
+  RUNNER_SNAPSHOT="$(owned_process_rows)" || measurement_abort "$?" "$ENUM_CONTEXT"
   read -r _runner_tag RUNNER_WINPID RUNNER_CREATED RUNNER_MSYS_START \
     <<<"$(printf '%s\n' "$RUNNER_SNAPSHOT" | awk '$1 == "RUNNER" { print }')"
   [[ "$_runner_tag" == RUNNER && "$RUNNER_WINPID" =~ ^[1-9][0-9]*$ && "$RUNNER_CREATED" =~ ^[0-9]{20}$ && "$RUNNER_MSYS_START" =~ ^[0-9]+$ ]] \
     || enum_abort "startup identity pin malformed"
   readonly RUNNER_WINPID RUNNER_CREATED RUNNER_MSYS_START
 fi
-SELFTEST_OWNED="$(count_owned_node)" || enum_abort "startup self-check"
+ENUM_CONTEXT="startup self-check"
+SELFTEST_OWNED="$(count_owned_node)" || measurement_abort "$?" "$ENUM_CONTEXT"
 echo "owned-Node scope: ancestry to runner pid $RUNNER_PID (fail-closed; nodes with an already-exited parent chain are NOT attributable — known limitation, see header)"
 echo "owned-Node enumeration self-check: OK (owned now=$SELFTEST_OWNED)"
 

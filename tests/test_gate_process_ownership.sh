@@ -4,7 +4,7 @@
 # The runner's process bound is only meaningful if (a) "owned" node processes are
 # attributed by ancestry to THIS runner (not by a global before/after snapshot), and
 # (b) an enumeration outage can never be silently measured as "0 owned". This fixture
-# pins both properties with five checks:
+# pins both properties and evidence retention with six monitor checks:
 #
 #   T1  startup fail-closed: with process enumeration broken before any suite runs,
 #       the runner must ERROR nonzero, never emit RELEASE GATES: PASS off a silent
@@ -20,11 +20,12 @@
 #       and never degrade to a silent 0-measurement.
 #   T5  active monitor timeout: the exclusive runner self-test captures, force-kills, and
 #       reaps a TERM-resistant descendant, emits named diagnostics, and returns within bound.
+#   T6  ordinary child failure retains every output byte and its independent exit status.
 #
-# Hermetic: all state under mktemp dirs; every node process spawned here is short-lived
+# Hermetic: runtime state is temporary and evidence is retained separately; every node process is short-lived
 # and reaped on exit; no transport roots, no IPC, no installed-root access. Enumeration
 # outages are injected via PATH shims (Windows: powershell.exe; POSIX: ps). On Windows,
-# T1-T4 runner invocations additionally get an identity-cleanup no-op shim so a runner that
+# T1-T4/T6 invocations additionally get an identity-cleanup no-op shim so a runner that
 # mis-scopes foreign PIDs as "owned" cannot kill processes this fixture does not own.
 # T5 must use real identity-bound cleanup because killing/reaping its owned descendant is
 # the behavior under test.
@@ -191,6 +192,14 @@ command -v node >/dev/null 2>&1 || { echo "FAIL: node not on PATH (required by r
 
 is_windows() { case "$(uname -s 2>/dev/null)" in *NT*|*MINGW*|*MSYS*|*CYGWIN*) return 0;; *) return 1;; esac; }
 
+# Evidence is intentionally outside WORK and is never removed by fixture cleanup.
+if [ "${IPC_GATE_LOG_DIR+x}" = x ]; then
+  EVIDENCE="$IPC_GATE_LOG_DIR"
+  [ -n "$EVIDENCE" ] && (umask 077; mkdir -- "$EVIDENCE") || exit 1
+else
+  EVIDENCE="$(mktemp -d)" && [ -n "$EVIDENCE" ] && [ -d "$EVIDENCE" ] || exit 1
+fi
+echo "retained process-ownership evidence: $EVIDENCE"
 WORK="$(mktemp -d)" && [ -n "$WORK" ] && [ -d "$WORK" ] \
   || { echo "FAIL: could not create process-ownership temporary directory" >&2; exit 1; }
 SLEEPER_PIDS=()
@@ -210,6 +219,117 @@ FAILN=0
 t_pass() { echo "PASS: $1"; }
 t_fail() { echo "FAIL: $1"; FAILN=$((FAILN + 1)); }
 
+# Exercise the production capture path with the existing synthetic ownership shapes.
+# Only these function-local input providers are replaced; no /proc or runtime is seeded.
+run_capture_cases() (
+  source "$RUNNER"
+  RUNDIR="$EVIDENCE/synthetic"
+  mkdir "$RUNDIR" || return 1
+  printf '0\n' >"$RUNDIR/enum-next"
+  RUNNER_PID=100; RUNNER_WINPID=1000
+  RUNNER_CREATED=20261001000000000000; RUNNER_MSYS_START=84028164
+  is_windows() { return 0; }
+  ps() {
+    printf '100 1 100 1000 ? 1 00:00 bash\n%s 100 100 1001 ? 1 00:01 bash\n200 100 100 2000 ? 1 00:02 bash\n' "$enum_owner_pid"
+  }
+  powershell.exe() {
+    printf 'SELF 9000\n9000 1001 powershell.exe 20261001000009000000\n1000 0 bash.exe 20261001000000000000\n1001 1000 bash.exe 20261001000001000000\n2000 7777 bash.exe 20261001000002000000\n3000 2000 node.exe 20261001000003000000\n'
+  }
+  unreadable_msys_endpoint() { printf '%s MISSING %s\n' "$1" "$2"; }
+  read_msys_endpoint_value() {
+    local target="$1" pid="$2" parent=100 start=84028165 win=1001
+    if [ "$pid" -eq 100 ]; then parent=1; start=84028164; win=1000; fi
+    if [ "$pid" -eq 200 ]; then
+      start=84028166; win=2000
+      if [ "$capture_case" = continuity ] && [ "$phase" = POST ]; then
+        echo 'synthetic original endpoint read failure' >&2; return 1
+      fi
+      if [ "$capture_case" = malformed ] && [ "$3" = stat ]; then
+        printf -v "$target" '%s' 'identical malformed stat'; return 0
+      fi
+    fi
+    if [ "$3" = winpid ]; then printf -v "$target" '%s' "$win"
+    else
+      local fields=() suffix='S 1 1927 1927 0 -1 0 2551 2551 0 0 31 15 31 15 20 0 0 0 84028164 5758976 1469 1413120'
+      read -r -a fields <<<"$suffix"; fields[1]="$parent"; fields[19]="$start"
+      printf -v "$target" '%s (node child) %s' "$pid" "${fields[*]}"
+    fi
+  }
+  local capture_case index=0 out rc replay_rc owner raw=() j found expected
+  for capture_case in continuity malformed; do
+    ENUM_CONTEXT="synthetic $capture_case"
+    out="$(owned_process_rows)"; rc=$?
+    printf '%s\n' "$out" >"$RUNDIR/$capture_case.out"
+    [ "$rc" -eq 1 ] || return 1
+    expected='candidate MSYS ancestry continuity unavailable'
+    [ "$capture_case" != malformed ] || expected='malformed or unreadable MSYS endpoint'
+    [ "$out" = "ENUM_ERROR:$expected" ] || return 1
+    owner="$(sed -n 's/^enum_owner_pid=//p' "$RUNDIR/enum-$index.meta")"
+    classify_windows_process_rows "$owner" <"$RUNDIR/enum-$index.input" >"$RUNDIR/$capture_case.replay"; replay_rc=$?
+    [ "$replay_rc" -eq 1 ] && cmp -s "$RUNDIR/$capture_case.out" "$RUNDIR/$capture_case.replay" || return 1
+    cmp -s "$RUNDIR/$capture_case.out" "$RUNDIR/enum-$index.output" || return 1
+    grep -q '^CLASSIFIER=1$' "$RUNDIR/enum-$index.meta" || return 1
+    mapfile -d '' -t raw <"$RUNDIR/enum-$index.endpoints"
+    found=0
+    for ((j=0; j<${#raw[@]}; j+=5)); do
+      [ "${raw[j]}" = POST ] && [ "${raw[j+1]}" = 200 ] || continue
+      if [ "$capture_case" = malformed ] && [[ "${raw[j+2]}" == stat* ]]; then
+        [ "${raw[j+3]}" = 0 ] && [ "${raw[j+4]}" = 'identical malformed stat' ] || return 1
+        found=$((found + 1))
+      elif [ "$capture_case" = continuity ] && [ "${raw[j+2]}" = stat1 ]; then
+        [ "${raw[j+3]}" = 1 ] && [ -z "${raw[j+4]}" ] || return 1
+        found=2
+      fi
+    done
+    [ "$found" -eq 2 ] || return 1
+    echo "PASS: retained $capture_case original input/raw reads replay the same classifier failure"
+    index=$((index + 1))
+  done
+  # The first failed sample remains byte-for-byte available after a second failure.
+  cmp -s "$RUNDIR/continuity.out" "$RUNDIR/enum-0.output" || return 1
+  grep -q 'synthetic original endpoint read failure' "$RUNDIR/enum-0.endpoint.err" || return 1
+  # A capture write failure crosses count -> owned-node -> owned-rows substitutions.
+  RUNDIR="$EVIDENCE/write-failure"; mkdir "$RUNDIR" "$RUNDIR/enum-0.meta" || return 1
+  printf '0\n' >"$RUNDIR/enum-next"
+  capture_case=healthy
+  out="$(count_owned_node)"; rc=$?
+  [ "$rc" -eq 2 ] && [ -z "$out" ] || return 1
+  echo 'PASS: successful enumeration with failed capture propagates infrastructure status 2'
+  # Opening a child log is checked in the parent, before the child's sentinel can run.
+  mkdir "$RUNDIR/monitor-1.log" || return 1
+  LAYOUT_T0=$SECONDS
+  run_monitored 'log-open fixture' "$BASH_BIN" -c ': >"$1"' _ "$RUNDIR/child.called"; rc=$?
+  [ "$rc" -eq 2 ] && [ "$INFRA_FAILURE" -eq 1 ] && [ ! -e "$RUNDIR/child.called" ] || return 1
+  echo 'PASS: failed child-log open prevents launch and marks infrastructure failure'
+  # Preserve the original bytes but make the newly introduced output reread fail.
+  # This seam never enumerates or signals a real process and does not delete evidence.
+  classify_windows_process_rows() {
+    if [ "$original_rc" -eq 0 ]; then printf 'RUNNER 1000 20261001000000000000 84028164\n'
+    else printf 'ENUM_ERROR:synthetic original classification failure\n'; fi
+    mv -- "$ENUM_FILE.output" "$ENUM_FILE.original" || return 1
+    return "$original_rc"
+  }
+  local original_rc wanted
+  for original_rc in 0 1; do
+    RUNDIR="$EVIDENCE/read-failure-$original_rc"; mkdir "$RUNDIR" || return 1
+    printf '0\n' >"$RUNDIR/enum-next"
+    ENUM_CONTEXT="synthetic output read failure after classifier rc=$original_rc"
+    out="$(count_owned_node 2>"$RUNDIR/count.err")"; rc=$?
+    wanted=2; [ "$original_rc" -eq 0 ] || wanted=1
+    printf '%s\n' "$rc" >"$RUNDIR/count.rc"
+    [ "$rc" -eq "$wanted" ] && [ -z "$out" ] || return 1
+    grep -q 'CAPTURE ERROR: original classifier output unreadable' "$RUNDIR/count.err" || return 1
+    grep -q "^CLASSIFIER=$original_rc$" "$RUNDIR/enum-0.meta" || return 1
+    [ "$(<"$RUNDIR/enum-0.status")" = "$wanted" ] && [ -s "$RUNDIR/enum-0.original" ] || return 1
+    echo "PASS: output read failure propagates rc=$wanted with original classifier rc=$original_rc preserved"
+  done
+)
+run_capture_cases >"$EVIDENCE/capture.out" 2>&1; CAPTURE_RC=$?
+printf '%s\n' "$CAPTURE_RC" >"$EVIDENCE/capture.rc"
+if [ "$CAPTURE_RC" -eq 0 ]; then t_pass 'original failure replay and capture-error propagation'
+else t_fail 'original failure replay or capture-error propagation'; fi
+cat "$EVIDENCE/capture.out"
+
 wait_for_pattern() { # <file> <grep-pattern> <timeout-s>
   local f="$1" pat="$2" t="$3" i=0
   while [ "$i" -lt $((t * 4)) ]; do
@@ -222,6 +342,7 @@ wait_for_pattern() { # <file> <grep-pattern> <timeout-s>
 # ---- sentinel suites (stand-ins for the nine real suites; runner accepts paths) -----------
 cat > "$WORK/sentinel_quick.sh" <<'EOF'
 #!/usr/bin/env bash
+: >"${STARTUP_SENTINEL_FILE:?}"
 sleep 2
 exit 0
 EOF
@@ -232,9 +353,19 @@ exit 0
 EOF
 cat > "$WORK/sentinel_idle8.sh" <<'EOF'
 #!/usr/bin/env bash
+printf 'outage early stdout\n'
+printf 'outage early stderr\n' >&2
+for ((i=1; i<=36; i++)); do printf 'outage line %02d\n' "$i"; done
 printf '%s\n' "$$" >"${T4_SENTINEL_PIDFILE:?}"
 sleep 8
 exit 0
+EOF
+cat > "$WORK/sentinel_nonzero.sh" <<'EOF'
+#!/usr/bin/env bash
+printf 'ordinary early stdout\n'
+printf 'ordinary early stderr\n' >&2
+for ((i=1; i<=36; i++)); do printf 'ordinary line %02d\n' "$i"; done
+exit 17
 EOF
 cat > "$WORK/sentinel_spawn3.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -296,21 +427,28 @@ chmod +x "$SHIM_FLAGGED/$ENUM_BIN"
 
 # ---- T1: startup fail-closed on broken enumeration ----------------------------------------
 echo "== T1: broken enumeration at startup must fail closed =="
-T1OUT="$WORK/t1.out"
-PATH="$SHIM_BROKEN:$PATH" "$BASH" "$RUNNER" --no-safety "$WORK/sentinel_quick.sh" >"$T1OUT" 2>&1
+T1OUT="$EVIDENCE/t1.out"
+PATH="$SHIM_BROKEN:$PATH" IPC_GATE_LOG_DIR="$EVIDENCE/t1-run" STARTUP_SENTINEL_FILE="$WORK/startup.called" \
+  "$BASH" "$RUNNER" --no-safety "$WORK/sentinel_quick.sh" >"$T1OUT" 2>&1
 T1RC=$?
-if [ "$T1RC" -ne 0 ] && grep -q "GATE ERROR" "$T1OUT" && grep -qi "enumerat" "$T1OUT"; then
+printf '%s\n' "$T1RC" >"$EVIDENCE/t1.rc"
+ERROR_STAGE=ps; is_windows && ERROR_STAGE=cim
+if [ "$T1RC" -eq 3 ] && grep -q "GATE ERROR" "$T1OUT" && grep -qi "enumerat" "$T1OUT" \
+   && ! grep -q 'RELEASE GATES: PASS' "$T1OUT" && [ ! -e "$WORK/startup.called" ] \
+   && grep -q 'shim: enumeration disabled by fixture' "$EVIDENCE/t1-run/enum-0.$ERROR_STAGE.err" \
+   && grep -q "^${ERROR_STAGE^^}=1$" "$EVIDENCE/t1-run/enum-0.meta" \
+   && grep -q '^CLASSIFIER=unattempted$' "$EVIDENCE/t1-run/enum-0.meta"; then
   t_pass "T1 runner failed closed (rc=$T1RC) with explicit enumeration error"
 else
-  t_fail "T1 expected nonzero rc + explicit 'GATE ERROR ... enumeration' message; got rc=$T1RC"
+  t_fail "T1 expected exit 3, no child/PASS, retained original stderr and partial-stage status; got rc=$T1RC"
   sed 's/^/    T1| /' "$T1OUT"
 fi
 
 # ---- T2: sibling (non-descendant) node processes must not count ----------------------------
 echo "== T2: unrelated node processes must not count toward the bound =="
-T2OUT="$WORK/t2.out"
+T2OUT="$EVIDENCE/t2.out"
 : > "$T2OUT"
-PATH="$SHIM_SAFE:$PATH" "$BASH" "$RUNNER" --no-safety "$WORK/sentinel_idle12.sh" >"$T2OUT" 2>&1 &
+PATH="$SHIM_SAFE:$PATH" IPC_GATE_LOG_DIR="$EVIDENCE/t2-run" "$BASH" "$RUNNER" --no-safety "$WORK/sentinel_idle12.sh" >"$T2OUT" 2>&1 &
 T2PID=$!
 if wait_for_pattern "$T2OUT" "== running" 90; then
   for i in 1 2 3; do
@@ -321,6 +459,7 @@ else
   echo "  (warn) runner never reached '== running'; T2 will fail on its assertions"
 fi
 wait "$T2PID"; T2RC=$?
+printf '%s\n' "$T2RC" >"$EVIDENCE/t2.rc"
 if [ "$T2RC" -eq 0 ] && grep -q "RELEASE GATES: PASS" "$T2OUT"; then
   t_pass "T2 gate PASSed with 3 unrelated node processes alive during the suite"
 else
@@ -330,9 +469,10 @@ fi
 
 # ---- T3: descendant node processes MUST count (blindness guard) ----------------------------
 echo "== T3: suite-spawned node processes must breach the peak bound =="
-T3OUT="$WORK/t3.out"
-PATH="$SHIM_SAFE:$PATH" "$BASH" "$RUNNER" --no-safety "$WORK/sentinel_spawn3.sh" >"$T3OUT" 2>&1
+T3OUT="$EVIDENCE/t3.out"
+PATH="$SHIM_SAFE:$PATH" IPC_GATE_LOG_DIR="$EVIDENCE/t3-run" "$BASH" "$RUNNER" --no-safety "$WORK/sentinel_spawn3.sh" >"$T3OUT" 2>&1
 T3RC=$?
+printf '%s\n' "$T3RC" >"$EVIDENCE/t3.rc"
 if [ "$T3RC" -ne 0 ] && grep -q "owned-node-peak" "$T3OUT"; then
   t_pass "T3 gate FAILed on owned peak breach (rc=$T3RC)"
 else
@@ -342,11 +482,11 @@ fi
 
 # ---- T4: mid-suite enumeration outage must abort, never measure 0 --------------------------
 echo "== T4: mid-suite enumeration outage must fail closed =="
-T4OUT="$WORK/t4.out"
+T4OUT="$EVIDENCE/t4.out"
 T4FLAG="$WORK/t4.flag"
 T4CHILD_FILE="$WORK/t4-child.pid"
 : > "$T4OUT"
-PATH="$SHIM_FLAGGED:$PATH" SHIM_FAIL_FLAG="$T4FLAG" T4_SENTINEL_PIDFILE="$T4CHILD_FILE" \
+PATH="$SHIM_FLAGGED:$PATH" SHIM_FAIL_FLAG="$T4FLAG" T4_SENTINEL_PIDFILE="$T4CHILD_FILE" IPC_GATE_LOG_DIR="$EVIDENCE/t4-run" \
   "$BASH" "$RUNNER" --no-safety "$WORK/sentinel_idle8.sh" >"$T4OUT" 2>&1 &
 T4PID=$!
 T4_READY=0
@@ -367,15 +507,21 @@ else
   echo "  (warn) named T4 sentinel was not observed alive; T4 will fail on its assertions"
 fi
 wait "$T4PID"; T4RC=$?
+printf '%s\n' "$T4RC" >"$EVIDENCE/t4.rc"
 if [ -n "$T4CHILD" ] && ! kill -0 "$T4CHILD" 2>/dev/null \
    && grep -qF "ENUM ABORT: direct suite child $T4CHILD reaped" "$T4OUT"; then
   T4_REAPED=1
 fi
-if [ "$T4_READY" -eq 1 ] && [ "$T4_INJECTED" -eq 1 ] && [ "$T4RC" -ne 0 ] \
+{ printf 'outage early stdout\noutage early stderr\n'; for ((i=1; i<=36; i++)); do printf 'outage line %02d\n' "$i"; done; } >"$EVIDENCE/t4.expected"
+if [ "$T4_READY" -eq 1 ] && [ "$T4_INJECTED" -eq 1 ] && [ "$T4RC" -eq 3 ] \
    && [ "$T4_REAPED" -eq 1 ] \
    && grep -q "GATE ERROR" "$T4OUT" && grep -qi "enumerat" "$T4OUT" \
    && grep -qF "mid-child sample, sentinel_idle8.sh" "$T4OUT" \
-   && grep -q "shim: simulated mid-run enumeration outage" "$T4OUT"; then
+   && ! grep -q 'RELEASE GATES: PASS' "$T4OUT" \
+   && grep -q "shim: simulated mid-run enumeration outage" "$EVIDENCE/t4-run/enum-0.$ERROR_STAGE.err" \
+   && grep -q "^${ERROR_STAGE^^}=1$" "$EVIDENCE/t4-run/enum-0.meta" \
+   && grep -q '^CLASSIFIER=unattempted$' "$EVIDENCE/t4-run/enum-0.meta" \
+   && cmp -s "$EVIDENCE/t4.expected" "$EVIDENCE/t4-run/monitor-2.log"; then
   t_pass "T4 runner aborted named sentinel (rc=$T4RC), direct child $T4CHILD gone/reaped"
 else
   t_fail "T4 expected named-sentinel readiness + outage + direct-child reap + explicit enumeration abort; readiness=$T4_READY injected=$T4_INJECTED reaped=$T4_REAPED child=$T4CHILD rc=$T4RC"
@@ -384,10 +530,11 @@ fi
 
 # ---- T5: active outer-monitor timeout kills/reaps captured descendants --------------------
 echo "== T5: active monitor timeout must force-kill/reap a TERM-resistant descendant =="
-T5OUT="$WORK/t5.out"
+T5OUT="$EVIDENCE/t5.out"
 T5T0=$SECONDS
-"$BASH" "$RUNNER" --self-test-monitor >"$T5OUT" 2>&1
+IPC_GATE_LOG_DIR="$EVIDENCE/t5-run" "$BASH" "$RUNNER" --self-test-monitor >"$T5OUT" 2>&1
 T5RC=$?
+printf '%s\n' "$T5RC" >"$EVIDENCE/t5.rc"
 T5ELAPSED=$((SECONDS - T5T0))
 if [ "$T5RC" -eq 0 ] \
    && [ "$T5ELAPSED" -le 15 ] \
@@ -401,10 +548,38 @@ else
   sed 's/^/    T5| /' "$T5OUT"
 fi
 
+# ---- T6: ordinary nonzero child retains all bytes independently of peak failure -----------
+T6OUT="$EVIDENCE/t6.out"
+PATH="$SHIM_SAFE:$PATH" IPC_GATE_LOG_DIR="$EVIDENCE/t6-run" "$BASH" "$RUNNER" --no-safety "$WORK/sentinel_nonzero.sh" >"$T6OUT" 2>&1
+T6RC=$?
+printf '%s\n' "$T6RC" >"$EVIDENCE/t6.rc"
+{ printf 'ordinary early stdout\nordinary early stderr\n'; for ((i=1; i<=36; i++)); do printf 'ordinary line %02d\n' "$i"; done; } >"$EVIDENCE/t6.expected"
+if [ "$T6RC" -eq 1 ] && grep -qF 'sentinel_nonzero.sh: rc=17 child-exit=17' "$T6OUT" \
+   && ! grep -Eq 'GATE ERROR|MONITOR TIMEOUT|owned-node-peak|RELEASE GATES: PASS' "$T6OUT" \
+   && cmp -s "$EVIDENCE/t6.expected" "$EVIDENCE/t6-run/monitor-2.log"; then
+  t_pass 'T6 ordinary exit 17 retained complete combined output after runner EXIT'
+else
+  t_fail "T6 expected runner exit 1, named child exit 17 and exact complete bytes; got rc=$T6RC"
+  sed 's/^/    T6| /' "$T6OUT"
+fi
+
+# Reusing a prior evidence directory must fail before enumeration or sentinel launch.
+sha256sum "$EVIDENCE/t1-run/"* >"$EVIDENCE/refusal.before"
+IPC_GATE_LOG_DIR="$EVIDENCE/t1-run" STARTUP_SENTINEL_FILE="$WORK/refusal.called" \
+  "$BASH" "$RUNNER" --no-safety "$WORK/sentinel_quick.sh" >"$EVIDENCE/refusal.out" 2>&1
+REFUSAL_RC=$?
+printf '%s\n' "$REFUSAL_RC" >"$EVIDENCE/refusal.rc"
+sha256sum "$EVIDENCE/t1-run/"* >"$EVIDENCE/refusal.after"
+if [ "$REFUSAL_RC" -eq 2 ] && [ ! -e "$WORK/refusal.called" ] \
+   && cmp -s "$EVIDENCE/refusal.before" "$EVIDENCE/refusal.after" \
+   && ! grep -q '== running' "$EVIDENCE/refusal.out"; then
+  t_pass 'existing evidence path refused unchanged before child launch'
+else t_fail "existing evidence path was not safely refused (rc=$REFUSAL_RC)"; fi
+
 echo ""
 if [ "$FAILN" -eq 0 ]; then
-  echo "test_gate_process_ownership: ALL PASS (5 checks)"
+  echo "test_gate_process_ownership: ALL PASS (6 monitor checks + capture checks)"
   exit 0
 fi
-echo "test_gate_process_ownership: $FAILN of 5 checks FAILED"
+echo "test_gate_process_ownership: $FAILN checks FAILED"
 exit 1
