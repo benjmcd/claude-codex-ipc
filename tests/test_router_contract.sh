@@ -919,7 +919,12 @@ process.stdin.on("end", () => {
   fi
 }
 
-REVALIDATE_BASH_MODE=path-bad revalidate_case eligible-long 0 '
+revalidate_platform="$("$NODE_BIN" -p 'process.platform')"
+eligible_bash_mode=normal
+if [[ "$revalidate_platform" == "win32" ]]; then
+  eligible_bash_mode=path-bad
+fi
+REVALIDATE_BASH_MODE="$eligible_bash_mode" revalidate_case eligible-long 0 '
   value.ok === true && value.checks.hostPolicy.ok === true &&
   value.checks.hostPolicy.sendEligible === true &&
   value.checks.hostPolicy.inventory.guiHosts.length === 1 &&
@@ -929,7 +934,7 @@ REVALIDATE_BASH_MODE=path-bad revalidate_case eligible-long 0 '
   !("commandLine" in value.checks.hostPolicy.inventory.appServers[0]) &&
   value.summary.failed.length === 0'
 first_bash="$(awk -F '\t' 'tolower($1) ~ /bash(\.exe)?$/ { print $1; exit }' "$REVALIDATE_LOG")"
-if [[ "$("$NODE_BIN" -p 'process.platform')" == "win32" ]]; then
+if [[ "$revalidate_platform" == "win32" ]]; then
   [[ "$first_bash" == 'C:\Program Files\Git\bin\bash.exe' ]] \
     && ok "Windows revalidator prefers pinned Git Bash before a failing PATH shim" \
     || no "revalidator selected the wrong Bash first: $first_bash"
