@@ -342,7 +342,7 @@ policy_must_refuse "Q18 unreadable descriptor refuses" "descriptor"
 rmdir "$POLICY_ROOT/host-policy.json"
 
 echo "== R. shared policy send inventory =="
-MOCK_PACKAGE='{"complete":true,"packageRootsComplete":true,"packageRoots":["C:\\Program Files\\WindowsApps\\OpenAI.Codex_26.707.3563.0_x64__2p2nqsd0c76g0"],"errors":[],"processes":[{"pid":101,"parentPid":1,"name":"ChatGPT.exe","executable":"C:\\Program Files\\WindowsApps\\OpenAI.Codex_26.707.3563.0_x64__2p2nqsd0c76g0\\app\\ChatGPT.exe"},{"pid":102,"parentPid":101,"name":"codex.exe","executable":"C:\\Program Files\\WindowsApps\\OpenAI.Codex_26.707.3563.0_x64__2p2nqsd0c76g0\\app\\resources\\codex.exe"},{"pid":103,"parentPid":1,"name":"notepad.exe","executable":"C:\\Windows\\notepad.exe"}]}'
+MOCK_PACKAGE='{"complete":true,"packageRootsComplete":true,"packageRoots":["C:\\Program Files\\WindowsApps\\OpenAI.Codex_26.707.3563.0_x64__2p2nqsd0c76g0"],"errors":[],"processes":[{"pid":101,"parentPid":1,"name":"ChatGPT.exe","executable":"C:\\Program Files\\WindowsApps\\OpenAI.Codex_26.707.3563.0_x64__2p2nqsd0c76g0\\app\\ChatGPT.exe","commandLine":"ChatGPT.exe"},{"pid":102,"parentPid":101,"name":"codex.exe","executable":"C:\\Program Files\\WindowsApps\\OpenAI.Codex_26.707.3563.0_x64__2p2nqsd0c76g0\\app\\resources\\codex.exe","commandLine":"codex.exe app-server"},{"pid":103,"parentPid":1,"name":"notepad.exe","executable":"C:\\Windows\\notepad.exe"}]}'
 POLICY_OUT="$(powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$POLICYWIN" \
     -Purpose send -IpcRoot "$POLICY_ROOT" -DryRun -MockInventoryJson "$MOCK_PACKAGE" 2>&1)"; POLICY_RC=$?
 assert_policy 0 "R1 package-only inventory is send eligible" '
@@ -351,6 +351,7 @@ assert_policy 0 "R1 package-only inventory is send eligible" '
   value.inventory.guiHosts.length === 1 && value.inventory.guiHosts[0].classification === "package" &&
   value.inventory.guiHosts[0].matchesIntended === true &&
   value.inventory.appServers.length === 1 && value.inventory.appServers[0].pid === 102 &&
+  value.inventory.appServers[0].matchesIntended === true &&
   value.activationEligible === false'
 
 MOCK_ALTERNATE='{"complete":true,"packageRootsComplete":true,"packageRoots":[],"errors":[],"processes":[{"pid":201,"parentPid":1,"name":"ChatGPT.exe","executable":"C:\\Alt\\Host\\ChatGPT.exe"}]}'
@@ -419,9 +420,40 @@ MOCK_ORPHAN_SERVER='{"complete":true,"packageRootsComplete":true,"packageRoots":
 POLICY_OUT="$(powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$POLICYWIN" \
     -Purpose send -IpcRoot "$POLICY_ROOT" -DryRun -MockInventoryJson "$MOCK_ORPHAN_SERVER" 2>&1)"; POLICY_RC=$?
 assert_policy 0 "R11 orphan app server cannot stand in for a GUI host" '
-  value.sendEligible === false && value.inventory.guiHosts.length === 0 &&
-  value.inventory.appServers.length === 1 &&
+  value.sendEligible === false && value.inventory.guiHosts.length === 1 &&
+  value.inventory.guiHosts[0].pid === 701 && value.inventory.guiHosts[0].matchesIntended === false &&
+  value.inventory.appServers.length === 0 &&
   value.sendReasons.includes("intended-host-not-running")'
+
+MOCK_PACKAGE_RESOURCE_ORPHAN='{"complete":true,"packageRootsComplete":true,"packageRoots":["C:\\Program Files\\WindowsApps\\OpenAI.Codex_fixture"],"errors":[],"processes":[{"pid":703,"parentPid":1,"name":"ChatGPT.exe","executable":"C:\\Program Files\\WindowsApps\\OpenAI.Codex_fixture\\app\\ChatGPT.exe","commandLine":"ChatGPT.exe"},{"pid":704,"parentPid":1,"name":"codex.exe","executable":"C:\\Program Files\\WindowsApps\\OpenAI.Codex_fixture\\app\\resources\\codex.exe","commandLine":"codex.exe app-server"}]}'
+POLICY_OUT="$(powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$POLICYWIN" \
+    -Purpose send -IpcRoot "$POLICY_ROOT" -DryRun \
+    -MockInventoryJson "$MOCK_PACKAGE_RESOURCE_ORPHAN" 2>&1)"; POLICY_RC=$?
+assert_policy 0 "R11b package resource orphan remains a competing GUI candidate" '
+  value.sendEligible === false && value.inventory.guiHosts.length === 2 &&
+  value.inventory.guiHosts.some((item) => item.pid === 704 && item.matchesIntended === false) &&
+  value.inventory.appServers.length === 0 &&
+  value.sendReasons.includes("other-desktop-host-running")'
+
+MOCK_RESOURCE_ELECTRON_SELF='{"complete":true,"packageRootsComplete":true,"packageRoots":["C:\\Program Files\\WindowsApps\\OpenAI.Codex_fixture"],"errors":[],"processes":[{"pid":705,"parentPid":1,"name":"ChatGPT.exe","executable":"C:\\Program Files\\WindowsApps\\OpenAI.Codex_fixture\\app\\ChatGPT.exe","commandLine":"ChatGPT.exe"},{"pid":706,"parentPid":706,"name":"codex.exe","executable":"C:\\Program Files\\WindowsApps\\OpenAI.Codex_fixture\\app\\resources\\codex.exe","commandLine":"codex.exe --type=renderer"}]}'
+POLICY_OUT="$(powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$POLICYWIN" \
+    -Purpose send -IpcRoot "$POLICY_ROOT" -DryRun \
+    -MockInventoryJson "$MOCK_RESOURCE_ELECTRON_SELF" 2>&1)"; POLICY_RC=$?
+assert_policy 0 "R11c resource Electron claim cannot exempt a self-parent candidate" '
+  value.sendEligible === false && value.inventory.guiHosts.length === 2 &&
+  value.inventory.guiHosts.some((item) => item.pid === 706 && item.matchesIntended === false) &&
+  value.inventory.appServers.length === 0 &&
+  value.sendReasons.includes("other-desktop-host-running")'
+
+MOCK_RESOURCE_ELECTRON_CYCLE='{"complete":true,"packageRootsComplete":true,"packageRoots":["C:\\Program Files\\WindowsApps\\OpenAI.Codex_fixture"],"errors":[],"processes":[{"pid":707,"parentPid":1,"name":"ChatGPT.exe","executable":"C:\\Program Files\\WindowsApps\\OpenAI.Codex_fixture\\app\\ChatGPT.exe","commandLine":"ChatGPT.exe"},{"pid":708,"parentPid":709,"name":"codex.exe","executable":"C:\\Program Files\\WindowsApps\\OpenAI.Codex_fixture\\app\\resources\\codex.exe","commandLine":"codex.exe --type=renderer"},{"pid":709,"parentPid":708,"name":"codex.exe","executable":"C:\\Program Files\\WindowsApps\\OpenAI.Codex_fixture\\app\\resources\\codex.exe","commandLine":"codex.exe --type=utility"}]}'
+POLICY_OUT="$(powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$POLICYWIN" \
+    -Purpose send -IpcRoot "$POLICY_ROOT" -DryRun \
+    -MockInventoryJson "$MOCK_RESOURCE_ELECTRON_CYCLE" 2>&1)"; POLICY_RC=$?
+assert_policy 0 "R11d resource Electron claims cannot exempt a same-executable cycle" '
+  value.sendEligible === false && value.inventory.guiHosts.length === 3 &&
+  value.inventory.guiHosts.filter((item) => item.pid !== 707).every((item) => item.matchesIntended === false) &&
+  value.inventory.appServers.length === 0 &&
+  value.sendReasons.includes("other-desktop-host-running")'
 
 MOCK_NESTED_ALTERNATE='{"complete":true,"packageRootsComplete":true,"packageRoots":["C:\\Program Files\\WindowsApps\\OpenAI.Codex_26.707.3563.0_x64__2p2nqsd0c76g0"],"errors":[],"processes":[{"pid":711,"parentPid":1,"name":"ChatGPT.exe","executable":"C:\\Program Files\\WindowsApps\\OpenAI.Codex_26.707.3563.0_x64__2p2nqsd0c76g0\\app\\ChatGPT.exe","commandLine":"ChatGPT.exe"},{"pid":712,"parentPid":711,"name":"ChatGPT.exe","executable":"C:\\Alt\\Nested\\ChatGPT.exe","commandLine":"ChatGPT.exe"}]}'
 POLICY_OUT="$(powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$POLICYWIN" \
@@ -436,6 +468,57 @@ POLICY_OUT="$(powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$POLICYWI
 assert_policy 0 "R13 proven Electron child is not counted as a second GUI" '
   value.sendEligible === true && value.inventory.guiHosts.length === 1 &&
   value.inventory.appServers.length === 1'
+
+MOCK_ELECTRON_SELF='{"complete":true,"packageRootsComplete":true,"packageRoots":["C:\\Program Files\\WindowsApps\\OpenAI.Codex_fixture"],"errors":[],"processes":[{"pid":723,"parentPid":1,"name":"ChatGPT.exe","executable":"C:\\Program Files\\WindowsApps\\OpenAI.Codex_fixture\\app\\ChatGPT.exe","commandLine":"ChatGPT.exe"},{"pid":724,"parentPid":724,"name":"ChatGPT.exe","executable":"C:\\Program Files\\WindowsApps\\OpenAI.Codex_fixture\\app\\ChatGPT.exe","commandLine":"ChatGPT.exe --type=renderer"}]}'
+POLICY_OUT="$(powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$POLICYWIN" \
+    -Purpose send -IpcRoot "$POLICY_ROOT" -DryRun -MockInventoryJson "$MOCK_ELECTRON_SELF" 2>&1)"; POLICY_RC=$?
+assert_policy 0 "R13b typed Electron self-parent cannot stand in for GUI ancestry" '
+  value.sendEligible === false && value.inventory.guiHosts.length === 2 &&
+  value.inventory.appServers.length === 0 &&
+  value.sendReasons.includes("other-desktop-host-running")'
+
+MOCK_ELECTRON_CYCLE='{"complete":true,"packageRootsComplete":true,"packageRoots":["C:\\Program Files\\WindowsApps\\OpenAI.Codex_fixture"],"errors":[],"processes":[{"pid":725,"parentPid":1,"name":"ChatGPT.exe","executable":"C:\\Program Files\\WindowsApps\\OpenAI.Codex_fixture\\app\\ChatGPT.exe","commandLine":"ChatGPT.exe"},{"pid":726,"parentPid":727,"name":"ChatGPT.exe","executable":"C:\\Program Files\\WindowsApps\\OpenAI.Codex_fixture\\app\\ChatGPT.exe","commandLine":"ChatGPT.exe --type=renderer"},{"pid":727,"parentPid":726,"name":"ChatGPT.exe","executable":"C:\\Program Files\\WindowsApps\\OpenAI.Codex_fixture\\app\\ChatGPT.exe","commandLine":"ChatGPT.exe --type=utility"}]}'
+POLICY_OUT="$(powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$POLICYWIN" \
+    -Purpose send -IpcRoot "$POLICY_ROOT" -DryRun -MockInventoryJson "$MOCK_ELECTRON_CYCLE" 2>&1)"; POLICY_RC=$?
+assert_policy 0 "R13c typed Electron cycle has no proven GUI ancestry" '
+  value.sendEligible === false && value.inventory.guiHosts.length === 3 &&
+  value.inventory.appServers.length === 0 &&
+  value.sendReasons.includes("other-desktop-host-running")'
+
+MOCK_ELECTRON_MISSING_ROOT='{"complete":true,"packageRootsComplete":true,"packageRoots":["C:\\Program Files\\WindowsApps\\OpenAI.Codex_fixture"],"errors":[],"processes":[{"pid":728,"parentPid":1,"name":"ChatGPT.exe","executable":"C:\\Program Files\\WindowsApps\\OpenAI.Codex_fixture\\app\\ChatGPT.exe","commandLine":"ChatGPT.exe"},{"pid":729,"parentPid":730,"name":"ChatGPT.exe","executable":"C:\\Program Files\\WindowsApps\\OpenAI.Codex_fixture\\app\\ChatGPT.exe","commandLine":"ChatGPT.exe --type=renderer"},{"pid":730,"parentPid":998,"name":"ChatGPT.exe","executable":"C:\\Program Files\\WindowsApps\\OpenAI.Codex_fixture\\app\\ChatGPT.exe","commandLine":"ChatGPT.exe --type=utility"}]}'
+POLICY_OUT="$(powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$POLICYWIN" \
+    -Purpose send -IpcRoot "$POLICY_ROOT" -DryRun -MockInventoryJson "$MOCK_ELECTRON_MISSING_ROOT" 2>&1)"; POLICY_RC=$?
+assert_policy 0 "R13d disconnected typed Electron chain cannot be partially exempted" '
+  value.sendEligible === false && value.inventory.guiHosts.length === 3 &&
+  value.inventory.appServers.length === 0 &&
+  value.sendReasons.includes("other-desktop-host-running")'
+
+MOCK_ELECTRON_LONE='{"complete":true,"packageRootsComplete":true,"packageRoots":["C:\\Program Files\\WindowsApps\\OpenAI.Codex_fixture"],"errors":[],"processes":[{"pid":735,"parentPid":998,"name":"ChatGPT.exe","executable":"C:\\Program Files\\WindowsApps\\OpenAI.Codex_fixture\\app\\ChatGPT.exe","commandLine":"ChatGPT.exe --type=renderer"}]}'
+POLICY_OUT="$(powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$POLICYWIN" \
+    -Purpose send -IpcRoot "$POLICY_ROOT" -DryRun -MockInventoryJson "$MOCK_ELECTRON_LONE" 2>&1)"; POLICY_RC=$?
+assert_policy 0 "R13e lone package renderer cannot stand in for an intended GUI" '
+  value.sendEligible === false && value.inventory.guiHosts.length === 1 &&
+  value.inventory.guiHosts[0].matchesIntended === false &&
+  value.inventory.appServers.length === 0 &&
+  value.sendReasons.includes("intended-host-not-running")'
+
+MOCK_NATIVE_LONE='{"complete":true,"packageRootsComplete":true,"packageRoots":["C:\\Program Files\\WindowsApps\\OpenAI.Codex_fixture"],"errors":[],"processes":[{"pid":736,"parentPid":998,"name":"codex.exe","executable":"C:\\Program Files\\WindowsApps\\OpenAI.Codex_fixture\\app\\codex.exe","commandLine":"codex.exe app-server"}]}'
+POLICY_OUT="$(powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$POLICYWIN" \
+    -Purpose send -IpcRoot "$POLICY_ROOT" -DryRun -MockInventoryJson "$MOCK_NATIVE_LONE" 2>&1)"; POLICY_RC=$?
+assert_policy 0 "R13f lone non-resource package app-server cannot stand in for an intended GUI" '
+  value.sendEligible === false && value.inventory.guiHosts.length === 1 &&
+  value.inventory.guiHosts[0].matchesIntended === false &&
+  value.inventory.appServers.length === 0 &&
+  value.sendReasons.includes("intended-host-not-running")'
+
+MOCK_RENAMED_NATIVE_LONE='{"complete":true,"packageRootsComplete":true,"packageRoots":["C:\\Program Files\\WindowsApps\\OpenAI.Codex_fixture"],"errors":[],"processes":[{"pid":737,"parentPid":998,"name":"Backend.exe","executable":"C:\\Program Files\\WindowsApps\\OpenAI.Codex_fixture\\app\\Backend.exe","commandLine":"Backend.exe app-server"}]}'
+POLICY_OUT="$(powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$POLICYWIN" \
+    -Purpose send -IpcRoot "$POLICY_ROOT" -DryRun -MockInventoryJson "$MOCK_RENAMED_NATIVE_LONE" 2>&1)"; POLICY_RC=$?
+assert_policy 0 "R13g lone renamed native-role claim cannot stand in for an intended GUI" '
+  value.sendEligible === false && value.inventory.guiHosts.length === 1 &&
+  value.inventory.guiHosts[0].matchesIntended === false &&
+  value.inventory.appServers.length === 0 &&
+  value.sendReasons.includes("intended-host-not-running")'
 
 MOCK_UNKNOWN_CHILD_ROLE='{"complete":true,"packageRootsComplete":true,"packageRoots":["C:\\Program Files\\WindowsApps\\OpenAI.Codex_26.707.3563.0_x64__2p2nqsd0c76g0"],"errors":[],"processes":[{"pid":731,"parentPid":1,"name":"ChatGPT.exe","executable":"C:\\Program Files\\WindowsApps\\OpenAI.Codex_26.707.3563.0_x64__2p2nqsd0c76g0\\app\\ChatGPT.exe","commandLine":"ChatGPT.exe"},{"pid":732,"parentPid":731,"name":"ChatGPT.exe","executable":"C:\\Program Files\\WindowsApps\\OpenAI.Codex_26.707.3563.0_x64__2p2nqsd0c76g0\\app\\ChatGPT.exe","commandLine":null}]}'
 POLICY_OUT="$(powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$POLICYWIN" \
@@ -490,6 +573,15 @@ assert_policy 0 "R18b package GUI accepts its basename-bound external app-server
   value.inventory.guiHosts.length === 1 && value.inventory.guiHosts[0].pid === 775 &&
   value.inventory.appServers.length === 1 && value.inventory.appServers[0].pid === 776'
 
+MOCK_EXTERNAL_RESOURCE_SERVER='{"complete":true,"packageRootsComplete":true,"packageRoots":[],"errors":[],"processes":[{"pid":777,"parentPid":1,"name":"ChatGPT.exe","executable":"C:\\Alt\\Host\\ChatGPT.exe","commandLine":"ChatGPT.exe"},{"pid":778,"parentPid":777,"name":"codex.exe","executable":"C:\\Alt\\Runtime\\resources\\codex.exe","commandLine":"codex.exe app-server"}]}'
+POLICY_OUT="$(powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$POLICYWIN" \
+    -Purpose send -IpcRoot "$POLICY_ROOT" -IntendedHost 'C:\Alt\Host\ChatGPT.exe' \
+    -DryRun -MockInventoryJson "$MOCK_EXTERNAL_RESOURCE_SERVER" 2>&1)"; POLICY_RC=$?
+assert_policy 0 "R18c resource child requires and accepts proven role and ancestry" '
+  value.sendEligible === true && value.inventory.complete === true &&
+  value.inventory.guiHosts.length === 1 && value.inventory.guiHosts[0].pid === 777 &&
+  value.inventory.appServers.length === 1 && value.inventory.appServers[0].pid === 778'
+
 MOCK_UNPROVEN_CODEX_CHILD='{"complete":true,"packageRootsComplete":true,"packageRoots":[],"errors":[],"processes":[{"pid":781,"parentPid":1,"name":"ChatGPT.exe","executable":"C:\\Alt\\Host\\ChatGPT.exe","commandLine":"ChatGPT.exe"},{"pid":782,"parentPid":781,"name":"codex.exe","executable":"C:\\Alt\\Other\\codex.exe","commandLine":"codex.exe serve"}]}'
 POLICY_OUT="$(powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$POLICYWIN" \
     -Purpose send -IpcRoot "$POLICY_ROOT" -IntendedHost 'C:\Alt\Host\ChatGPT.exe' \
@@ -535,11 +627,29 @@ assert_policy 0 "R23 orphan app-server claim remains a competing GUI candidate" 
   value.inventory.appServers.length === 0 &&
   value.sendReasons.includes("other-desktop-host-running")'
 
+MOCK_RESOURCE_ORPHAN_WITH_GUI='{"complete":true,"packageRootsComplete":true,"packageRoots":[],"errors":[],"processes":[{"pid":823,"parentPid":1,"name":"ChatGPT.exe","executable":"C:\\Alt\\Host\\ChatGPT.exe","commandLine":"ChatGPT.exe"},{"pid":824,"parentPid":1,"name":"codex.exe","executable":"C:\\Alt\\Runtime\\resources\\codex.exe","commandLine":"codex.exe app-server"}]}'
+POLICY_OUT="$(powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$POLICYWIN" \
+    -Purpose send -IpcRoot "$POLICY_ROOT" -IntendedHost 'C:\Alt\Host\ChatGPT.exe' \
+    -DryRun -MockInventoryJson "$MOCK_RESOURCE_ORPHAN_WITH_GUI" 2>&1)"; POLICY_RC=$?
+assert_policy 0 "R23b resource suffix cannot exempt an orphan alongside a GUI" '
+  value.sendEligible === false && value.inventory.guiHosts.length === 2 &&
+  value.inventory.appServers.length === 0 &&
+  value.sendReasons.includes("other-desktop-host-running")'
+
 MOCK_NULL_APP_SERVER_ROLE='{"complete":true,"packageRootsComplete":true,"packageRoots":[],"errors":[],"processes":[{"pid":831,"parentPid":1,"name":"ChatGPT.exe","executable":"C:\\Alt\\Host\\ChatGPT.exe","commandLine":"ChatGPT.exe"},{"pid":832,"parentPid":831,"name":"codex.exe","executable":"C:\\Alt\\Runtime\\codex.exe","commandLine":null}]}'
 POLICY_OUT="$(powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$POLICYWIN" \
     -Purpose send -IpcRoot "$POLICY_ROOT" -IntendedHost 'C:\Alt\Host\ChatGPT.exe' \
     -DryRun -MockInventoryJson "$MOCK_NULL_APP_SERVER_ROLE" 2>&1)"; POLICY_RC=$?
 assert_policy 0 "R24 unreadable external child role remains a competing GUI candidate" '
+  value.sendEligible === false && value.inventory.guiHosts.length === 2 &&
+  value.inventory.appServers.length === 0 &&
+  value.sendReasons.includes("other-desktop-host-running")'
+
+MOCK_NULL_RESOURCE_ROLE='{"complete":true,"packageRootsComplete":true,"packageRoots":[],"errors":[],"processes":[{"pid":833,"parentPid":1,"name":"ChatGPT.exe","executable":"C:\\Alt\\Host\\ChatGPT.exe","commandLine":"ChatGPT.exe"},{"pid":834,"parentPid":833,"name":"codex.exe","executable":"C:\\Alt\\Runtime\\resources\\codex.exe","commandLine":null}]}'
+POLICY_OUT="$(powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$POLICYWIN" \
+    -Purpose send -IpcRoot "$POLICY_ROOT" -IntendedHost 'C:\Alt\Host\ChatGPT.exe' \
+    -DryRun -MockInventoryJson "$MOCK_NULL_RESOURCE_ROLE" 2>&1)"; POLICY_RC=$?
+assert_policy 0 "R24b resource suffix cannot exempt an unreadable child role" '
   value.sendEligible === false && value.inventory.guiHosts.length === 2 &&
   value.inventory.appServers.length === 0 &&
   value.sendReasons.includes("other-desktop-host-running")'

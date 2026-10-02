@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- Required backend role and GUI ancestry evidence before exempting resource or Electron
+  processes from the host inventory. Cyclic, broken, unreadable and orphan backend chains
+  refuse, including lone backend claims under a package root. Plain renamed package GUIs
+  remain supported; typed children of an unproven renamed GUI conservatively refuse.
 - Recognized bare and JSON-quoted native `cli`, `vscode`, `exec`, and `mcp` session sources and the
   exact `agent_created_thread` root declaration. All existing parent, spawn-edge, agent-metadata,
   rollout, and database contradictions still veto root admission. Internal sources, unknown JSON

@@ -576,6 +576,30 @@ function Test-CodexIpcRuntimeAncestry {
     return $false
 }
 
+function Test-CodexIpcElectronAncestry {
+    param([object]$Process, [hashtable]$ProcessById, [hashtable]$GuiById)
+
+    $path = ConvertTo-CodexIpcNormalizedPath -Value $Process.executable
+    if ($null -eq $path) { return $false }
+    $seen = @{ ([string]$Process.pid) = $true }
+    $parentId = [long]$Process.parentPid
+    while ($parentId -gt 0) {
+        $key = [string]$parentId
+        if ($seen.ContainsKey($key) -or -not $ProcessById.ContainsKey($key)) { return $false }
+        $seen[$key] = $true
+        $ancestor = $ProcessById[$key]
+        $ancestorPath = ConvertTo-CodexIpcNormalizedPath -Value $ancestor.executable
+        if ($null -eq $ancestorPath -or [string]::IsNullOrWhiteSpace([string]$ancestor.commandLine) -or
+            -not [string]::Equals($path, $ancestorPath, [System.StringComparison]::OrdinalIgnoreCase)) { return $false }
+        if ($GuiById.ContainsKey($key)) { return $true }
+        $token = Read-CodexIpcCommandToken -CommandLine ([string]$ancestor.commandLine)
+        if ($null -eq $token -or -not (Test-CodexIpcCommandExecutable -Token $token.value -Path $ancestorPath) -or
+            [string]$ancestor.commandLine -notmatch '(?i)(^|\s)--type(?:=|\s)') { return $false }
+        $parentId = [long]$ancestor.parentPid
+    }
+    return $false
+}
+
 function Resolve-CodexIpcInventory {
     param([object]$RawInventory, [object]$IntendedHost)
 
@@ -639,24 +663,32 @@ function Resolve-CodexIpcInventory {
         $path = ConvertTo-CodexIpcNormalizedPath -Value $process.executable
         $isDescendant = Test-CodexIpcCandidateDescendant `
             -Process $process -ProcessById $processById -CandidateById $candidateById
-        $isResourceServer = ($null -ne $path -and $path -match '(?i)\\resources\\codex(?:\.exe)?$')
         $hasProvenNativeRole = ($nativeRoleById.ContainsKey([string]$process.pid) -and
             (Test-CodexIpcRuntimeAncestry -Process $process -ProcessById $processById -CandidateById $candidateById -NativeRoleById $nativeRoleById -GuiById $guiById -RuntimeByGuiId $runtimeByGuiId))
         $commandToken = Read-CodexIpcCommandToken -CommandLine ([string]$process.commandLine)
         $hasProvenElectronRole = (
-            $matchesIntended -and $isDescendant -and
-            (Test-CodexIpcSameExecutableCandidateAncestor -Process $process -ProcessById $processById -CandidateById $candidateById) -and
+            $matchesIntended -and
+            ($path -notmatch '(?i)\\resources\\codex(?:\.exe)?$') -and
+            (Test-CodexIpcElectronAncestry -Process $process -ProcessById $processById -GuiById $guiById) -and
             $null -ne $commandToken -and (Test-CodexIpcCommandExecutable -Token $commandToken.value -Path $path) -and
             $process.commandLine -is [string] -and
             -not [string]::IsNullOrWhiteSpace([string]$process.commandLine) -and
             [string]$process.commandLine -match '(?i)(^|\s)--type(?:=|\s)'
         )
-        if ($isResourceServer -or $hasProvenNativeRole -or $hasProvenElectronRole) {
+        if ($hasProvenNativeRole -or $hasProvenElectronRole) {
             $appServers += $entry
         } else {
+            if (($null -ne $path -and (
+                    $path -match '(?i)\\resources\\codex(?:\.exe)?$' -or
+                    [System.IO.Path]::GetFileName($path) -in @('codex', 'codex.exe'))) -or
+                [string]$process.commandLine -match '(?i)(^|\s)--type(?:=|\s)' -or
+                $null -ne (Get-CodexIpcNativeRole -Process $process)) {
+                # Unproven backend and typed child evidence cannot establish an intended GUI.
+                $entry.matchesIntended = $false
+            }
             $guiHosts += $entry
         }
-        if ($isDescendant -and -not $isResourceServer -and -not $hasProvenNativeRole -and -not $hasProvenElectronRole -and
+        if ($isDescendant -and -not $hasProvenNativeRole -and -not $hasProvenElectronRole -and
             $null -eq $process.commandLine -and
             (Test-CodexIpcSameExecutableCandidateAncestor `
                 -Process $process -ProcessById $processById -CandidateById $candidateById)) {

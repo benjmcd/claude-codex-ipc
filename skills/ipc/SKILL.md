@@ -247,7 +247,11 @@ host and no other GUI host identity. External native helper roles require a matc
 executable token and complete leading `-c`/`--config key=value` pairs. A direct intended-GUI
 `app-server` establishes the runtime executable; further `app-server`, `exec-server`, and `sandbox`
 helpers require that same executable and complete readable, acyclic ancestry back to the GUI.
-Role words inside config values or later payload text do not establish a role. Unknown roles,
+Role words inside config values or later payload text do not establish a role. A resource path
+alone never establishes a backend role. Typed Electron children require a complete readable,
+acyclic chain of the same executable to a proven GUI anchor. Unproven backend and typed-process
+claims remain competing candidates, even alone under a package root. Plain renamed package GUIs
+remain supported; their typed children refuse unless the GUI anchor is proven. Unknown roles,
 broken ancestry, and another GUI identity still refuse. Configuration resolves per field in this order:
 wrapper flag, environment (`CODEX_IPC_AUTOLOAD`, `CODEX_IPC_INTENDED_HOST`),
 `${CODEX_IPC_ROOT}/host-policy.json`, then defaults. The defaults are `autoload=off` and
