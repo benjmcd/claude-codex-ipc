@@ -456,17 +456,9 @@ export async function waitForCompletion(options, injected = {}) {
   if (!readableCandidate && !deadlineOnlyReadFailure) {
     return { token: "unavailable", diagnostics };
   }
-  if (!readerAtCompleteEof) {
-    return { token: "pending", diagnostics };
-  }
-  const lifecycle = dispatchLifecycle(records, diagnostics, options.dispatchId);
-  if (!pageIsCurrent(lifecycle)) return { token: "unavailable", diagnostics };
-  const resolved = resolveCompletion(lifecycle, options);
-  return {
-    token: resolved.token,
-    diagnostics: [...diagnostics, ...resolved.diagnostics],
-    replySource: resolved.replySource,
-  };
+  // No remaining loop exit can certify completion. Do not repeat the completed
+  // pending evaluation's page assessment or reply read at the budget edge.
+  return { token: "pending", diagnostics };
 }
 
 function serializeDiagnostic(item) {

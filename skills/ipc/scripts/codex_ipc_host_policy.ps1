@@ -932,69 +932,11 @@ function Get-CodexIpcProtocolRegistration {
             state = 'unknown'; handler = $null; packageFullName = $null; evidence = 'package-identity-unavailable'
         }
     }
-    try {
-        $packageKey = "HKCU:\Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppModel\Repository\Packages\$($PackageState.runningPackageFullName)\App\Capabilities\URLAssociations"
-        $associations = Get-ItemProperty -LiteralPath $packageKey -ErrorAction Stop
-        if ($null -eq $associations.PSObject.Properties['codex'] -or [string]::IsNullOrWhiteSpace([string]$associations.codex)) {
-            throw 'running package does not publish a codex URL association'
-        }
-        $handler = [string]$associations.codex
-
-        $userChoicePath = 'HKCU:\Software\Microsoft\Windows\Shell\Associations\UrlAssociations\codex\UserChoice'
-        if (Test-Path -LiteralPath $userChoicePath -ErrorAction Stop) {
-            $userChoice = Get-ItemProperty -LiteralPath $userChoicePath -ErrorAction Stop
-            if ($null -eq $userChoice.PSObject.Properties['ProgId'] -or [string]::IsNullOrWhiteSpace([string]$userChoice.ProgId)) {
-                throw 'codex UserChoice exists without a readable ProgId'
-            }
-            if (-not [string]::Equals([string]$userChoice.ProgId, $handler, [System.StringComparison]::OrdinalIgnoreCase)) {
-                return [pscustomobject][ordered]@{
-                    state = 'conflicting'; handler = [string]$userChoice.ProgId
-                    packageFullName = [string]$PackageState.runningPackageFullName; evidence = 'user-choice-conflict'
-                }
-            }
-        }
-
-        $openKey = "HKCU:\Software\Classes\$handler\Shell\open"
-        $open = Get-ItemProperty -LiteralPath $openKey -ErrorAction Stop
-        $packageId = [string]$open.PackageId
-        $contractId = [string]$open.ContractId
-        $relativeExecutable = ConvertTo-CodexIpcNormalizedPath -Value $open.PackageRelativeExecutable
-        $appUserModelId = [string]$open.AppUserModelID
-        if (-not [string]::Equals($packageId, [string]$PackageState.runningPackageFullName, [System.StringComparison]::OrdinalIgnoreCase) -or
-            $contractId -ne 'Windows.Protocol' -or
-            -not [string]::Equals($relativeExecutable, 'app\ChatGPT.exe', [System.StringComparison]::OrdinalIgnoreCase) -or
-            $appUserModelId -ne 'OpenAI.Codex_2p2nqsd0c76g0!App') {
-            return [pscustomobject][ordered]@{
-                state = 'conflicting'; handler = $handler; packageFullName = $packageId; evidence = 'appx-handler-mismatch'
-            }
-        }
-        $commandKey = Join-Path $openKey 'command'
-        $command = Get-ItemProperty -LiteralPath $commandKey -ErrorAction Stop
-        $delegate = [guid]::Empty
-        $expectedDelegate = [guid]'{A56A841F-E974-45C1-8001-7E3F8A085917}'
-        if ($null -eq $command.PSObject.Properties['DelegateExecute'] -or
-            -not [guid]::TryParse([string]$command.DelegateExecute, [ref]$delegate) -or
-            $delegate -ne $expectedDelegate) {
-            return [pscustomobject][ordered]@{
-                state = 'conflicting'; handler = $handler
-                packageFullName = [string]$PackageState.runningPackageFullName
-                evidence = 'appx-delegate-mismatch'
-            }
-        }
-        # These keys prove that the package advertises the expected candidate
-        # route. They do not prove the effective Shell association when
-        # UserChoice is absent, invalid, or superseded. QueryCurrentDefault (or
-        # another qualified resolver) must be added before this may be 'matches'.
-        return [pscustomobject][ordered]@{
-            state = 'unknown'; handler = $handler
-            packageFullName = [string]$PackageState.runningPackageFullName
-            evidence = 'effective-handler-unqualified'
-        }
-    } catch {
-        return [pscustomobject][ordered]@{
-            state = 'unknown'; handler = $null; packageFullName = [string]$PackageState.runningPackageFullName
-            evidence = "registration-query-error:$($_.Exception.Message)"
-        }
+    # Candidate registry metadata cannot qualify the effective handler.
+    return [pscustomobject][ordered]@{
+        state = 'unknown'; handler = $null
+        packageFullName = [string]$PackageState.runningPackageFullName
+        evidence = 'effective-handler-unqualified'
     }
 }
 
@@ -1223,6 +1165,8 @@ function Invoke-CodexIpcHostPolicyCli {
 if ($MyInvocation.InvocationName -eq '.') { return }
 
 try {
+    # CLI consumers decode JSON as UTF-8, even without an attached console.
+    [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
     $result = Invoke-CodexIpcHostPolicyCli -Arguments $args
     $result | ConvertTo-Json -Depth 12 -Compress
     exit 0

@@ -259,8 +259,9 @@ of `defer`):
 - `switch`: with `--ack-foreground-switch` (or the standing-approval env, printed on every send),
   navigate the visible Codex app straight to the target and deliver. Disclosed residue: the
   visible Codex app REMAINS on the target thread. Without acknowledgement: refused
-  (`failed-closed -- reason=foreground-switch-unacknowledged`) — before any live IPC, with the
-  file-drop already written.
+  (`gui-unowned -- reason=foreground-switch-unacknowledged -- confirmation=not-attempted`)
+  before any live IPC. This early pre-inspection refusal retains the envelope without pickup or
+  `WAIT:`. After eligible inspection, host refusal and exact no-client recovery still retain safe pickup.
 - `restore-if-known`: FAIL-CLOSED this milestone (`gui-unowned -- reason=foreground-restore-unproven`).
   Restoring the Windows foreground handle is not restoring the in-app selected thread, and no
   read-only selected-thread authority exists yet; a syntactically valid restore UUID is not proof.
@@ -403,7 +404,10 @@ observation cannot certify pickup, completion, a reply, or proof success. Any gr
 final attempt or budget edge that begins before the deadline runs the unchanged full reader, so replacement and same-size tampering
 still fail closed when certification is required.
 The read deadline covers prefix hashing, final anchor revalidation, and path rebinding checks; expiry returns
-no certifying cursor or trusted partial projection. A distinct later user event within the dispatch
+no certifying cursor or trusted partial projection. WAIT returns `pending` on reader-budget expiry;
+deadline expiry in a required page-authority assessment returns `unavailable` with
+`page-supersession-unproven`. An already evaluated pending result needs no second page assessment
+or reply read at loop exit. A distinct later user event within the dispatch
 turn invalidates marker ownership. Only repeated normalized user records with the
 same non-empty item identity are collapsed; equal text or a direct/wrapped representation alone is
 not proof of one delivery.
@@ -469,6 +473,12 @@ live `--ipc` GUI injection.
   only. Its bounded inventory projection lists each detected GUI host and app-server executable and
   classification without command lines. Revalidation does not waive or certify the separate
   activation gates and does not prove thread ownership.
+  A Windows host-policy refusal sets `checks.hostPolicy.ok` and the overall `ok` to
+  `false`, includes `hostPolicy` in `summary.failed`, and exits 1. With no descriptor or
+  overriding alternate-host declaration, the intended host defaults to `package`; a
+  detected Desktop host outside the package install location therefore causes refusal.
+  If every other check passes, `hostPolicy` is the sole failure; otherwise all failed
+  checks remain listed.
 - `codex_ipc_contract_audit.mjs` — static requirement matrix from the bundled skill files.
 
 All of these send no prompts and write no SQLite. The orchestrating tools

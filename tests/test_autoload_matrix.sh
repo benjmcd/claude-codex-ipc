@@ -877,10 +877,7 @@ $script:Package = [pscustomobject]@{
     InstallLocation = $script:PackageRoot
 }
 $script:Events = @()
-$script:UserChoice = 'absent'
-$script:Delegate = '{A56A841F-E974-45C1-8001-7E3F8A085917}'
-$script:AppUserModelId = 'OpenAI.Codex_2p2nqsd0c76g0!App'
-$script:Handler = 'AppXfixture'
+[int]$script:RegistryReadCount = 0
 
 function Get-AppxPackage {
     param([string]$Name, [object]$ErrorAction)
@@ -892,33 +889,16 @@ function Get-WinEvent {
 }
 function Test-Path {
     param([string]$LiteralPath, [object]$ErrorAction)
-    if ($LiteralPath -like '*\UrlAssociations\codex\UserChoice') {
-        return $script:UserChoice -ne 'absent'
-    }
-    return $false
+    $script:RegistryReadCount += 1
+    throw 'fixture forbids runtime registration reads'
 }
 function Get-ItemProperty {
     param([string]$LiteralPath, [object]$ErrorAction)
-    if ($LiteralPath -like '*\Capabilities\URLAssociations') {
-        return [pscustomobject]@{ codex = $script:Handler }
-    }
-    if ($LiteralPath -like '*\UrlAssociations\codex\UserChoice') {
-        $progId = if ($script:UserChoice -eq 'match') { $script:Handler } else { 'Other.Handler' }
-        return [pscustomobject]@{ ProgId = $progId }
-    }
-    if ($LiteralPath -like '*\Shell\open\command') {
-        return [pscustomobject]@{ DelegateExecute = $script:Delegate }
-    }
-    if ($LiteralPath -like '*\Shell\open') {
-        return [pscustomobject]@{
-            PackageId = $script:PackageFullName
-            ContractId = 'Windows.Protocol'
-            PackageRelativeExecutable = 'app\ChatGPT.exe'
-            AppUserModelID = $script:AppUserModelId
-        }
-    }
-    throw "unexpected registry read: $LiteralPath"
+    $script:RegistryReadCount += 1
+    throw 'fixture forbids runtime registration reads'
 }
+$registryShimsBound = @('Test-Path', 'Get-ItemProperty', 'Get-AppxPackage', 'Get-WinEvent' |
+    Where-Object { (Get-Command -Name $_ -ErrorAction Stop).CommandType -ne 'Function' }).Count -eq 0
 function New-FixtureEvent {
     param([int]$Minute, [string]$Operation, [string]$FullName)
     return [pscustomobject]@{
@@ -955,24 +935,27 @@ $packageState = [pscustomobject]@{
     state = 'clear'
     runningPackageFullName = $script:PackageFullName
 }
-$script:UserChoice = 'absent'
-$candidateOnly = Get-CodexIpcProtocolRegistration -PackageState $packageState
-$script:UserChoice = 'match'
-$script:Delegate = 'NOT-A-CLSID'
-$invalidDelegate = Get-CodexIpcProtocolRegistration -PackageState $packageState
-$script:Delegate = '{A56A841F-E974-45C1-8001-7E3F8A085917}'
-$script:UserChoice = 'conflict'
-$conflictingChoice = Get-CodexIpcProtocolRegistration -PackageState $packageState
+$missingIdentity = Get-CodexIpcProtocolRegistration -PackageState ([pscustomobject]@{ runningPackageFullName = $null })
+$unqualified = Get-CodexIpcProtocolRegistration -PackageState $packageState
+$configuration = [pscustomobject]@{
+    autoload = [pscustomobject]@{ value = 'codex-uri' }
+    intendedHost = [pscustomobject]@{ kind = 'package' }
+}
+$activation = Get-CodexIpcActivationDecision -SendEligible $true -Configuration $configuration `
+    -PackageState $packageState -Registration $unqualified
 
 [pscustomobject][ordered]@{
     empty = $empty.state
     currentOnly = $currentOnly.state
     staged = $staged.state
     wrongExecutable = $wrongExecutable.state
-    candidateOnly = $candidateOnly.state
-    invalidDelegate = $invalidDelegate.state
-    conflictingChoice = $conflictingChoice.state
-} | ConvertTo-Json -Compress
+    registryShimsBound = $registryShimsBound
+    registryReadCount = $script:RegistryReadCount
+    expectedPackage = $script:PackageFullName
+    missingIdentity = $missingIdentity
+    unqualified = $unqualified
+    activation = $activation
+} | ConvertTo-Json -Depth 6 -Compress
 POWERSHELL
 if command -v cygpath >/dev/null 2>&1; then
     EVIDENCEWIN="$(cygpath -w "$EVIDENCE_PS1")"
@@ -981,11 +964,18 @@ else
 fi
 POLICY_OUT="$(powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$EVIDENCEWIN" \
     -PolicyPath "$POLICYWIN" 2>&1)"; POLICY_RC=$?
-assert_policy 0 "T1 production readers never promote incomplete evidence" '
+assert_policy 0 "T1 production readers refuse without runtime registration reads" '
   value.empty === "unknown" && value.currentOnly === "unknown" &&
   value.staged === "staged" && value.wrongExecutable === "unknown" &&
-  value.candidateOnly === "unknown" && value.invalidDelegate !== "matches" &&
-  value.conflictingChoice === "conflicting"'
+  value.registryShimsBound === true && value.registryReadCount === 0 &&
+  value.missingIdentity?.state === "unknown" && value.missingIdentity?.handler === null &&
+  value.missingIdentity?.packageFullName === null &&
+  value.missingIdentity?.evidence === "package-identity-unavailable" &&
+  value.unqualified?.state === "unknown" && value.unqualified?.handler === null &&
+  value.unqualified?.packageFullName === value.expectedPackage &&
+  value.unqualified?.evidence === "effective-handler-unqualified" &&
+  value.activation?.eligible === false && Array.isArray(value.activation?.reasons) &&
+  value.activation.reasons.length === 1 && value.activation.reasons[0] === "protocol-registration-unproven"'
 
 # run <expected-rc> <expected-token> <label> -- <ps args...>
 run(){

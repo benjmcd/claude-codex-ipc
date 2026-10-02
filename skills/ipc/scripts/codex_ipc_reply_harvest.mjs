@@ -375,7 +375,8 @@ function usage() {
 
 Environment:
   CODEX_IPC_ROLLOUT_PATH   same validation as --rollout-path; flag wins
-  CODEX_IPC_SESSIONS_ROOT  rollout locator root when no page is explicit`;
+  CODEX_IPC_SESSIONS_ROOT  complete sessions root for discovery and supersession checks,
+                         including with --rollout-path`;
 }
 
 function takeValue(argv, index, flag) {

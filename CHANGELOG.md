@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- Encoded standalone host-policy JSON as UTF-8 so redirected Windows output preserves
+  non-ASCII descriptor paths without depending on the console code page.
+- Omitted runtime protocol-registration candidate probes. Effective-handler authority remains
+  unqualified and real activation still refuses; hermetic mocks retain activation decision coverage.
+- Preserved an already evaluated WAIT pending result at budget expiry without a redundant
+  page assessment or reply read. Required page-authority checks still refuse on deadline;
+  deterministic tests distinguish that refusal from ordinary pending expiry.
 - Suppressed thread-bound pickup and WAIT on early foreground-policy/Node refusals and unsafe
   target inspection. Envelopes and known-parent guidance remain available; eligible-target host
   refusal and exact no-client recovery still print one safe pickup for the intended host.

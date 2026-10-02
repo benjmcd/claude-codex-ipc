@@ -217,8 +217,8 @@ deadline; a deadline that elapses during sleep returns unverified without a post
 
 Path configuration is deliberately component-scoped. Inspector accepts
 `CODEX_IPC_SESSIONS_ROOT`; waiter accepts `CODEX_IPC_ROLLOUT_PATH` and
-`CODEX_IPC_SESSIONS_ROOT`; observer accepts `CODEX_IPC_ROLLOUT_PATH` and its existing
-environment-only `CODEX_IPC_SESSIONS_ROOT`; harvester retains both aliases. Where a corresponding
+`CODEX_IPC_SESSIONS_ROOT`; observer accepts `CODEX_IPC_ROLLOUT_PATH` and
+`--sessions-root` / `CODEX_IPC_SESSIONS_ROOT`; harvester retains both aliases. Where a corresponding
 flag exists, precedence is explicit flag, then nonempty environment, then the existing default or
 discovery behavior. The viewer has no independent environment option, although its harvester child
 inherits the process environment; use viewer flags for an auditable selection. `CODEX_HOME` is not

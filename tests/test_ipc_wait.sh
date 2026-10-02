@@ -43,7 +43,7 @@ const {
   parseWaitArgs,
   waitForCompletion,
 } = api;
-const { readRolloutFile } = await import(
+const { assessRolloutPageSupersession, readRolloutFile } = await import(
   pathToFileURL(path.join(path.dirname(waitPath), "codex_ipc_rollout_reader.mjs"))
 );
 
@@ -972,6 +972,115 @@ await test("bounded expiry returns pending without wall-clock sleep", async () =
   assert.equal(result.token, "pending");
   assert.equal(clock, 25);
   assert.equal(sleepCalls, 3);
+});
+
+await test("later page-authority expiry cannot reuse an earlier pending result", async () => {
+  for (const grows of [false, true]) {
+    const root = caseDir(`later-page-deadline-${grows}`);
+    const rollout = writeRollout(root, ownOpenRecords());
+    let clock = 0;
+    let assessments = 0;
+    let sleeps = 0;
+    const result = await waitForCompletion(
+      directOptions(root, rollout, path.join(root, "missing.md"), {
+        acceptRolloutFallback: true, budgetMs: 30, intervalMs: 10,
+      }),
+      {
+        now: () => clock,
+        sleep: async (ms) => {
+          clock += ms;
+          sleeps += 1;
+          if (grows) {
+            fs.appendFileSync(rollout,
+              `${ownCompletedRecords().slice(3).map((item) => JSON.stringify(item)).join("\n")}\n`);
+          }
+        },
+        assessRolloutPageSupersession: (options) => {
+          assessments += 1;
+          // Cover both the no-growth and post-read required assessments.
+          if (assessments === 2) clock = options.deadlineAt;
+          const assessment = assessRolloutPageSupersession(options);
+          if (assessments === 1) assert.equal(assessment.status, "current");
+          return assessment;
+        },
+      },
+    );
+    assert.equal(result.token, "unavailable");
+    assert.equal(result.replySource, undefined);
+    assert.equal(assessments, 2);
+    assert.equal(sleeps, 1);
+    assert.deepEqual(result.diagnostics, [
+      { code: "page-supersession-unproven", reason: "deadline-exceeded" },
+    ]);
+  }
+});
+
+await test("first page-authority expiry cannot certify a primary or rollout fallback", async () => {
+  for (const primary of [true, false]) {
+    const root = caseDir(`first-page-deadline-${primary}`);
+    const rollout = writeRollout(root, ownCompletedRecords());
+    const reply = path.join(root, `${dispatch}.reply.md`);
+    if (primary) writeReply(reply);
+    let clock = 0;
+    let assessments = 0;
+    const result = await waitForCompletion(
+      directOptions(root, rollout, reply, {
+        acceptRolloutFallback: true, budgetMs: 20, intervalMs: 10,
+      }),
+      {
+        now: () => clock,
+        sleep: async () => { throw new Error("an authority refusal must not sleep"); },
+        assessRolloutPageSupersession: (options) => {
+          assessments += 1;
+          clock = options.deadlineAt;
+          return assessRolloutPageSupersession(options);
+        },
+      },
+    );
+    assert.equal(result.token, "unavailable");
+    assert.equal(result.replySource, undefined);
+    assert.equal(assessments, 1);
+    assert.deepEqual(result.diagnostics, [
+      { code: "page-supersession-unproven", reason: "deadline-exceeded" },
+    ]);
+  }
+});
+
+await test("budget-edge pending preserves its evaluation without reassessment", async () => {
+  for (const budgetMs of [20, 0]) {
+    const root = caseDir(`evaluated-pending-${budgetMs}`);
+    const rollout = writeRollout(root, [
+      sessionMeta(),
+      event("future_lifecycle_event", undefined),
+      ...ownOpenRecords().slice(1),
+    ]);
+    const reply = writeReply(path.join(root, `${dispatch}.reply.md`));
+    let clock = 0;
+    let assessments = 0;
+    const result = await waitForCompletion(
+      directOptions(root, rollout, reply, { budgetMs, intervalMs: 10 }),
+      {
+        now: () => clock,
+        sleep: async () => { throw new Error("the evaluated pending result must not sleep"); },
+        assessRolloutPageSupersession: (options) => {
+          assessments += 1;
+          const assessment = assessRolloutPageSupersession(options);
+          if (assessments === 1) {
+            assert.equal(assessment.status, "current");
+            // The required assessment finished; a repeated tail assessment starts too late.
+            if (budgetMs > 0) clock = options.deadlineAt;
+          }
+          return assessment;
+        },
+      },
+    );
+    assert.equal(result.token, "pending");
+    assert.equal(result.replySource, undefined);
+    assert.equal(assessments, 1);
+    // The cumulative pre-turn parser diagnostic remains once; pending resolution adds none.
+    assert.equal(result.diagnostics.filter((item) => item.code === "schema-drift").length, 1);
+    assert.ok(!result.diagnostics.some((item) => item.code === "page-supersession-unproven"));
+  }
 });
 
 await test("wait skips unchanged full reads and revalidates at the budget edge", async () => {

@@ -24,7 +24,8 @@
 # reply-missing = own turn task_complete un-superseded but reply
 # absent/unreadable/present-invalid. pending = no determination yet at
 # single-shot or budget expiry. unavailable = no authoritative rollout candidate
-# / ambiguity (rollout or reply scan) / schema failure.
+# / ambiguity (rollout or reply scan) / schema failure, including deadline
+# exhaustion during a required page-authority assessment.
 # D2 opt-in (--accept-rollout-fallback): ONLY when the reply file is genuinely
 # ABSENT does a completed own turn whose verified rollout body matches its
 # terminal certify done from the rollout store (replySource=rollout-fallback,
@@ -137,6 +138,25 @@ assert_token(){
     ok "$label"
   else
     no "$label (expected=$expected rc=$RC elapsed=${ELAPSED_MS}ms)"
+    dump_output
+  fi
+}
+
+# Real time cannot force a short budget to expire outside a required authority scan.
+# Deterministic API tests separately require pending and the precise refusal path.
+assert_bounded_pending(){
+  local label="$1" warning="${2:-}"
+  if [[ $RC -eq 0 ]] && printf 'pending\n' | cmp -s - "$OUT_FILE"; then
+    ok "$label"
+  elif [[ $RC -eq 0 ]] && printf 'unavailable\n' | cmp -s - "$OUT_FILE" && {
+    [[ -z "$warning" ]] || printf '%s\n' "$warning"
+    printf '%s\n' \
+      'ROLLOUT-PAGE: page-supersession-unproven' \
+      'WAIT_DIAGNOSTIC {"code":"page-supersession-unproven","reason":"deadline-exceeded"}'
+  } | cmp -s - "$ERR_FILE"; then
+    ok "$label"
+  else
+    no "$label (expected=pending or exact page-deadline refusal rc=$RC elapsed=${ELAPSED_MS}ms)"
     dump_output
   fi
 }
@@ -430,7 +450,7 @@ assert_token done "budget and interval flags override conflicting environment va
 CASE="$TMP/budget-expiry"; mkdir -p "$CASE"; write_pending "$CASE/rollout-$THREAD.jsonl"; make_reply "$CASE/reply.md"
 run_case "$CASE" --rollout-path "$CASE/rollout-$THREAD.jsonl" --reply-path "$CASE/reply.md" \
   --budget-ms 120 --interval-ms 20
-assert_token pending "unchanged state is pending at positive-budget expiry"
+assert_bounded_pending "unchanged state expires pending or with an exact page-authority deadline"
 # correct = 120ms budget expiry + loaded spawn overhead (observed worst ~7.4s total); wrong = an unbounded wait
 # (no finite floor -- this is a hang fuse at >=2.5x the loaded correct path). Lower bound
 # stays: it asserts a positive budget actually waited.
@@ -443,7 +463,8 @@ fi
 CASE="$TMP/interval-zero"; mkdir -p "$CASE"; write_pending "$CASE/rollout-$THREAD.jsonl"; make_reply "$CASE/reply.md"
 run_case "$CASE" --rollout-path "$CASE/rollout-$THREAD.jsonl" --reply-path "$CASE/reply.md" \
   --budget-ms 120 --interval-ms 0
-assert_token pending "zero interval falls back and preserves determination output"
+assert_bounded_pending "zero interval falls back and preserves determination output" \
+  'WARNING: wait interval must be a positive integer; using default 250.'
 if grep -qi 'interval' "$ERR_FILE"; then
   ok "zero interval emits a visible stderr warning"
 else
@@ -460,7 +481,8 @@ fi
 CASE="$TMP/interval-malformed"; mkdir -p "$CASE"; write_pending "$CASE/rollout-$THREAD.jsonl"; make_reply "$CASE/reply.md"
 run_case "$CASE" --rollout-path "$CASE/rollout-$THREAD.jsonl" --reply-path "$CASE/reply.md" \
   --budget-ms 120 --interval-ms malformed
-assert_token pending "malformed interval falls back and preserves determination output"
+assert_bounded_pending "malformed interval falls back and preserves determination output" \
+  'WARNING: wait interval must be a positive integer; using default 250.'
 if grep -qi 'interval' "$ERR_FILE"; then
   ok "malformed interval emits a visible stderr warning"
 else
@@ -666,7 +688,7 @@ assert_token reply-missing "dependency guard permits the reply-missing path"
 
 run_case "$TMP/pending" --rollout-path "$TMP/pending/rollout-$THREAD.jsonl" --reply-path "$TMP/pending/reply.md" \
   --budget-ms 60 --interval-ms 10
-assert_token pending "dependency guard permits the bounded pending path"
+assert_bounded_pending "dependency guard permits bounded pending or an exact page-authority deadline"
 
 run_case "$TMP/reply-ambiguous" --rollout-path "$TMP/reply-ambiguous/rollout-$THREAD.jsonl"
 assert_token unavailable "dependency guard permits the unavailable path"
