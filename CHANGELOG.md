@@ -13,9 +13,11 @@ All notable changes to this project will be documented in this file.
   descriptor default when no root flag or environment override is present. Empty environment roots
   fall back consistently, explicit blank roots refuse, and the matrix now proves the early mock
   guard structurally without ever invoking the real helper outside `-DryRun`.
-- Tightened alternate-host classification so an external `codex.exe app-server` counts only when
-  its direct parent is the intended GUI, its readable executable matches the command prefix, and
-  `app-server` is the immediate subcommand. Foreground mocks now require `-DryRun`; host-policy and
+- Bound external native helper classification to an intended GUI's direct `app-server` runtime.
+  Complete leading `-c`/`--config key=value` pairs precede the exact role; descendant `app-server`,
+  `exec-server`, and `sandbox` helpers require the same runtime and proven readable, acyclic ancestry.
+  Unknown prefixes, executable mismatches, broken ancestry, and nested second GUIs still refuse.
+  Foreground mocks now require `-DryRun`; host-policy and
   activation refusals use the stable `gui-unowned` category; target parents and bounded host
   inventory projections remain visible without command lines. Contract and hermetic matrix tests
   pin the refusal vocabulary, revalidation projection, and known negative shapes.

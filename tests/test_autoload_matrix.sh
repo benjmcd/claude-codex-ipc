@@ -521,7 +521,7 @@ MOCK_DELAYED_APP_SERVER='{"complete":true,"packageRootsComplete":true,"packageRo
 POLICY_OUT="$(powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$POLICYWIN" \
     -Purpose send -IpcRoot "$POLICY_ROOT" -IntendedHost 'C:\Alt\Host\ChatGPT.exe' \
     -DryRun -MockInventoryJson "$MOCK_DELAYED_APP_SERVER" 2>&1)"; POLICY_RC=$?
-assert_policy 0 "R22 app-server must be the immediate subcommand" '
+assert_policy 0 "R22 app-server must be the first non-config subcommand" '
   value.sendEligible === false && value.inventory.guiHosts.length === 2 &&
   value.inventory.appServers.length === 0 &&
   value.sendReasons.includes("other-desktop-host-running")'
@@ -552,6 +552,119 @@ assert_policy 0 "R25 app-server prefix is not an exact role" '
   value.sendEligible === false && value.inventory.guiHosts.length === 2 &&
   value.inventory.appServers.length === 0 &&
   value.sendReasons.includes("other-desktop-host-running")'
+
+MOCK_NATIVE_TREE="$(node <<'NODE'
+const runtime = "C:\\Alt Runtime\\codex.exe";
+const processes = [
+  { pid: 851, parentPid: 999, name: "ChatGPT.exe", executable: "C:\\Alt\\Host\\ChatGPT.exe", commandLine: "ChatGPT.exe" },
+  { pid: 852, parentPid: 851, name: "codex.exe", executable: runtime,
+    commandLine: `"${runtime}" -c features.fixture=true app-server --analytics-default-enabled -c plugins.fixture=true` },
+  { pid: 853, parentPid: 851, name: "codex.exe", executable: runtime,
+    commandLine: "codex.exe exec-server --remote https://fixture.invalid --environment-id fixture" },
+  { pid: 854, parentPid: 852, name: "node.exe", executable: "C:\\Tools\\node.exe", commandLine: "node.exe fixture.js" },
+  { pid: 855, parentPid: 854, name: "node.exe", executable: "C:\\Tools\\node.exe", commandLine: "node.exe kernel.js" },
+  { pid: 856, parentPid: 855, name: "codex.exe", executable: runtime,
+    commandLine: `"${runtime}" sandbox -c features.fixture=true -- node.exe fixture.js` },
+  { pid: 857, parentPid: 855, name: "codex.exe", executable: runtime,
+    commandLine: 'codex.exe --config "fixture.value=quoted value" sandbox -- node.exe fixture.js' },
+  { pid: 858, parentPid: 855, name: "codex.exe", executable: runtime,
+    commandLine: "codex.exe app-server --listen stdio://" },
+];
+console.log(JSON.stringify({ complete: true, packageRootsComplete: true, packageRoots: [], errors: [], processes }));
+NODE
+)"
+POLICY_OUT="$(powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$POLICYWIN" \
+    -Purpose send -IpcRoot "$POLICY_ROOT" -IntendedHost 'C:\Alt\Host\ChatGPT.exe' \
+    -DryRun -MockInventoryJson "$MOCK_NATIVE_TREE" 2>&1)"; POLICY_RC=$?
+assert_policy 0 "R26 native config-prefixed server and descendant helpers preserve one GUI" '
+  value.sendEligible === true && value.inventory.complete === true &&
+  value.inventory.guiHosts.length === 1 && value.inventory.guiHosts[0].pid === 851 &&
+  value.inventory.appServers.length === 5 && value.activationEligible === false'
+
+native_policy_case(){
+    local scenario="$1" expected="$2"
+    local intended='C:\Alt\Host\ChatGPT.exe'
+    [[ "$scenario" == "alternate-backend" ]] && intended='C:\Alt\Host\codex.exe'
+    [[ "$scenario" == package-* ]] && intended=package
+    local inventory
+    inventory="$(printf '%s' "$MOCK_NATIVE_TREE" | node -e '
+      let input = "";
+      process.stdin.on("data", chunk => input += chunk);
+      process.stdin.on("end", () => {
+        const value = JSON.parse(input);
+        const rows = value.processes;
+        const row = id => rows.find(item => item.pid === id);
+        switch (process.argv[1]) {
+          case "repeat-config":
+            row(852).commandLine = "codex.exe --config fixture.value=app-server -c \"fixture.other=quoted value\" app-server";
+            break;
+          case "inner-quotes":
+            row(852).commandLine = "codex.exe -c fixture.value=\"quoted value\" app-server";
+            break;
+          case "escaped-quotes":
+            row(852).commandLine = "codex.exe -c \"fixture.value=\\\"quoted value\\\"\" app-server";
+            break;
+          case "reverse-order": value.processes.reverse(); break;
+          case "config-only": row(856).commandLine = "codex.exe -c fixture.value=app-server"; break;
+          case "payload-only": row(856).commandLine = "codex.exe exec -- app-server sandbox exec-server"; break;
+          case "unknown-prefix": row(856).commandLine = "codex.exe --unknown app-server"; break;
+          case "missing-value": row(856).commandLine = "codex.exe --config sandbox"; break;
+          case "empty-value": row(856).commandLine = "codex.exe -c fixture.value= sandbox"; break;
+          case "missing-role": row(856).commandLine = "codex.exe -c fixture.value=true"; break;
+          case "unclosed-quote": row(856).commandLine = "codex.exe -c \"fixture.value=true sandbox"; break;
+          case "wrong-executable": row(856).commandLine = "C:\\Other\\codex.exe sandbox"; break;
+          case "wrong-runtime": row(856).executable = "C:\\Other\\codex.exe"; row(856).commandLine = "codex.exe sandbox"; break;
+          case "orphan": row(856).parentPid = 0; break;
+          case "missing-parent": row(855).parentPid = 998; break;
+          case "cycle": row(854).parentPid = 855; break;
+          case "self-cycle": row(856).parentPid = 856; break;
+          case "unreadable-command": row(855).commandLine = null; break;
+          case "unreadable-path": row(855).executable = null; break;
+          case "unknown-candidate": row(855).name = "codex.exe"; row(855).executable = row(852).executable; row(855).commandLine = "codex.exe serve"; break;
+          case "no-direct-anchor": row(852).parentPid = 854; row(854).parentPid = 851; break;
+          case "different-gui":
+            rows.push({ pid: 859, parentPid: 856, name: "ChatGPT.exe", executable: "C:\\Other\\ChatGPT.exe", commandLine: "ChatGPT.exe --type=renderer" });
+            break;
+          case "same-gui-second-main":
+            rows.push({ ...row(851), pid: 859, parentPid: 856 });
+            break;
+          case "renderer-anchor": row(851).commandLine = "ChatGPT.exe --type=renderer"; break;
+          case "backend-anchor": row(851).commandLine = "ChatGPT.exe app-server"; break;
+          case "alternate-backend":
+            row(851).name = "codex.exe"; row(851).executable = "C:\\Alt\\Host\\codex.exe"; row(851).commandLine = "codex.exe serve";
+            break;
+          case "package-gui":
+          case "package-backend":
+            value.packageRoots = ["C:\\Packages\\OpenAI.Codex_fixture"];
+            row(851).executable = value.packageRoots[0] + "\\app\\" + (process.argv[1] === "package-gui" ? "ChatGPT.exe" : "Backend.exe");
+            row(851).name = process.argv[1] === "package-gui" ? "ChatGPT.exe" : "Backend.exe";
+            row(851).commandLine = row(851).name;
+            break;
+          case "conflicting-runtime":
+            rows.push({ ...row(852), pid: 859, executable: "C:\\Other\\codex.exe", commandLine: "codex.exe app-server" });
+            break;
+          case "incomplete": value.complete = false; value.errors.push("fixture-unreadable"); break;
+          default: throw new Error("unknown synthetic scenario");
+        }
+        console.log(JSON.stringify(value));
+      });
+    ' "$scenario")"
+    POLICY_OUT="$(powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$POLICYWIN" \
+        -Purpose send -IpcRoot "$POLICY_ROOT" -IntendedHost "$intended" \
+        -DryRun -MockInventoryJson "$inventory" 2>&1)"; POLICY_RC=$?
+    assert_policy 0 "R27 native role/ancestry $scenario" \
+        "value.sendEligible === $expected && value.activationEligible === false"
+}
+for scenario in repeat-config inner-quotes escaped-quotes reverse-order package-gui; do
+    native_policy_case "$scenario" true
+done
+for scenario in config-only payload-only unknown-prefix missing-value empty-value missing-role \
+    unclosed-quote wrong-executable wrong-runtime orphan missing-parent cycle self-cycle \
+    unreadable-command unreadable-path unknown-candidate no-direct-anchor different-gui \
+    same-gui-second-main renderer-anchor backend-anchor alternate-backend package-backend \
+    conflicting-runtime incomplete; do
+    native_policy_case "$scenario" false
+done
 
 echo "== S. shared policy activation decision =="
 PKG_CLEAR='{"state":"clear","runningPackageFullName":"OpenAI.Codex_26.707.3563.0_x64__2p2nqsd0c76g0","runningVersion":"26.707.3563.0","higherVersions":[],"evidence":"mock"}'

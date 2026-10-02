@@ -243,7 +243,12 @@ explicit conversationId per send.
 
 The wrapper applies one shared **Desktop host policy** before every initial send and every retry.
 It requires a complete read-only process/package inventory with exactly one running intended GUI
-host and no other GUI host identity. Configuration resolves independently per field in this order:
+host and no other GUI host identity. External native helper roles require a matching
+executable token and complete leading `-c`/`--config key=value` pairs. A direct intended-GUI
+`app-server` establishes the runtime executable; further `app-server`, `exec-server`, and `sandbox`
+helpers require that same executable and complete readable, acyclic ancestry back to the GUI.
+Role words inside config values or later payload text do not establish a role. Unknown roles,
+broken ancestry, and another GUI identity still refuse. Configuration resolves per field in this order:
 wrapper flag, environment (`CODEX_IPC_AUTOLOAD`, `CODEX_IPC_INTENDED_HOST`),
 `${CODEX_IPC_ROOT}/host-policy.json`, then defaults. The defaults are `autoload=off` and
 `intendedHost=package`. Every present layer is validated even when a higher-priority value wins;

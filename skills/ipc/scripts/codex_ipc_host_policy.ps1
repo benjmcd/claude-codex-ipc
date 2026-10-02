@@ -469,6 +469,113 @@ function Test-CodexIpcSameExecutableCandidateAncestor {
     return $false
 }
 
+function Read-CodexIpcCommandToken {
+    param([string]$CommandLine, [int]$Offset = 0)
+
+    # Read only the prefix needed for executable, global config pairs, and role.
+    $cursor = $Offset
+    while ($cursor -lt $CommandLine.Length -and $CommandLine[$cursor] -in @(' ', "`t")) { $cursor++ }
+    if ($cursor -ge $CommandLine.Length) { return $null }
+    $value = New-Object System.Text.StringBuilder
+    $quoted = $false
+    while ($cursor -lt $CommandLine.Length) {
+        $character = $CommandLine[$cursor]
+        if (-not $quoted -and $character -in @(' ', "`t")) { break }
+        if ($character -eq '\') {
+            $start = $cursor
+            while ($cursor -lt $CommandLine.Length -and $CommandLine[$cursor] -eq '\') { $cursor++ }
+            $count = $cursor - $start
+            if ($cursor -lt $CommandLine.Length -and $CommandLine[$cursor] -eq '"') {
+                [void]$value.Append(('\' * [int][math]::Floor($count / 2)))
+                if ($count % 2 -eq 1) { [void]$value.Append('"') } else { $quoted = -not $quoted }
+                $cursor++
+            } else {
+                [void]$value.Append(('\' * $count))
+            }
+        } elseif ($character -eq '"') {
+            $quoted = -not $quoted
+            $cursor++
+        } else {
+            [void]$value.Append($character)
+            $cursor++
+        }
+    }
+    if ($quoted) { return $null }
+    return [pscustomobject]@{ value = $value.ToString(); next = $cursor }
+}
+
+function Test-CodexIpcCommandExecutable {
+    param([string]$Token, [string]$Path)
+
+    $normalized = ConvertTo-CodexIpcNormalizedPath -Value $Token
+    return ($null -ne $normalized -and $null -ne $Path -and (
+        [string]::Equals($normalized, $Path, [System.StringComparison]::OrdinalIgnoreCase) -or
+        [string]::Equals($normalized, [System.IO.Path]::GetFileName($Path), [System.StringComparison]::OrdinalIgnoreCase)
+    ))
+}
+
+function Get-CodexIpcNativeRole {
+    param([object]$Process)
+
+    $path = ConvertTo-CodexIpcNormalizedPath -Value $Process.executable
+    if ($Process.commandLine -isnot [string] -or $null -eq $path) { return $null }
+    $token = Read-CodexIpcCommandToken -CommandLine $Process.commandLine
+    if ($null -eq $token -or -not (Test-CodexIpcCommandExecutable -Token $token.value -Path $path)) { return $null }
+    $token = Read-CodexIpcCommandToken -CommandLine $Process.commandLine -Offset $token.next
+    while ($null -ne $token -and $token.value -cin @('-c', '--config')) {
+        $value = Read-CodexIpcCommandToken -CommandLine $Process.commandLine -Offset $token.next
+        if ($null -eq $value -or $value.value -notmatch '^[^=\s]+=.+$') { return $null }
+        $token = Read-CodexIpcCommandToken -CommandLine $Process.commandLine -Offset $value.next
+    }
+    if ($null -ne $token -and $token.value -cin @('app-server', 'exec-server', 'sandbox')) { return $token.value }
+    return $null
+}
+
+function Test-CodexIpcGuiAnchor {
+    param([object]$Process, [object]$IntendedHost, [object]$RawInventory)
+
+    $classification = Get-CodexIpcHostClassification -Process $Process -IntendedHost $IntendedHost -PackageRoots @($RawInventory.packageRoots) -PackageRootsComplete ([bool]$RawInventory.packageRootsComplete)
+    if ($classification -ne $IntendedHost.kind) { return $false }
+    $path = ConvertTo-CodexIpcNormalizedPath -Value $Process.executable
+    $token = Read-CodexIpcCommandToken -CommandLine ([string]$Process.commandLine)
+    if ($null -eq $token -or -not (Test-CodexIpcCommandExecutable -Token $token.value -Path $path)) { return $false }
+    if ($path -match '(?i)\\resources\\codex(?:\.exe)?$' -or
+        $null -ne (Get-CodexIpcNativeRole -Process $Process) -or
+        [string]$Process.commandLine -match '(?i)(^|\s)--type(?:=|\s)') { return $false }
+    if ($classification -eq 'alternate') {
+        return ([System.IO.Path]::GetFileName($path) -notin @('codex', 'codex.exe'))
+    }
+    foreach ($root in @($RawInventory.packageRoots)) {
+        if ([string]::Equals($path, "$root\app\ChatGPT.exe", [System.StringComparison]::OrdinalIgnoreCase)) { return $true }
+    }
+    return $false
+}
+
+function Test-CodexIpcRuntimeAncestry {
+    param([object]$Process, [hashtable]$ProcessById, [hashtable]$CandidateById,
+        [hashtable]$NativeRoleById, [hashtable]$GuiById, [hashtable]$RuntimeByGuiId)
+
+    $path = ConvertTo-CodexIpcNormalizedPath -Value $Process.executable
+    $seen = @{ ([string]$Process.pid) = $true }
+    $parentId = [long]$Process.parentPid
+    while ($parentId -gt 0) {
+        $key = [string]$parentId
+        if ($seen.ContainsKey($key) -or -not $ProcessById.ContainsKey($key)) { return $false }
+        $seen[$key] = $true
+        if ($GuiById.ContainsKey($key)) {
+            return ($RuntimeByGuiId.ContainsKey($key) -and [string]::Equals(
+                $path, [string]$RuntimeByGuiId[$key], [System.StringComparison]::OrdinalIgnoreCase))
+        }
+        $ancestor = $ProcessById[$key]
+        if ($null -eq $ancestor.executable -or [string]::IsNullOrWhiteSpace([string]$ancestor.commandLine)) { return $false }
+        if ($CandidateById.ContainsKey($key) -and (
+            -not $NativeRoleById.ContainsKey($key) -or -not [string]::Equals(
+                $path, [string]$ancestor.executable, [System.StringComparison]::OrdinalIgnoreCase))) { return $false }
+        $parentId = [long]$ancestor.parentPid
+    }
+    return $false
+}
+
 function Resolve-CodexIpcInventory {
     param([object]$RawInventory, [object]$IntendedHost)
 
@@ -482,6 +589,30 @@ function Resolve-CodexIpcInventory {
             -PackageRoots @($RawInventory.packageRoots) `
             -PackageRootsComplete ([bool]$RawInventory.packageRootsComplete)) {
             $candidateById[[string]$process.pid] = $process
+        }
+    }
+
+    $nativeRoleById = @{}
+    $guiById = @{}
+    $runtimeByGuiId = @{}
+    foreach ($process in @($RawInventory.processes)) {
+        if (-not $candidateById.ContainsKey([string]$process.pid)) { continue }
+        if ([string]$process.name -in @('codex', 'codex.exe')) {
+            $role = Get-CodexIpcNativeRole -Process $process
+            if ($null -ne $role) { $nativeRoleById[[string]$process.pid] = $role }
+        }
+        if (Test-CodexIpcGuiAnchor -Process $process -IntendedHost $IntendedHost -RawInventory $RawInventory) {
+            $guiById[[string]$process.pid] = $process
+        }
+    }
+    foreach ($process in @($RawInventory.processes)) {
+        $parentKey = [string]$process.parentPid
+        if ($nativeRoleById[[string]$process.pid] -eq 'app-server' -and $guiById.ContainsKey($parentKey)) {
+            $path = ConvertTo-CodexIpcNormalizedPath -Value $process.executable
+            if ($runtimeByGuiId.ContainsKey($parentKey) -and -not [string]::Equals(
+                [string]$runtimeByGuiId[$parentKey], $path, [System.StringComparison]::OrdinalIgnoreCase)) {
+                $runtimeByGuiId[$parentKey] = ''
+            } else { $runtimeByGuiId[$parentKey] = $path }
         }
     }
 
@@ -509,42 +640,23 @@ function Resolve-CodexIpcInventory {
         $isDescendant = Test-CodexIpcCandidateDescendant `
             -Process $process -ProcessById $processById -CandidateById $candidateById
         $isResourceServer = ($null -ne $path -and $path -match '(?i)\\resources\\codex(?:\.exe)?$')
-        $processName = ([string]$process.name).ToLowerInvariant()
-        $parentMatchesIntendedGui = $false
-        if ($candidateById.ContainsKey([string]$process.parentPid)) {
-            $parentClassification = Get-CodexIpcHostClassification `
-                -Process $candidateById[[string]$process.parentPid] `
-                -IntendedHost $IntendedHost `
-                -PackageRoots @($RawInventory.packageRoots) `
-                -PackageRootsComplete ([bool]$RawInventory.packageRootsComplete)
-            $parentMatchesIntendedGui = ($parentClassification -eq $IntendedHost.kind)
-        }
-        $appServerCommandMatches = $false
-        if ($null -ne $path -and $process.commandLine -is [string] -and
-            -not [string]::IsNullOrWhiteSpace([string]$process.commandLine)) {
-            $escapedExecutable = [regex]::Escape($path)
-            $escapedBasename = [regex]::Escape([System.IO.Path]::GetFileName($path))
-            $appServerPattern = '(?i)^(?:"(?:' + $escapedExecutable + '|' + $escapedBasename + ')"|' +
-                '(?:' + $escapedExecutable + '|' + $escapedBasename + '))\s+app-server(?:\s|$)'
-            $appServerCommandMatches = ([string]$process.commandLine -match $appServerPattern)
-        }
-        $hasProvenAppServerRole = (
-            $parentMatchesIntendedGui -and
-            ($processName -eq 'codex.exe' -or $processName -eq 'codex') -and
-            $appServerCommandMatches
-        )
+        $hasProvenNativeRole = ($nativeRoleById.ContainsKey([string]$process.pid) -and
+            (Test-CodexIpcRuntimeAncestry -Process $process -ProcessById $processById -CandidateById $candidateById -NativeRoleById $nativeRoleById -GuiById $guiById -RuntimeByGuiId $runtimeByGuiId))
+        $commandToken = Read-CodexIpcCommandToken -CommandLine ([string]$process.commandLine)
         $hasProvenElectronRole = (
-            $isDescendant -and
+            $matchesIntended -and $isDescendant -and
+            (Test-CodexIpcSameExecutableCandidateAncestor -Process $process -ProcessById $processById -CandidateById $candidateById) -and
+            $null -ne $commandToken -and (Test-CodexIpcCommandExecutable -Token $commandToken.value -Path $path) -and
             $process.commandLine -is [string] -and
             -not [string]::IsNullOrWhiteSpace([string]$process.commandLine) -and
             [string]$process.commandLine -match '(?i)(^|\s)--type(?:=|\s)'
         )
-        if ($isResourceServer -or $hasProvenAppServerRole -or $hasProvenElectronRole) {
+        if ($isResourceServer -or $hasProvenNativeRole -or $hasProvenElectronRole) {
             $appServers += $entry
         } else {
             $guiHosts += $entry
         }
-        if ($isDescendant -and -not $isResourceServer -and -not $hasProvenAppServerRole -and -not $hasProvenElectronRole -and
+        if ($isDescendant -and -not $isResourceServer -and -not $hasProvenNativeRole -and -not $hasProvenElectronRole -and
             $null -eq $process.commandLine -and
             (Test-CodexIpcSameExecutableCandidateAncestor `
                 -Process $process -ProcessById $processById -CandidateById $candidateById)) {
