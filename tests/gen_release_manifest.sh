@@ -280,6 +280,12 @@ cmd_cross_check() {
 
   # C3 -- the roots agree with each other on every shared path (version-independent: all three
   # roots are propagated in one act, so this must hold whichever release they hold).
+  if LC_ALL=C comm -23 <(cut -f1 "$tmp/codex.map") <(cut -f1 "$tmp/claude.map") | grep -q .; then
+    echo "CROSS FAIL: root-claude/root-agents omit required runtime paths:" >&2
+    LC_ALL=C comm -23 <(cut -f1 "$tmp/codex.map") <(cut -f1 "$tmp/claude.map") >&2
+    rc=1
+  fi
+
   n=$(LC_ALL=C join -t"$t" -j 1 "$tmp/codex.map" "$tmp/claude.map" \
         | awk -F"$t" '$2!=$3{print $1}' | grep -c . )
   if [ "$n" -eq 0 ]; then

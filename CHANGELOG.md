@@ -6,6 +6,7 @@ All notable changes to this project will be documented in this file.
 
 - Rebound release manifests to the current runtime and installed roots. Clean installs
   require no residue exceptions; retained overlay residue still requires the exact declared set.
+  All three installed-root manifests must include every required runtime path.
 
 - Preserved complete write-proof snapshots beyond the default subprocess output buffer,
   keeping the full thread hash comparison and existing snapshot timeout. Other subprocess
