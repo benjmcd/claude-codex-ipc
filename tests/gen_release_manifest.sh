@@ -280,6 +280,12 @@ cmd_cross_check() {
 
   # C3 -- the roots agree with each other on every shared path (version-independent: all three
   # roots are propagated in one act, so this must hold whichever release they hold).
+  if LC_ALL=C comm -23 <(cut -f1 "$tmp/codex.map") <(cut -f1 "$tmp/claude.map") | grep -q .; then
+    echo "CROSS FAIL: root-claude/root-agents omit required runtime paths:" >&2
+    LC_ALL=C comm -23 <(cut -f1 "$tmp/codex.map") <(cut -f1 "$tmp/claude.map") >&2
+    rc=1
+  fi
+
   n=$(LC_ALL=C join -t"$t" -j 1 "$tmp/codex.map" "$tmp/claude.map" \
         | awk -F"$t" '$2!=$3{print $1}' | grep -c . )
   if [ "$n" -eq 0 ]; then
@@ -305,7 +311,12 @@ cmd_cross_check() {
   fi
   LC_ALL=C join -t"$t" -j 1 "$tmp/extra.map" "$tmp/base.map" \
     | awk -F"$t" '$2!=$3{print $1}' | LC_ALL=C sort > "$tmp/exceptions.actual"
-  printf '%s\n' "$DECLARED_ROOT_HASH_EXCEPTIONS" | LC_ALL=C sort > "$tmp/exceptions.declared"
+  if [ -s "$tmp/extra.paths" ]; then
+    printf '%s\n' "$DECLARED_ROOT_HASH_EXCEPTIONS" | LC_ALL=C sort > "$tmp/exceptions.declared"
+  else
+    # A clean installer leaves no overlay residue and therefore no CRLF exceptions.
+    : > "$tmp/exceptions.declared"
+  fi
   if LC_ALL=C comm -3 "$tmp/exceptions.declared" "$tmp/exceptions.actual" | grep -q .; then
     echo "CROSS FAIL: root-claude's hash exceptions against base-overlay are not the declared set:" >&2
     LC_ALL=C comm -3 "$tmp/exceptions.declared" "$tmp/exceptions.actual" >&2; rc=1
