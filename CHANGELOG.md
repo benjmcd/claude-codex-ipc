@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- Bound Windows gate ownership to creation identities sampled around PRE mapping reads,
+  retaining start-time diagnostics without treating boot-relative ticks as identity.
+  MSYS liveness surrounds the counted snapshot; fail-closed ancestry and limits remain.
+  Cleanup acquires a retained handle before identity checks or termination. An exit
+  reported by .NET during acquisition is accepted without reopening the PID; an
+  access-denied kill is accepted only when that same handle confirms exit. Failure
+  diagnostics name the captured identity; hermetic cases retain live/unknown refusals.
+  Windows startup reuses the certified identity-pin snapshot for its diagnostic Node
+  count; all later samples remain fresh and every limit is unchanged.
 - Encoded standalone host-policy JSON as UTF-8 so redirected Windows output preserves
   non-ASCII descriptor paths without depending on the console code page.
 - Omitted runtime protocol-registration candidate probes. Effective-handler authority remains

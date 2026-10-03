@@ -38,7 +38,11 @@ RUNNER="$TDIR/run_release_gates.sh"
 # Pure, table-driven checks use the same stat parser and classifiers as live enumeration. This
 # mode exits before temporary files, enumeration, child launch, or any cleanup.
 CLASSIFIER_ONLY=0
+CLEANUP_ONLY=0
+CAPTURE_ONLY=0
 if [ "${1:-}" = --classifier-only ] && [ "$#" -eq 1 ]; then CLASSIFIER_ONLY=1; fi
+if [ "${1:-}" = --cleanup-only ] && [ "$#" -eq 1 ]; then CLEANUP_ONLY=1; fi
+if [ "${1:-}" = --capture-only ] && [ "$#" -eq 1 ]; then CAPTURE_ONLY=1; fi
 run_classifier_cases() (
   source "$RUNNER"
   # Retained read-only local record: Git-for-Windows MSYS 3.6.6-1cdd4371.
@@ -74,7 +78,7 @@ run_classifier_cases() (
   local endpoint_names=(state-change unknown-state dead winpid-change start-change ppid-change invalid-winpid invalid-stat)
   local endpoint_stat2=("$stat_s" "${stat_s/ S / Q }" "$stat_dead" "$stat_s" "$stat_start" "$stat_parent" "$stat_s" "${stat_s/84028166/bad}")
   local endpoint_win2=(2000 2000 2000 2001 2000 2000 0 2000)
-  local endpoint_expected=('LIVE 200 100 84028166 2000' 'MALFORMED 200' 'DEAD 200' 'TRANSITION 200' 'TRANSITION 200' 'TRANSITION 200' 'MALFORMED 200' 'MALFORMED 200')
+  local endpoint_expected=('LIVE 200 100 84028166 2000' 'MALFORMED 200' 'DEAD 200' 'TRANSITION 200' 'LIVE 200 100 84028166 2000' 'TRANSITION 200' 'MALFORMED 200' 'MALFORMED 200')
   for i in "${!endpoint_names[@]}"; do
     got="$(classify_msys_endpoint 200 "$stat_r" 2000 "${endpoint_stat2[$i]}" "${endpoint_win2[$i]}")"
     if [ "$got" = "${endpoint_expected[$i]}" ]; then echo "PASS: endpoint ${endpoint_names[$i]}"
@@ -88,7 +92,14 @@ run_classifier_cases() (
   local mapped=$'\nPS 200 100 100 2000 ? 1 00:02 node\nPRE LIVE 200 100 84028166 2000\nPOST LIVE 200 100 84028166 2000\nCIM 2000 7777 node.exe 20261001000002000000'
   local names=() expected=() inputs=() pins=() times=() starts=()
   add_case() {
-    names+=("$1"); expected+=("$2"); inputs+=("$3")
+    local input="$3" early
+    # Existing shapes declare the late population. Mirror it only for an unchanged
+    # early identity baseline; bracketing/churn cases supply their own early table.
+    if [[ "$input" != *CIM_PRE\ * ]]; then
+      early="$(printf '%s\n' "$input" | awk '$1 == "CIM" { $1 = "CIM_PRE"; print }')"
+      input+=$'\n'"$early"
+    fi
+    names+=("$1"); expected+=("$2"); inputs+=("$input")
     pins+=("${4:-1000}"); times+=("${5:-20261001000000000000}")
     starts+=("${6-84028164}")
   }
@@ -100,7 +111,7 @@ run_classifier_cases() (
   add_case older-candidate '' "$base"$'\nCIM 3000 1000 node.exe 20260930235959000000'
   add_case status-prefix 2000 "$base${mapped/PS 200/PS I 200}"
   add_case status-defunct '' "$base"$'\nPS Z 200 100 100 0 ? 1 00:01 <defunct>\nPRE DEAD 200\nPOST DEAD 200\nCIM 3000 0 node.exe 20261001000002000000'
-  add_case born-during-snapshot 2000 "$base${mapped/20261001000002000000/20261001000008000001}"
+  add_case before-msys-reads 2000 "$base${mapped/20261001000002000000/20261001000008000001}"
   add_case defunct-replacement ERROR "$base${mapped/00:02 node/00:02 <defunct>}"
   add_case valid-mapped-root 2000 "$base$mapped"
   local state_pre state_post state_mapped
@@ -112,9 +123,9 @@ run_classifier_cases() (
   add_case ps-pre-winpid-mismatch ERROR "$base${mapped/PRE LIVE 200 100 84028166 2000/PRE LIVE 200 100 84028166 2001}"
   add_case ps-parent-mismatch ERROR "$base${mapped/PS 200 100/PS 200 999}"
   add_case winpid-change ERROR "$base${mapped/POST LIVE 200 100 84028166 2000/POST LIVE 200 100 84028166 2001}"
-  add_case start-change ERROR "$base${mapped/POST LIVE 200 100 84028166/POST LIVE 200 100 84028167}"
+  add_case start-change 2000 "$base${mapped/POST LIVE 200 100 84028166/POST LIVE 200 100 84028167}"
   local opaque_mapped="${mapped//84028166/9007199254740992}"
-  add_case opaque-start-change ERROR "$base${opaque_mapped/POST LIVE 200 100 9007199254740992/POST LIVE 200 100 9007199254740993}"
+  add_case opaque-start-change 2000 "$base${opaque_mapped/POST LIVE 200 100 9007199254740992/POST LIVE 200 100 9007199254740993}"
   add_case ppid-change ERROR "$base${mapped/POST LIVE 200 100/POST LIVE 200 999}"
   add_case pre-missing ERROR "$base${mapped/PRE LIVE 200 100 84028166 2000/PRE MISSING 200}"
   add_case post-missing ERROR "$base${mapped/POST LIVE 200 100 84028166 2000/POST MISSING 200}"
@@ -141,10 +152,10 @@ run_classifier_cases() (
   add_case unavailable-intermediate ERROR "$base$unavailable"$'\nPS 300 200 100 3000 ? 1 00:03 node\nPRE LIVE 300 200 84028167 3000\nPOST LIVE 300 200 84028167 3000\nCIM 3000 7777 node.exe 20261001000003000000'
   add_case three-behind-unavailable ERROR "$base$unavailable"$'\nCIM 2000 7777 bash.exe 20261001000002000000\nCIM 3000 2000 node.exe 20261001000003000000\nCIM 3001 2000 node.exe 20261001000003000000\nCIM 3002 2000 node.exe 20261001000003000000'
   add_case runner-pre-missing ERROR "${base/PRE LIVE 100 1 84028164 1000/PRE MISSING 100}"
-  add_case runner-post-change ERROR "${base/POST LIVE 100 1 84028164/POST LIVE 100 1 84028165}"
-  add_case runner-start-pin ERROR "$base" 1000 20261001000000000000 84028165
+  add_case runner-post-change '' "${base/POST LIVE 100 1 84028164/POST LIVE 100 1 84028165}"
+  add_case runner-start-diagnostic '' "$base" 1000 20261001000000000000 84028165
   add_case enum-owner-missing ERROR "${base/POST LIVE 101 100 84028165 1001/POST MISSING 101}"
-  add_case enum-owner-change ERROR "${base/POST LIVE 101 100 84028165 1001/POST LIVE 101 100 84028166 1001}"
+  add_case enum-owner-start-diagnostic '' "${base/POST LIVE 101 100 84028165 1001/POST LIVE 101 100 84028166 1001}"
   local invalid_book="${base/PS 101 100/PS 101 150}"
   invalid_book="${invalid_book/PRE LIVE 101 100/PRE LIVE 101 150}"
   invalid_book="${invalid_book/POST LIVE 101 100/POST LIVE 101 150}"
@@ -169,6 +180,25 @@ run_classifier_cases() (
   add_case msys-exec 3000 "$base"$'\nPS 200 100 100 2000 ? 1 00:04 bash\nPS 300 200 100 3000 ? 1 00:02 node\nPRE LIVE 200 100 84028166 2000\nPOST LIVE 200 100 84028166 2000\nPRE LIVE 300 200 84028167 3000\nPOST LIVE 300 200 84028167 3000\nCIM 2000 0 bash.exe 20261001000004000000\nCIM 3000 7777 node.exe 20261001000002000000'
   add_case windows-cycle ERROR "$base"$'\nCIM 2000 2001 bash.exe 20261001000002000000\nCIM 2001 2000 node.exe 20261001000002000000'
   add_case msys-cycle ERROR "$base"$'\nPS 200 201 100 2000 ? 1 00:01 bash\nPS 201 200 100 2001 ? 1 00:01 bash\nPRE LIVE 200 201 84028166 2000\nPOST LIVE 200 201 84028166 2000\nPRE LIVE 201 200 84028167 2001\nPOST LIVE 201 200 84028167 2001\nCIM 2000 0 bash.exe 20261001000001000000\nCIM 2001 0 bash.exe 20261001000001000000'
+  # Field-22 drift changes no Windows identity. Retain the diagnostic but certify
+  # mapped anchors with both snapshots, including runner + child drifting together.
+  local drift="${base/POST LIVE 100 1 84028164/POST LIVE 100 1 84028163}"
+  add_case runner-child-drift 2000 "$drift${mapped/POST LIVE 200 100 84028166/POST LIVE 200 100 84028165}"
+  local early_base early_mapped changed='ENUM_ERROR:stable MSYS Win32 identity changed during collection'
+  early_base="$(printf '%s\n' "$base" | awk '$1 == "CIM" { $1 = "CIM_PRE"; print }')"
+  early_mapped="$(printf '%s\n' "$base$mapped" | awk '$1 == "CIM" { $1 = "CIM_PRE"; print }')"
+  add_case anchor-birth-change "$changed" "$base$mapped"$'\n'"${early_mapped/20261001000002000000/20261001000002000001}"
+  add_case anchor-parent-change "$changed" "$base$mapped"$'\n'"${early_mapped/CIM_PRE 2000 7777/CIM_PRE 2000 7778}"
+  add_case anchor-name-change "$changed" "$base$mapped"$'\n'"${early_mapped/CIM_PRE 2000 7777 node.exe/CIM_PRE 2000 7777 bash.exe}"
+  add_case runner-birth-change "$changed" "$base"$'\n'"${early_base/20261001000000000000/20261001000000000001}"
+  add_case enum-owner-birth-change "$changed" "$base"$'\n'"${early_base/20261001000001000000/20261001000001000001}"
+  add_case missing-early-anchor 'ENUM_ERROR:stable MSYS identity absent from early Win32 snapshot' "$base$mapped"$'\n'"$early_base"
+  add_case missing-early-self 'ENUM_ERROR:early enumerator absent from Win32 snapshot' "$base"$'\n'"${early_base/CIM_PRE SELF 9000/}"
+  # Native-only processes may be born or exit between snapshots. Count exactly the
+  # late population, never its union with early rows or its intersection with them.
+  add_case late-native-node 3000 "$base"$'\nCIM 3000 1000 node.exe 20261001000002000000\n'"$early_base"
+  add_case early-native-node '' "$base"$'\n'"$early_base"$'\nCIM_PRE 3000 1000 node.exe 20261001000002000000'
+  add_case population-churn '3001 3002' "$base"$'\nCIM 3001 1000 node.exe 20261001000003000000\nCIM 3002 1000 node.exe 20261001000004000000\n'"$early_base"$'\nCIM_PRE 3000 1000 node.exe 20261001000002000000\nCIM_PRE 3002 1000 node.exe 20261001000004000000'
   local out
   for i in "${!names[@]}"; do
     RUNNER_WINPID="${pins[$i]}"; RUNNER_CREATED="${times[$i]}"
@@ -176,6 +206,7 @@ run_classifier_cases() (
     out="$(printf '%s\n' "${inputs[$i]}" | classify_windows_process_rows 101)"; rc=$?
     got="$(printf '%s\n' "$out" | awk '$1 != "RUNNER" && tolower($2) == "node.exe" { print $1 }' | sort -n | paste -sd ' ' -)"
     if { [ "${expected[$i]}" = ERROR ] && [ "$rc" -ne 0 ] && [[ "$out" == ENUM_ERROR:* ]] && [[ "$out" != *$'\n'* ]]; } \
+      || { [[ "${expected[$i]}" == ENUM_ERROR:* ]] && [ "$rc" -ne 0 ] && [ "$out" = "${expected[$i]}" ]; } \
       || { [ "${expected[$i]}" != ERROR ] && [ "$rc" -eq 0 ] && [ "$got" = "${expected[$i]}" ] && [[ "$out" == RUNNER\ * ]]; }; then
       echo "PASS: classifier ${names[$i]}"
     else
@@ -186,7 +217,7 @@ run_classifier_cases() (
   [ "$failed" -eq 0 ] || return 1
   echo "process classifier/parser: ALL PASS (${#names[@]} ownership, ${#parser_names[@]} parser, ${#endpoint_names[@]} endpoint cases)"
 )
-run_classifier_cases || exit 1
+[ "$CLEANUP_ONLY" -eq 1 ] || run_classifier_cases || exit 1
 [ "$CLASSIFIER_ONLY" -eq 0 ] || exit 0
 command -v node >/dev/null 2>&1 || { echo "FAIL: node not on PATH (required by runner preflight)"; exit 1; }
 
@@ -219,6 +250,91 @@ FAILN=0
 t_pass() { echo "PASS: $1"; }
 t_fail() { echo "FAIL: $1"; FAILN=$((FAILN + 1)); }
 
+# Exercise the actual Windows cleanup body with throwing .NET members. Only its
+# process factory is replaced; no real PID lookup, enumeration or kill can occur.
+run_cleanup_cases() (
+  is_windows || return 0
+  local real_ps body factory='[Diagnostics.Process]::GetProcessById(' fake script
+  local scenario mode selection key expected rc calls work_win
+  real_ps="$(command -v powershell.exe)" && [ -x "$real_ps" ] || return 1
+  body="$(awk '
+    /^    # IPC_GATE_IDENTITY_CLEANUP / { active=1; found++ }
+    active && /^POWERSHELL$/ { active=0; next }
+    active { print }
+    END { if (found != 1 || active) exit 1 }
+  ' "$RUNNER")" || return 1
+  [ "$(printf '%s\n' "$body" | grep -Fo "$factory" | wc -l)" -eq 1 ] || return 1
+  body="${body/"$factory"/'[IpcFake.Registry]::GetProcessById('}"
+  if printf '%s\n' "$body" | grep -Eq 'Diagnostics.Process\]::|Stop-Process|Get-CimInstance|Get-Process|taskkill'; then return 1; fi
+  IFS= read -r -d '' fake <<'FAKE' || true
+Add-Type -TypeDefinition @'
+using System;
+using System.IO;
+using System.ComponentModel;
+namespace IpcFake {
+  public static class Registry {
+    public static Proc GetProcessById(int pid) {
+      if (pid != 4242) throw new ArgumentException("unknown synthetic PID");
+      return new Proc();
+    }
+  }
+  public class Proc : IDisposable {
+    bool killed;
+    string Scenario { get { return Environment.GetEnvironmentVariable("IPC_FAKE_CASE"); } }
+    void Log(string value) { File.AppendAllText(Environment.GetEnvironmentVariable("IPC_FAKE_LOG"), value + "\n"); }
+    public IntPtr Handle { get {
+      if (Scenario == "handle-denied") throw new Win32Exception(5);
+      if (Scenario == "handle-exited") throw new InvalidOperationException("Process has exited.");
+      if (Scenario == "handle-unknown") throw new Win32Exception(6);
+      if (Scenario == "handle-zero") return IntPtr.Zero;
+      return new IntPtr(123);
+    } }
+    public DateTime StartTime { get { return new DateTime(2026,10,1,0,0,0,DateTimeKind.Utc); } }
+    public bool HasExited { get {
+      if (Scenario.StartsWith("handle-")) {
+        Log("UNEXPECTED_PROBE"); throw new InvalidOperationException("Handle acquisition must not reopen by PID.");
+      }
+      if (killed && Scenario == "probe-error") throw new Win32Exception(6);
+      return killed && (Scenario == "exited" || Scenario == "other-error");
+    } }
+    public void Kill() { Log("KILL"); killed = true; throw new Win32Exception(Scenario == "other-error" ? 6 : 5); }
+    public void Dispose() { Log("DISPOSE"); }
+  }
+}
+'@
+FAKE
+  script="$fake"$'\n'"$body"
+  work_win="$(cygpath -w "$WORK")" || return 1
+  for selection in exited:kill alive:kill probe-error:kill handle-denied:kill other-error:kill \
+    handle-exited:kill handle-unknown:kill handle-zero:kill \
+    handle-exited:live handle-denied:live handle-unknown:live handle-zero:live; do
+    scenario="${selection%:*}"; mode="${selection#*:}"
+    key="$scenario.$mode"
+    expected=1
+    case "$scenario" in exited|handle-exited) expected=0;; esac
+    printf '4242 20261001000000000000\n' \
+      | TEMP="$work_win" TMP="$work_win" IPC_GATE_CLEANUP_MODE="$mode" \
+        IPC_FAKE_CASE="$scenario" IPC_FAKE_LOG="$work_win\\cleanup-$key.calls" \
+        "$real_ps" -NoProfile -NonInteractive -Command "$script" \
+        >"$EVIDENCE/cleanup-$key.out" 2>"$EVIDENCE/cleanup-$key.err"
+    rc=$?
+    cp "$WORK/cleanup-$key.calls" "$EVIDENCE/cleanup-$key.calls" || return 1
+    calls="$(tr -d '\r' <"$EVIDENCE/cleanup-$key.calls")"
+    case "$scenario" in
+      handle-*) [ "$calls" = DISPOSE ] || return 1;;
+      *) [ "$calls" = $'KILL\nDISPOSE' ] || return 1;;
+    esac
+    [ ! -s "$EVIDENCE/cleanup-$key.out" ] || return 1
+    if [ "$rc" -eq "$expected" ] && {
+      { [ "$expected" -eq 0 ] && [ ! -s "$EVIDENCE/cleanup-$key.err" ]; } ||
+      { [ "$expected" -eq 1 ] && grep -q '^Identity cleanup failed:' "$EVIDENCE/cleanup-$key.err"; }
+    }; then echo "PASS: identity cleanup $selection"
+    else echo "FAIL: identity cleanup $selection rc=$rc expected=$expected"; return 1; fi
+  done
+)
+run_cleanup_cases || exit 1
+[ "$CLEANUP_ONLY" -eq 0 ] || exit 0
+
 # Exercise the production capture path with the existing synthetic ownership shapes.
 # Only these function-local input providers are replaced; no /proc or runtime is seeded.
 run_capture_cases() (
@@ -230,17 +346,32 @@ run_capture_cases() (
   RUNNER_CREATED=20261001000000000000; RUNNER_MSYS_START=84028164
   is_windows() { return 0; }
   ps() {
+    printf 'PS\n' >>"$RUNDIR/steps"
     printf '100 1 100 1000 ? 1 00:00 bash\n%s 100 100 1001 ? 1 00:01 bash\n200 100 100 2000 ? 1 00:02 bash\n' "$enum_owner_pid"
   }
   powershell.exe() {
-    printf 'SELF 9000\n9000 1001 powershell.exe 20261001000009000000\n1000 0 bash.exe 20261001000000000000\n1001 1000 bash.exe 20261001000001000000\n2000 7777 bash.exe 20261001000002000000\n3000 2000 node.exe 20261001000003000000\n'
+    cim_calls=$((cim_calls + 1))
+    printf 'CIM\n' >>"$RUNDIR/steps"
+    printf 'SELF 9000\n9000 1001 powershell.exe 20261001000009000000\n1000 0 bash.exe 20261001000000000000\n1001 1000 bash.exe 20261001000001000000\n'
+    if [ "$capture_case" = late-live-node ]; then
+      printf '2000 2999 node.exe 20261001000002000000\n2999 1000 bash.exe 20261001000001500000\n'
+    elif [[ "$capture_case" != late-* ]] || [ "$cim_calls" -eq 1 ]; then
+      printf '2000 7777 bash.exe 20261001000002000000\n3000 2000 node.exe 20261001000003000000\n'
+    fi
   }
   unreadable_msys_endpoint() { printf '%s MISSING %s\n' "$1" "$2"; }
   read_msys_endpoint_value() {
     local target="$1" pid="$2" parent=100 start=84028165 win=1001
+    if [ "$pid" -eq 100 ] && [ "$target" = stat1 ]; then
+      printf '%s\n' "$phase" >>"$RUNDIR/steps"
+    fi
     if [ "$pid" -eq 100 ]; then parent=1; start=84028164; win=1000; fi
     if [ "$pid" -eq 200 ]; then
       start=84028166; win=2000
+      if { [ "$capture_case" = late-exit ] || [ "$capture_case" = late-live-node ]; } \
+        && [ "$cim_calls" -ge 2 ]; then
+        echo 'synthetic endpoint exit after population' >&2; return 1
+      fi
       if [ "$capture_case" = continuity ] && [ "$phase" = POST ]; then
         echo 'synthetic original endpoint read failure' >&2; return 1
       fi
@@ -255,10 +386,13 @@ run_capture_cases() (
       printf -v "$target" '%s (node child) %s' "$pid" "${fields[*]}"
     fi
   }
-  local capture_case index=0 out rc replay_rc owner raw=() j found expected
+  local capture_case index=0 out rc replay_rc owner raw=() j found expected cim_calls=0 sample
   for capture_case in continuity malformed; do
     ENUM_CONTEXT="synthetic $capture_case"
+    cim_calls=0
+    : >"$RUNDIR/steps" || return 1
     out="$(owned_process_rows)"; rc=$?
+    [ "$(<"$RUNDIR/steps")" = $'PS\nCIM\nPRE\nCIM\nPOST' ] || return 1
     printf '%s\n' "$out" >"$RUNDIR/$capture_case.out"
     [ "$rc" -eq 1 ] || return 1
     expected='candidate MSYS ancestry continuity unavailable'
@@ -269,6 +403,7 @@ run_capture_cases() (
     [ "$replay_rc" -eq 1 ] && cmp -s "$RUNDIR/$capture_case.out" "$RUNDIR/$capture_case.replay" || return 1
     cmp -s "$RUNDIR/$capture_case.out" "$RUNDIR/enum-$index.output" || return 1
     grep -q '^CLASSIFIER=1$' "$RUNDIR/enum-$index.meta" || return 1
+    grep -q '^CIM_PRE=0$' "$RUNDIR/enum-$index.meta" && grep -q '^CIM=0$' "$RUNDIR/enum-$index.meta" || return 1
     mapfile -d '' -t raw <"$RUNDIR/enum-$index.endpoints"
     found=0
     for ((j=0; j<${#raw[@]}; j+=5)); do
@@ -288,6 +423,31 @@ run_capture_cases() (
   # The first failed sample remains byte-for-byte available after a second failure.
   cmp -s "$RUNDIR/continuity.out" "$RUNDIR/enum-0.output" || return 1
   grep -q 'synthetic original endpoint read failure' "$RUNDIR/enum-0.endpoint.err" || return 1
+  # Deterministic population churn: a confirmed later disappearance is not a live
+  # provider omission. Neither case reads /proc or enumerates an actual process.
+  for capture_case in late-exit late-omission late-live-node; do
+    ENUM_CONTEXT="synthetic $capture_case"; cim_calls=0
+    : >"$RUNDIR/steps" || return 1
+    out="$(owned_process_rows)"; rc=$?
+    sample="$(<"$RUNDIR/enum-next")"
+    printf '%s\n' "$out" >"$RUNDIR/$capture_case.out"
+    printf '%s\n' "$rc" >"$RUNDIR/$capture_case.rc"
+    cp "$RUNDIR/enum-$sample.input" "$RUNDIR/$capture_case.input" || return 1
+    cp "$RUNDIR/enum-$sample.meta" "$RUNDIR/$capture_case.meta" || return 1
+    cp "$RUNDIR/steps" "$RUNDIR/$capture_case.steps" || return 1
+    [ "$(<"$RUNDIR/steps")" = $'PS\nCIM\nPRE\nCIM\nPOST' ] || return 1
+    expected='RUNNER 1000 20261001000000000000 84028164'
+    if [ "$capture_case" = late-omission ]; then
+      expected='ENUM_ERROR:stable MSYS identity absent from Win32 snapshot'
+      [ "$rc" -eq 1 ] && [ "$out" = "$expected" ] || return 1
+    elif [ "$capture_case" = late-exit ]; then
+      [ "$rc" -eq 0 ] && [ "$out" = "$expected" ] || return 1
+    else
+      expected+=$'\n2000 node.exe 20261001000002000000\n2999 bash.exe 20261001000001500000'
+      [ "$rc" -eq 0 ] && [ "$(printf '%s\n' "$out" | sort)" = "$(printf '%s\n' "$expected" | sort)" ] || return 1
+    fi
+    echo "PASS: retained $capture_case population and endpoint classification"
+  done
   # A capture write failure crosses count -> owned-node -> owned-rows substitutions.
   RUNDIR="$EVIDENCE/write-failure"; mkdir "$RUNDIR" "$RUNDIR/enum-0.meta" || return 1
   printf '0\n' >"$RUNDIR/enum-next"
@@ -329,6 +489,7 @@ printf '%s\n' "$CAPTURE_RC" >"$EVIDENCE/capture.rc"
 if [ "$CAPTURE_RC" -eq 0 ]; then t_pass 'original failure replay and capture-error propagation'
 else t_fail 'original failure replay or capture-error propagation'; fi
 cat "$EVIDENCE/capture.out"
+[ "$CAPTURE_ONLY" -eq 0 ] || exit "$CAPTURE_RC"
 
 wait_for_pattern() { # <file> <grep-pattern> <timeout-s>
   local f="$1" pat="$2" t="$3" i=0
@@ -432,11 +593,12 @@ PATH="$SHIM_BROKEN:$PATH" IPC_GATE_LOG_DIR="$EVIDENCE/t1-run" STARTUP_SENTINEL_F
   "$BASH" "$RUNNER" --no-safety "$WORK/sentinel_quick.sh" >"$T1OUT" 2>&1
 T1RC=$?
 printf '%s\n' "$T1RC" >"$EVIDENCE/t1.rc"
-ERROR_STAGE=ps; is_windows && ERROR_STAGE=cim
+ERROR_STAGE=ps; ERROR_KEY=PS
+is_windows && { ERROR_STAGE=cim-pre; ERROR_KEY=CIM_PRE; }
 if [ "$T1RC" -eq 3 ] && grep -q "GATE ERROR" "$T1OUT" && grep -qi "enumerat" "$T1OUT" \
    && ! grep -q 'RELEASE GATES: PASS' "$T1OUT" && [ ! -e "$WORK/startup.called" ] \
    && grep -q 'shim: enumeration disabled by fixture' "$EVIDENCE/t1-run/enum-0.$ERROR_STAGE.err" \
-   && grep -q "^${ERROR_STAGE^^}=1$" "$EVIDENCE/t1-run/enum-0.meta" \
+   && grep -q "^${ERROR_KEY}=1$" "$EVIDENCE/t1-run/enum-0.meta" \
    && grep -q '^CLASSIFIER=unattempted$' "$EVIDENCE/t1-run/enum-0.meta"; then
   t_pass "T1 runner failed closed (rc=$T1RC) with explicit enumeration error"
 else
@@ -473,7 +635,8 @@ T3OUT="$EVIDENCE/t3.out"
 PATH="$SHIM_SAFE:$PATH" IPC_GATE_LOG_DIR="$EVIDENCE/t3-run" "$BASH" "$RUNNER" --no-safety "$WORK/sentinel_spawn3.sh" >"$T3OUT" 2>&1
 T3RC=$?
 printf '%s\n' "$T3RC" >"$EVIDENCE/t3.rc"
-if [ "$T3RC" -ne 0 ] && grep -q "owned-node-peak" "$T3OUT"; then
+if [ "$T3RC" -eq 1 ] && grep -q "owned-node-peak" "$T3OUT" \
+   && ! grep -q 'GATE ERROR' "$T3OUT"; then
   t_pass "T3 gate FAILed on owned peak breach (rc=$T3RC)"
 else
   t_fail "T3 expected gate FAIL with 'owned-node-peak' breach; got rc=$T3RC"
@@ -513,13 +676,20 @@ if [ -n "$T4CHILD" ] && ! kill -0 "$T4CHILD" 2>/dev/null \
   T4_REAPED=1
 fi
 { printf 'outage early stdout\noutage early stderr\n'; for ((i=1; i<=36; i++)); do printf 'outage line %02d\n' "$i"; done; } >"$EVIDENCE/t4.expected"
+ERROR_STAGE=ps; ERROR_KEY=PS
+if is_windows; then
+  ERROR_STAGE=cim; ERROR_KEY=CIM
+  if grep -q '^CIM_PRE=1$' "$EVIDENCE/t4-run/enum-0.meta"; then
+    ERROR_STAGE=cim-pre; ERROR_KEY=CIM_PRE
+  fi
+fi
 if [ "$T4_READY" -eq 1 ] && [ "$T4_INJECTED" -eq 1 ] && [ "$T4RC" -eq 3 ] \
    && [ "$T4_REAPED" -eq 1 ] \
    && grep -q "GATE ERROR" "$T4OUT" && grep -qi "enumerat" "$T4OUT" \
    && grep -qF "mid-child sample, sentinel_idle8.sh" "$T4OUT" \
    && ! grep -q 'RELEASE GATES: PASS' "$T4OUT" \
    && grep -q "shim: simulated mid-run enumeration outage" "$EVIDENCE/t4-run/enum-0.$ERROR_STAGE.err" \
-   && grep -q "^${ERROR_STAGE^^}=1$" "$EVIDENCE/t4-run/enum-0.meta" \
+   && grep -q "^${ERROR_KEY}=1$" "$EVIDENCE/t4-run/enum-0.meta" \
    && grep -q '^CLASSIFIER=unattempted$' "$EVIDENCE/t4-run/enum-0.meta" \
    && cmp -s "$EVIDENCE/t4.expected" "$EVIDENCE/t4-run/monitor-2.log"; then
   t_pass "T4 runner aborted named sentinel (rc=$T4RC), direct child $T4CHILD gone/reaped"
