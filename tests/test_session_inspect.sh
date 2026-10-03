@@ -1061,7 +1061,7 @@ if (mode === "after-snapshot-error" && count > 1) {
 }
 const threadId = process.env.WP_THREAD;
 const otherTurnId = process.env.WP_OTHER_TURN;
-console.log(JSON.stringify({
+const snapshot = {
   ok: true,
   generatedAt: "2026-08-30T00:00:00.000Z",
   targetThreadId:
@@ -1103,7 +1103,18 @@ console.log(JSON.stringify({
     },
     marker: { dbBinaryCount: 0, textSha256: "c".repeat(64) },
   },
-}));
+};
+if (mode === "large-hash-map") {
+  for (let index = 0; index < 10000; index += 1) {
+    const id = `33333333-3333-4333-8333-${index.toString(16).padStart(12, "0")}`;
+    snapshot.db.threads.threadRowHashById[id] = "d".repeat(64);
+  }
+}
+const output = JSON.stringify(snapshot);
+if (mode === "large-hash-map" && Buffer.byteLength(output) <= 1048576) {
+  throw new Error("large snapshot fixture must exceed the default spawnSync buffer");
+}
+console.log(output);
 EOF
 
   cat > "$scripts/codex_ipc_client.mjs" <<'EOF'
@@ -1120,6 +1131,7 @@ const rolloutPath = process.env.WP_ROLLOUT;
 let result;
 if ([
   "nested",
+  "large-hash-map",
   "duplicate-follower",
   "extra-target-follower",
   "after-snapshot-error",
@@ -1145,6 +1157,7 @@ else if (mode === "duplicate") {
 
 if ([
   "nested",
+  "large-hash-map",
   "one-level",
   "turn-id",
   "duplicate",
@@ -1349,6 +1362,18 @@ if [[ -n "$WRITE_PROOF" ]]; then
     ok "paginated DB path plus nested result.result.turn.id drive one strict same-turn proof"
   else
     no "nested send response was not strictly turn-bound (rc=$WPRC, sends=$(cat "$WP_LIVE_SEND_COUNT" 2>/dev/null))"
+    wp_live_debug
+  fi
+
+  echo "== 21b2. write-proof captures complete snapshots larger than the default subprocess buffer =="
+  wp_live_run "$TMP/wp-live-large-hash-map" large-hash-map
+  if [[ $WPRC -eq 0 ]] \
+    && wp_sent_once \
+    && [[ "$(cat "$WP_LIVE_SNAPSHOT_COUNT" 2>/dev/null)" == "2" ]] \
+    && wp_field 'v.ok===true && v.before.threadHashMapsPresent===true && v.after.threadHashMapsPresent===true && v.send.occurrence==="confirmed" && v.send.followerRequestCount===1 && v.send.matchingFollowerRequestCount===1 && v.send.verificationStatus==="turn-bound" && v.compare.ok===true && v.compare.db.threadHashIdentitiesValid===true && v.compare.db.targetThreadChanged===true && v.compare.db.unexpectedNonTargetChangedIds.length===0 && v.compare.db.addedIds.length===0 && v.compare.db.removedIds.length===0 && v.postSendFailures.length===0'; then
+    ok "large before and after snapshots retain the complete hash maps around one fake send"
+  else
+    no "large snapshot capture or strict comparison failed (rc=$WPRC, sends=$(cat "$WP_LIVE_SEND_COUNT" 2>/dev/null))"
     wp_live_debug
   fi
 

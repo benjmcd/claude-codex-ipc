@@ -206,6 +206,7 @@ function runNode(scriptName, args, options = {}) {
     encoding: "utf8",
     timeout: options.timeoutMs || 120000,
     windowsHide: true,
+    ...(options.maxBuffer !== undefined ? { maxBuffer: options.maxBuffer } : {}),
   });
   return {
     ok: result.status === 0,
@@ -352,7 +353,8 @@ function snapshot(opts) {
   const result = runNode(
     "scripts/codex_ipc_snapshot.mjs",
     ["--thread", opts.threadId, "--marker", opts.marker],
-    { timeoutMs: 90000 },
+    // Full thread hash maps must survive growth beyond spawnSync's default buffer.
+    { timeoutMs: 90000, maxBuffer: Infinity },
   );
   return parseJsonCommand(result, "snapshot");
 }

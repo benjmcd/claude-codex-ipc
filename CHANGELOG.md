@@ -4,6 +4,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- Preserved complete write-proof snapshots beyond the default subprocess output buffer,
+  keeping the full thread hash comparison and existing snapshot timeout. Other subprocess
+  captures retain their default limits; a hermetic large-population case covers both captures.
 - Bound Windows gate ownership to creation identities sampled around PRE mapping reads,
   retaining start-time diagnostics without treating boot-relative ticks as identity.
   A missing POST retains earlier ownership only with matching nondefunct PS/PRE mappings
