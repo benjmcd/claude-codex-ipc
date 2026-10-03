@@ -199,6 +199,27 @@ run_classifier_cases() (
   add_case late-native-node 3000 "$base"$'\nCIM 3000 1000 node.exe 20261001000002000000\n'"$early_base"
   add_case early-native-node '' "$base"$'\n'"$early_base"$'\nCIM_PRE 3000 1000 node.exe 20261001000002000000'
   add_case population-churn '3001 3002' "$base"$'\nCIM 3001 1000 node.exe 20261001000003000000\nCIM 3002 1000 node.exe 20261001000004000000\n'"$early_base"$'\nCIM_PRE 3000 1000 node.exe 20261001000002000000\nCIM_PRE 3002 1000 node.exe 20261001000004000000'
+  # Exec can settle between PS and the early snapshot. Only the bracketed PRE
+  # identity may confer ownership; the old PS alias stays uncertain.
+  local exec_mapped=$'\nPS 200 100 100 2000 ? 1 00:02 bash\nPRE LIVE 200 100 84028166 2001\nPOST LIVE 200 100 84028166 2001\nCIM 2000 7777 bash.exe 20261001000002000000\nCIM 2001 2000 node.exe 20261001000003000000'
+  local exec_early late_only remap_error='ENUM_ERROR:candidate MSYS ancestry continuity unavailable'
+  exec_early="$(printf '%s\n' "$base$exec_mapped" | awk '$1 == "CIM" { $1 = "CIM_PRE"; print }')"
+  late_only="${exec_early/CIM_PRE 2001 2000 node.exe 20261001000003000000/}"
+  add_case exec-remap-native 2001 "$base$exec_mapped"
+  add_case exec-remap-msys 2001 "$base${exec_mapped/CIM 2000 7777 bash.exe 20261001000002000000/}"
+  add_case exec-remap-intermediate 3000 "$base${exec_mapped/CIM 2001 2000 node.exe/CIM 2001 2000 bash.exe}"$'\nPS 300 200 100 3000 ? 1 00:04 node\nPRE LIVE 300 200 84028167 3000\nPOST LIVE 300 200 84028167 3000\nCIM 3000 8888 node.exe 20261001000004000000'
+  add_case exec-remap-alias-node "$remap_error" "$base$exec_mapped"$'\nCIM 3000 2000 node.exe 20261001000004000000'
+  add_case exec-remap-late-only "$remap_error" "$base$exec_mapped"$'\n'"$late_only"
+  add_case exec-remap-late-shell '' "$base${exec_mapped/CIM 2001 2000 node.exe/CIM 2001 2000 bash.exe}"$'\n'"$late_only"
+  add_case exec-remap-runner 'ENUM_ERROR:runner MSYS continuity unavailable' "${base//84028164 1000/84028164 1002}"$'\nCIM 1002 0 bash.exe 20261001000000000000'
+  add_case exec-remap-enum-owner 'ENUM_ERROR:enumeration-owner MSYS continuity unavailable' "${base//84028165 1001/84028165 1003}"$'\nCIM 1003 1000 bash.exe 20261001000001000000'
+  add_case exec-remap-birth-change "$remap_error" "$base$exec_mapped"$'\n'"${exec_early/CIM_PRE 2001 2000 node.exe 20261001000003000000/CIM_PRE 2001 2000 node.exe 20261001000003000001}"
+  add_case exec-remap-parent-change "$remap_error" "$base$exec_mapped"$'\n'"${exec_early/CIM_PRE 2001 2000/CIM_PRE 2001 8888}"
+  add_case exec-remap-name-change "$remap_error" "$base$exec_mapped"$'\n'"${exec_early/CIM_PRE 2001 2000 node.exe/CIM_PRE 2001 2000 bash.exe}"
+  add_case exec-remap-ps-parent "$remap_error" "$base${exec_mapped/PS 200 100/PS 200 999}"
+  local foreign_exec="${exec_mapped/PS 200 100/PS 200 999}"
+  foreign_exec="${foreign_exec//LIVE 200 100/LIVE 200 999}"
+  add_case exec-remap-foreign '' "$base$foreign_exec"
   local out
   for i in "${!names[@]}"; do
     RUNNER_WINPID="${pins[$i]}"; RUNNER_CREATED="${times[$i]}"

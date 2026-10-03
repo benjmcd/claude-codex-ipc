@@ -33,7 +33,8 @@
 # already exited (orphan/reparent; or rejected Windows PID reuse breaking a chain) can no longer be
 # attributed by ancestry and escapes the bound. Two Win32 snapshots bracket PRE mapping
 # reads; MSYS PRE/POST liveness surrounds the late population. Exact Windows creation identities
-# certify stable anchors; Node attribution uses only that late population. Depending on a
+# certify stable PRE anchors, including exec remaps settled before the early snapshot.
+# Old PS aliases stay uncertain; Node attribution uses only the late population. Depending on a
 # vanished or changing sampled anchor/intermediate
 # fails measurement; only certified identities enter cleanup.
 #
@@ -214,8 +215,7 @@ read_msys_endpoint_value() { IFS= read -r "$1" <"/proc/$2/$3"; }
 # CIM_PRE/CIM SELF <pid>; CIM_PRE/CIM <pid> <ppid> <name> <UTC creation>.
 # UTC identities use yyyyMMddHHmmssffffff (the common CIM/.NET microsecond precision).
 classify_windows_process_rows() {
-  awk -v me="$RUNNER_PID" -v enummsys="${1:-0}" \
-      -v pinnedpid="$RUNNER_WINPID" -v pinnedtime="$RUNNER_CREATED" '
+  awk -v me="$RUNNER_PID" -v enummsys="${1:-0}" -v pinnedpid="$RUNNER_WINPID" -v pinnedtime="$RUNNER_CREATED" '
     function fail(s) { error = s }
     function positive(s) { return s ~ /^[0-9]+$/ && s + 0 > 0 }
     function timestamp(s,yr,mo,day,days) {
@@ -228,11 +228,20 @@ classify_windows_process_rows() {
     }
     function before(a,b) { return ("t" a) < ("t" b) }
     function same(a,b) { return ("t" a) == ("t" b) }
-    function stable(p,a,b) {
+    function settled(p,a,b) {
       a = "PRE" SUBSEP p; b = "POST" SUBSEP p
       return !mdead[p] && estate[a] == "LIVE" && estate[b] == "LIVE" &&
              same(eparent[a],eparent[b]) && same(ewin[a],ewin[b]) &&
-             same(eparent[a],mppid[p]) && same(ewin[a],mwin[p])
+             same(eparent[a],mppid[p])
+    }
+    function certified(w) {
+      return w in wppid && w in bppid && same(bppid[w],wppid[w]) &&
+             same(bname[w],wname[w]) && same(btime[w],wtime[w])
+    }
+    function anchor(p) { return ewin["PRE" SUBSEP p] }
+    function stable(p) {
+      return settled(p) && (same(anchor(p),mwin[p]) ||
+             (p != me && p != enummsys && certified(anchor(p))))
     }
     $1 == "PS" {
       i = 2; status = ""
@@ -300,9 +309,9 @@ classify_windows_process_rows() {
       for (p in mppid) {
         if (ecount["PRE" SUBSEP p] != 1 || ecount["POST" SUBSEP p] != 1)
           fail("missing or duplicate MSYS endpoint record")
-        if (stable(p) && !(mwin[p] in wppid)) fail("stable MSYS identity absent from Win32 snapshot")
-        if (stable(p) && mwin[p] in wppid) {
-          w = mwin[p]
+        if (stable(p) && !(anchor(p) in wppid)) fail("stable MSYS identity absent from Win32 snapshot")
+        if (stable(p) && anchor(p) in wppid) {
+          w = anchor(p)
           if (!(w in bppid)) fail("stable MSYS identity absent from early Win32 snapshot")
           else if (!same(bppid[w],wppid[w]) || !same(bname[w],wname[w]) || !same(btime[w],wtime[w]))
             fail("stable MSYS Win32 identity changed during collection")
@@ -327,7 +336,7 @@ classify_windows_process_rows() {
           if (cur == me) { hit = 1; break }
           cur = mppid[cur]
         }
-        win = mwin[p]
+        win = anchor(p)
         if (hit && positive(win) && win in wppid) {
           if (before(wtime[win],created))
             fail("ambiguous MSYS mapped process identity")

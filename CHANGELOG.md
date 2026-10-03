@@ -7,6 +7,7 @@ All notable changes to this project will be documented in this file.
 - Bound Windows gate ownership to creation identities sampled around PRE mapping reads,
   retaining start-time diagnostics without treating boot-relative ticks as identity.
   MSYS liveness surrounds the counted snapshot; fail-closed ancestry and limits remain.
+  Settled exec remaps use only bracket-certified PRE identities; old PS aliases stay uncertain.
   Cleanup acquires a retained handle before identity checks or termination. An exit
   reported by .NET during acquisition is accepted without reopening the PID; an
   access-denied kill is accepted only when that same handle confirms exit. Failure
