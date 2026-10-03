@@ -32,11 +32,11 @@
 # KNOWN LIMITATION (documented, NOT covered): an owned node whose intermediate parents
 # already exited (orphan/reparent; or rejected Windows PID reuse breaking a chain) can no longer be
 # attributed by ancestry and escapes the bound. Two Win32 snapshots bracket PRE mapping
-# reads; MSYS PRE/POST liveness surrounds the late population. Exact Windows creation identities
-# certify stable PRE anchors, including exec remaps settled before the early snapshot.
-# Old PS aliases stay uncertain; Node attribution uses only the late population. Depending on a
-# vanished or changing sampled anchor/intermediate
-# fails measurement; only certified identities enter cleanup.
+# reads. Stable MSYS PRE/POST mappings certify anchors, including settled exec remaps.
+# A missing POST may retain earlier ownership only with matching nondefunct PS/PRE mappings
+# and the same native identity in both snapshots; runner and enumeration-owner paths stay strict.
+# Old PS aliases and unbracketed mappings stay uncertain. Node attribution uses only the late
+# population; unresolved sampled ancestry fails measurement and only certified identities enter cleanup.
 #
 # Usage:
 #   run_release_gates.sh                 # preflight + 13 suites + text/docs/manifest/safety/contract
@@ -243,6 +243,13 @@ classify_windows_process_rows() {
       return settled(p) && (same(anchor(p),mwin[p]) ||
              (p != me && p != enummsys && certified(anchor(p))))
     }
+    function missing_post(p,a,b) {
+      a = "PRE" SUBSEP p; b = "POST" SUBSEP p
+      return p != me && p != enummsys && !mdead[p] &&
+             estate[a] == "LIVE" && estate[b] == "MISSING" &&
+             same(eparent[a],mppid[p]) && same(ewin[a],mwin[p]) &&
+             certified(anchor(p))
+    }
     $1 == "PS" {
       i = 2; status = ""
       if ($i ~ /^[A-Z]$/) { status = $i; i++ } # optional MSYS status prefix
@@ -332,7 +339,9 @@ classify_windows_process_rows() {
         while (cur in mppid) {
           if (seen[cur] == walk) { fail("MSYS parent cycle"); break }
           seen[cur] = walk
-          if (!stable(cur)) break # Unavailable logical intermediates cannot confer ownership.
+          # A later missing endpoint does not invalidate certified PRE ownership.
+          # The enumeration owner path still requires stable endpoints throughout.
+          if (!stable(cur) && !(p != enummsys && missing_post(cur))) break
           if (cur == me) { hit = 1; break }
           cur = mppid[cur]
         }
@@ -463,7 +472,8 @@ owned_process_rows() {
       echo 'CAPTURE ERROR: original PS output unreadable' >&2; finish_enum_capture 2; return $?;
     }
     # Windows births bracket PRE mapping reads; PRE/POST bracket the late population.
-    # POST is a later liveness check, not a source of counted Windows identities.
+    # POST is a later logical check, not a source of counted Windows identities.
+    # Only a missing POST with an unchanged PS/PRE mapping can retain bracketed ownership.
     collect_windows_snapshot >"$ENUM_FILE.cim-pre" 2>"$ENUM_FILE.cim-pre.err"; cim_pre_rc=$?
     if [ "$cim_pre_rc" -ne 0 ]; then
       enum_collection_error "ENUM_ERROR:early Win32_Process enumeration failed (powershell.exe nonzero exit)"; return $?

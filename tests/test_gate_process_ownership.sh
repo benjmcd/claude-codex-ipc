@@ -128,7 +128,7 @@ run_classifier_cases() (
   add_case opaque-start-change 2000 "$base${opaque_mapped/POST LIVE 200 100 9007199254740992/POST LIVE 200 100 9007199254740993}"
   add_case ppid-change ERROR "$base${mapped/POST LIVE 200 100/POST LIVE 200 999}"
   add_case pre-missing ERROR "$base${mapped/PRE LIVE 200 100 84028166 2000/PRE MISSING 200}"
-  add_case post-missing ERROR "$base${mapped/POST LIVE 200 100 84028166 2000/POST MISSING 200}"
+  add_case post-missing 2000 "$base${mapped/POST LIVE 200 100 84028166 2000/POST MISSING 200}"
   add_case pre-dead ERROR "$base${mapped/PRE LIVE 200 100 84028166 2000/PRE DEAD 200}"
   add_case post-dead ERROR "$base${mapped/POST LIVE 200 100 84028166 2000/POST DEAD 200}"
   add_case transition ERROR "$base${mapped/POST LIVE 200 100 84028166 2000/POST TRANSITION 200}"
@@ -140,7 +140,7 @@ run_classifier_cases() (
   add_case unrelated-unavailable '' "$base$unavailable"
   local uncertain_shell="$base$unavailable"$'\nCIM 2000 7777 bash.exe 20261001000002000000'
   add_case uncertain-non-node '' "$uncertain_shell"
-  add_case node-behind-uncertain-shell ERROR "$uncertain_shell"$'\nCIM 3000 2000 node.exe 20261001000003000000'
+  add_case node-behind-uncertain-shell 3000 "$uncertain_shell"$'\nCIM 3000 2000 node.exe 20261001000003000000'
   add_case unrelated-missing-pre-record ERROR "$base${unavailable/PRE LIVE 200 100 84028166 2000/}"
   add_case unrelated-missing-post-record ERROR "$base${unavailable/POST MISSING 200/}"
   local foreign_unavailable="${unavailable/PS 200 100/PS 200 999}"
@@ -150,7 +150,7 @@ run_classifier_cases() (
   add_case unreadable ERROR "$base${mapped/POST LIVE 200 100 84028166 2000/POST MALFORMED 200}"
   add_case stable-missing-cim ERROR "$base${mapped/CIM 2000 7777 node.exe 20261001000002000000/}"
   add_case unavailable-intermediate ERROR "$base$unavailable"$'\nPS 300 200 100 3000 ? 1 00:03 node\nPRE LIVE 300 200 84028167 3000\nPOST LIVE 300 200 84028167 3000\nCIM 3000 7777 node.exe 20261001000003000000'
-  add_case three-behind-unavailable ERROR "$base$unavailable"$'\nCIM 2000 7777 bash.exe 20261001000002000000\nCIM 3000 2000 node.exe 20261001000003000000\nCIM 3001 2000 node.exe 20261001000003000000\nCIM 3002 2000 node.exe 20261001000003000000'
+  add_case three-behind-unavailable '3000 3001 3002' "$base$unavailable"$'\nCIM 2000 7777 bash.exe 20261001000002000000\nCIM 3000 2000 node.exe 20261001000003000000\nCIM 3001 2000 node.exe 20261001000003000000\nCIM 3002 2000 node.exe 20261001000003000000'
   add_case runner-pre-missing ERROR "${base/PRE LIVE 100 1 84028164 1000/PRE MISSING 100}"
   add_case runner-post-change '' "${base/POST LIVE 100 1 84028164/POST LIVE 100 1 84028165}"
   add_case runner-start-diagnostic '' "$base" 1000 20261001000000000000 84028165
@@ -220,6 +220,36 @@ run_classifier_cases() (
   local foreign_exec="${exec_mapped/PS 200 100/PS 200 999}"
   foreign_exec="${foreign_exec//LIVE 200 100/LIVE 200 999}"
   add_case exec-remap-foreign '' "$base$foreign_exec"
+  # The late population can outlive its POST logical observations. Only an unchanged
+  # PS/PRE mapping and a bracketed native identity preserve the earlier ownership.
+  local missing_chain=$'\nPS 200 100 100 2000 ? 1 00:02 bash\nPS 300 200 100 3000 ? 1 00:03 node\nPRE LIVE 200 100 84028166 2000\nPOST MISSING 200\nPRE LIVE 300 200 84028167 3000\nPOST MISSING 300\nCIM 2000 7777 bash.exe 20261001000002000000\nCIM 3000 8888 node.exe 20261001000003000000'
+  local missing_early custody
+  missing_early="$(printf '%s\n' "$base$missing_chain" | awk '$1 == "CIM" { $1 = "CIM_PRE"; print }')"
+  custody=$'ROWS:RUNNER 1000 20261001000000000000 84028164\n2000 bash.exe 20261001000002000000\n3000 node.exe 20261001000003000000'
+  add_case late-missing-chain "$custody" "$base$missing_chain"
+  add_case missing-parent-live-child 3000 "$base${missing_chain/POST MISSING 300/POST LIVE 300 200 84028167 3000}"
+  add_case missing-leaf-late-only "$remap_error" "$base$missing_chain"$'\n'"${missing_early/CIM_PRE 3000 8888 node.exe 20261001000003000000/}"
+  add_case missing-parent-reused "$remap_error" "$base$missing_chain"$'\n'"${missing_early/20261001000002000000/20261001000002000001}"
+  add_case missing-parent-late-absent "$remap_error" "$base${missing_chain/CIM 2000 7777 bash.exe 20261001000002000000/}"$'\n'"$missing_early"
+  add_case missing-parent-early-absent "$remap_error" "$base$missing_chain"$'\n'"${missing_early/CIM_PRE 2000 7777 bash.exe 20261001000002000000/}"
+  add_case missing-parent-name-change "$remap_error" "$base$missing_chain"$'\n'"${missing_early/CIM_PRE 2000 7777 bash.exe/CIM_PRE 2000 7777 node.exe}"
+  add_case missing-parent-native-reparent "$remap_error" "$base$missing_chain"$'\n'"${missing_early/CIM_PRE 2000 7777/CIM_PRE 2000 7778}"
+  add_case missing-parent-dead "$remap_error" "$base${missing_chain/POST MISSING 200/POST DEAD 200}"
+  add_case missing-leaf-dead "$remap_error" "$base${missing_chain/POST MISSING 300/POST DEAD 300}"
+  add_case missing-parent-reparent "$remap_error" "$base${missing_chain/POST MISSING 200/POST LIVE 200 999 84028166 2000}"
+  add_case missing-exec-remap "$remap_error" "$base${exec_mapped/POST LIVE 200 100 84028166 2001/POST MISSING 200}"
+  add_case missing-ps-parent-mismatch "$remap_error" "$base${missing_chain/PS 300 200/PS 300 999}"
+  add_case missing-defunct-leaf "$remap_error" "$base${missing_chain/00:03 node/00:03 <defunct>}"
+  add_case missing-stale-birth 'ENUM_ERROR:ambiguous MSYS mapped process identity' "$base${missing_chain/20261001000003000000/20260930235959000000}"
+  local owner_missing="${base/PS 101 100/PS 101 150}"
+  owner_missing="${owner_missing//LIVE 101 100/LIVE 101 150}"
+  owner_missing="${owner_missing/CIM 1001 1000/CIM 1001 1500}"
+  add_case missing-owner-chain 'ENUM_ERROR:enumeration owner has no certified runner path' "$owner_missing"$'\nPS 150 100 100 1500 ? 1 00:01 bash\nPRE LIVE 150 100 84028165 1500\nPOST MISSING 150\nCIM 1500 1000 bash.exe 20261001000000500000'
+  add_case missing-runner 'ENUM_ERROR:runner MSYS continuity unavailable' "${base/POST LIVE 100 1 84028164 1000/POST MISSING 100}"
+  local shell_early="$(printf '%s\n' "$uncertain_shell" | awk '$1 == "CIM" { $1 = "CIM_PRE"; print }')"
+  shell_early="${shell_early/CIM_PRE 2000 7777 bash.exe 20261001000002000000/}"
+  add_case uncertain-shell-unbracketed "$remap_error" "$uncertain_shell"$'\nCIM 3000 2000 node.exe 20261001000003000000\n'"$shell_early"
+  add_case three-shell-unbracketed "$remap_error" "$uncertain_shell"$'\nCIM 3000 2000 node.exe 20261001000003000000\nCIM 3001 2000 node.exe 20261001000003000000\nCIM 3002 2000 node.exe 20261001000003000000\n'"$shell_early"
   local out
   for i in "${!names[@]}"; do
     RUNNER_WINPID="${pins[$i]}"; RUNNER_CREATED="${times[$i]}"
@@ -228,6 +258,7 @@ run_classifier_cases() (
     got="$(printf '%s\n' "$out" | awk '$1 != "RUNNER" && tolower($2) == "node.exe" { print $1 }' | sort -n | paste -sd ' ' -)"
     if { [ "${expected[$i]}" = ERROR ] && [ "$rc" -ne 0 ] && [[ "$out" == ENUM_ERROR:* ]] && [[ "$out" != *$'\n'* ]]; } \
       || { [[ "${expected[$i]}" == ENUM_ERROR:* ]] && [ "$rc" -ne 0 ] && [ "$out" = "${expected[$i]}" ]; } \
+      || { [[ "${expected[$i]}" == ROWS:* ]] && [ "$rc" -eq 0 ] && [ "$(printf '%s\n' "$out" | sort)" = "$(printf '%s\n' "${expected[$i]#ROWS:}" | sort)" ]; } \
       || { [ "${expected[$i]}" != ERROR ] && [ "$rc" -eq 0 ] && [ "$got" = "${expected[$i]}" ] && [[ "$out" == RUNNER\ * ]]; }; then
       echo "PASS: classifier ${names[$i]}"
     else
@@ -376,8 +407,10 @@ run_capture_cases() (
     printf 'SELF 9000\n9000 1001 powershell.exe 20261001000009000000\n1000 0 bash.exe 20261001000000000000\n1001 1000 bash.exe 20261001000001000000\n'
     if [ "$capture_case" = late-live-node ]; then
       printf '2000 2999 node.exe 20261001000002000000\n2999 1000 bash.exe 20261001000001500000\n'
-    elif [[ "$capture_case" != late-* ]] || [ "$cim_calls" -eq 1 ]; then
-      printf '2000 7777 bash.exe 20261001000002000000\n3000 2000 node.exe 20261001000003000000\n'
+    elif [[ "$capture_case" != late-* ]] || [ "$cim_calls" -eq 1 ] || [ "$capture_case" = late-missing-rooted ]; then
+      local shell_time=20261001000002000000
+      if [ "$capture_case" = continuity ] && [ "$cim_calls" -ge 2 ]; then shell_time=20261001000002000001; fi
+      printf '2000 7777 bash.exe %s\n3000 2000 node.exe 20261001000003000000\n' "$shell_time"
     fi
   }
   unreadable_msys_endpoint() { printf '%s MISSING %s\n' "$1" "$2"; }
@@ -389,9 +422,9 @@ run_capture_cases() (
     if [ "$pid" -eq 100 ]; then parent=1; start=84028164; win=1000; fi
     if [ "$pid" -eq 200 ]; then
       start=84028166; win=2000
-      if { [ "$capture_case" = late-exit ] || [ "$capture_case" = late-live-node ]; } \
+      if { [ "$capture_case" = late-exit ] || [ "$capture_case" = late-live-node ] || [ "$capture_case" = late-missing-rooted ]; } \
         && [ "$cim_calls" -ge 2 ]; then
-        echo 'synthetic endpoint exit after population' >&2; return 1
+        echo 'synthetic endpoint unavailable after population' >&2; return 1
       fi
       if [ "$capture_case" = continuity ] && [ "$phase" = POST ]; then
         echo 'synthetic original endpoint read failure' >&2; return 1
@@ -444,9 +477,9 @@ run_capture_cases() (
   # The first failed sample remains byte-for-byte available after a second failure.
   cmp -s "$RUNDIR/continuity.out" "$RUNDIR/enum-0.output" || return 1
   grep -q 'synthetic original endpoint read failure' "$RUNDIR/enum-0.endpoint.err" || return 1
-  # Deterministic population churn: a confirmed later disappearance is not a live
-  # provider omission. Neither case reads /proc or enumerates an actual process.
-  for capture_case in late-exit late-omission late-live-node; do
+  # Deterministic population churn and missing POST reads are distinct observations.
+  # These cases neither read /proc nor enumerate an actual process.
+  for capture_case in late-exit late-omission late-live-node late-missing-rooted; do
     ENUM_CONTEXT="synthetic $capture_case"; cim_calls=0
     : >"$RUNDIR/steps" || return 1
     out="$(owned_process_rows)"; rc=$?
@@ -463,6 +496,9 @@ run_capture_cases() (
       [ "$rc" -eq 1 ] && [ "$out" = "$expected" ] || return 1
     elif [ "$capture_case" = late-exit ]; then
       [ "$rc" -eq 0 ] && [ "$out" = "$expected" ] || return 1
+    elif [ "$capture_case" = late-missing-rooted ]; then
+      expected+=$'\n2000 bash.exe 20261001000002000000\n3000 node.exe 20261001000003000000'
+      [ "$rc" -eq 0 ] && [ "$(printf '%s\n' "$out" | sort)" = "$(printf '%s\n' "$expected" | sort)" ] || return 1
     else
       expected+=$'\n2000 node.exe 20261001000002000000\n2999 bash.exe 20261001000001500000'
       [ "$rc" -eq 0 ] && [ "$(printf '%s\n' "$out" | sort)" = "$(printf '%s\n' "$expected" | sort)" ] || return 1
