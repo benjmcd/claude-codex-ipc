@@ -4,6 +4,112 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- Preserved complete write-proof snapshots beyond the default subprocess output buffer,
+  keeping the full thread hash comparison and existing snapshot timeout. Other subprocess
+  captures retain their default limits; a hermetic large-population case covers both captures.
+- Bound Windows gate ownership to creation identities sampled around PRE mapping reads,
+  retaining start-time diagnostics without treating boot-relative ticks as identity.
+  A missing POST retains earlier ownership only with matching nondefunct PS/PRE mappings
+  and the same native identity in both snapshots. DEAD, remapped missing endpoints and
+  unbracketed mappings remain refused; runner and enumeration-owner paths stay strict.
+  Fail-closed ancestry and limits remain.
+  Settled exec remaps use only bracket-certified PRE identities; old PS aliases stay uncertain.
+  Cleanup acquires a retained handle before identity checks or termination. An exit
+  reported by .NET during acquisition is accepted without reopening the PID; an
+  access-denied kill is accepted only when that same handle confirms exit. Failure
+  diagnostics name the captured identity; hermetic cases retain live/unknown refusals.
+  Windows startup reuses the certified identity-pin snapshot for its diagnostic Node
+  count; all later samples remain fresh and every limit is unchanged.
+- Encoded standalone host-policy JSON as UTF-8 so redirected Windows output preserves
+  non-ASCII descriptor paths without depending on the console code page.
+- Omitted runtime protocol-registration candidate probes. Effective-handler authority remains
+  unqualified and real activation still refuses; hermetic mocks retain activation decision coverage.
+- Preserved an already evaluated WAIT pending result at budget expiry without a redundant
+  page assessment or reply read. Required page-authority checks still refuse on deadline;
+  deterministic tests distinguish that refusal from ordinary pending expiry.
+- Suppressed thread-bound pickup and WAIT on early foreground-policy/Node refusals and unsafe
+  target inspection. Envelopes and known-parent guidance remain available; eligible-target host
+  refusal and exact no-client recovery still print one safe pickup for the intended host.
+  Composed fixtures cover real multi-page observation and printed-WAIT pending correlation,
+  plus Windows DryRun helper refusals after an eligible no-client send sees changed inventory.
+- Passed inspector sessions-root scope alongside its designated page to observer and WAIT.
+  External pages require their containing sessions root; observer flags override environment
+  aliases and recursive supersession checks retain coverage across date directories.
+
+- Required backend role and GUI ancestry evidence before exempting resource or Electron
+  processes from the host inventory. Cyclic, broken, unreadable and orphan backend chains
+  refuse, including lone backend claims under a package root. Plain renamed package GUIs
+  remain supported; typed children of an unproven renamed GUI conservatively refuse.
+- Recognized bare and JSON-quoted native `cli`, `vscode`, `exec`, and `mcp` session sources and the
+  exact `agent_created_thread` root declaration. All existing parent, spawn-edge, agent-metadata,
+  rollout, and database contradictions still veto root admission. Internal sources, unknown JSON
+  strings/objects, other feature declarations, and encoded JSON null now refuse; SQL-null legacy
+  behavior is preserved. Locator hints and hermetic full/summary classification tests agree.
+- Made standalone host-policy and activation-helper calls honor the public `~/.claude/ipc`
+  descriptor default when no root flag or environment override is present. Empty environment roots
+  fall back consistently, explicit blank roots refuse, and the matrix now proves the early mock
+  guard structurally without ever invoking the real helper outside `-DryRun`.
+- Bound external native helper classification to an intended GUI's direct `app-server` runtime.
+  Complete leading `-c`/`--config key=value` pairs precede the exact role; descendant `app-server`,
+  `exec-server`, and `sandbox` helpers require the same runtime and proven readable, acyclic ancestry.
+  Unknown prefixes, executable mismatches, broken ancestry, and nested second GUIs still refuse.
+  Foreground mocks now require `-DryRun`; host-policy and
+  activation refusals use the stable `gui-unowned` category; target parents and bounded host
+  inventory projections remain visible without command lines. Contract and hermetic matrix tests
+  pin the refusal vocabulary, revalidation projection, and known negative shapes.
+- Kept continuation turns isolated from the dispatch they follow: a marker inside an already-open
+  turn retains that turn's boundary, and an immediate unmarked continuation cannot replace its
+  terminal or supply its missing body. Added privacy-bounded `turn-error` and `turn-model-state`
+  diagnostics without adding waiter tokens or changing reply precedence.
+- Added narrow local-path aliases for inspector, waiter, and observer inputs while retaining the
+  harvester's existing aliases. Explicit flags win over nonempty environment values, which win
+  over the unchanged defaults; the aliases do not establish page or owner authority.
+- Added thread-bound manual delivery with `--ipc <uuid> --deliver manual`. It writes the ordinary
+  correlated envelope, reuses the mandatory read-only target inspection, and prints pickup plus a
+  bound `WAIT:` command before exiting without host policy, PowerShell, pipe, observer, or opener
+  contact. Unsafe targets retain the envelope but receive a fixed refusal and no actionable pickup.
+  Hermetic tests cover safe preparation, every refusal class, conflicting live-only flags, unknown
+  rollout-page guidance, and sandboxed rollout fallback with live-effect tripwires.
+- Bound wrapper, observer, waiter, harvester, and reply-viewer fallback to the inspector's
+  database-designated physical rollout page. One shared SQLite-free assessor now detects a direct
+  paginated successor and fails closed with fixed diagnostics; consumers never auto-hop or stitch
+  records across pages. Hermetic multi-page fixtures cover both superseded and unproven lineage.
+- Made payload goal setup explicit. Ordinary file-drop and live-wrapper payloads no longer ask the
+  receiver to set `/goal`; `--request-goal` restores the former instruction for an operator who
+  deliberately wants it. The committed payload example and both carrier tests cover the default
+  and opt-in forms. Agent guidance now assigns Desktop host lifecycle to the operator, prohibits
+  agent-opened protocol links and direct client sends, and documents manual pickup for a
+  goal-driven thread without waiting for a closed-turn gap.
+- Added a shared, read-only Desktop host policy for the maintained wrapper. Every initial send and
+  retry now requires a complete inventory with exactly one intended GUI host and no other GUI host;
+  configuration resolves per field as wrapper flag, environment, transport-root descriptor, then
+  default (`autoload=off`, intended host `package`), while every present layer is still validated.
+  Alternate hosts can receive an eligible explicit send but are never package-protocol activated.
+  Package activation is separately opt-in and rechecked immediately before launch. The current
+  real-machine package-update and effective-handler readers intentionally remain unqualified, so
+  real activation refuses until positive authorities replace those unknowns; hermetic DryRun tests
+  cover the decision matrix without opening the protocol or changing application state.
+- Added one common read-only target inspection before the maintained wrapper's first live attempt.
+  It reuses that snapshot across guarded recovery and refuses missing, archived, non-root,
+  empty-model, malformed, contradictory, or ambiguous targets before host policy or pipe contact.
+  Explicit sub-agent and guardian-review evidence is non-root; known parents are reported. Legacy
+  null-source rows continue only as warned `legacy-root-assumed` targets when every available
+  child indicator is absent. The locator marks root/non-root/legacy candidates without becoming
+  send authority. Direct-client `--model` and `--effort` values now require nonempty trimmed
+  text and `--ack-thread-settings-change`, because either persists as stored-thread settings.
+  Hermetic inspector, wrapper, and client-argument tests cover the new refusal and acknowledgement
+  paths.
+- Hardened the hermetic test and release harness: top-level temporary roots now
+  fail closed before derived writes, wrapper fixtures resolve only their owned
+  Node/PowerShell/Codex stubs, inherited Git routing and trace variables are
+  removed before fixture and outer-gate Git operations, and localhost UNC
+  probes require an explicit test-only opt-in. The text gate's direct Git child
+  now uses the same sanitized environment as its other Git operations.
+- The public-safety structural traversal now prunes only the selected checkout's
+  `.git` metadata and nested `worktrees` directory. A checkout located beneath a
+  parent `worktrees` directory is therefore scanned, and the gate fails closed
+  unless it enumerates both the checkout root and its own scanner file.
+
 ## [0.1.14] — 2026-09-12
 
 v0.1.14 includes the rollout parser/correlation repair and the version-2 Codex Desktop transport repair. On 2026-09-12, one independently adjudicated wrapper dispatch from the merged primary checkout on Codex Desktop 26.908.4834.0 used autoload plus foreground switch, reached its named dispatch turn's terminal completion, and returned the dispatch-correlated reply on the first printed path. This is one recorded wrapper result on that build. A retained-file metadata census with cutoff 2026-09-12T04:36:57.599666Z covered 7,017 physical rollout files and 7,005 initial session IDs; 1,473 files declared a fork, of which 1,458 declared both an ordinal boundary and a first-record ordinal, 14 declared the ordinal without the boundary, and one declared neither. These are first-record shape counts, not producer-frequency estimates, validated lineage counts, or reader-certification results. Record-owner integrity remains enforced. The earlier dated fork findings remain historical evidence; this census does not establish why retained shapes differ. Normal installed /ipc acceptance, broad Desktop/build/model compatibility, repeatability, automatic exactly-once execution, and production-broker reliability are not established. The live capture did not preserve literal wrapper/waiter argv or exercise the requested 15-minute/two-hour polling cadence. A goal-continuation turn followed the completed dispatch turn and wrote no second reply. Propagation and normal installed-route acceptance remain separate steps.

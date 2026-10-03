@@ -8,9 +8,10 @@ Repo-level triage lives in `docs/TROUBLESHOOTING.md`; this is the bundled quick 
 |---|---|---|
 | `node:sqlite is unavailable` from inspector/locator/snapshot | Node.js without `node:sqlite` support (needs ≥ 22.5; older 22.x/23.x lines may require `--experimental-sqlite`) | Upgrade Node, or skip inspection — file-drop handoff works without it |
 | `--app/--open/--exec was removed in v0.1.8` | CLI-backed modes removed | Use the default file-drop handoff or `--ipc <conversationId>`; neither invokes the Codex CLI |
-| `--ipc` says `node not found` | Node.js missing | Install Node; or use the printed file-drop pickup line (already written) |
+| `--ipc` says `node not found` | Node.js missing | Install Node and rerun preparation/inspection. Live and manual modes retain the envelope without pickup because target eligibility was not established |
 | Inspector says `State DB was not found` | No Codex Desktop state on this machine (or non-default path) | Pass `--db`/`--sessions-root`, or accept that inspection is unavailable |
-| `autoload helper unavailable` warning | Not Windows, or `powershell.exe` missing | Expected off-Windows: open `codex://threads/<id>` manually, or use file-drop |
+| `autoload helper unavailable` | Not Windows, `powershell.exe` missing, or helper missing | Use file-drop; do not launch the protocol manually to bypass the shared policy |
+| Thread appears to belong to the wrong Desktop host | Symptoms from diagnostics or local state; not proof of ownership | Re-inspect the exact target. The operator closes the wrong host and pastes pickup into the intended host; opening it there only establishes a follower, and Retry creates another rollout page. Do not automate host lifecycle or resend from symptoms alone |
 
 ## Before first use
 
@@ -23,12 +24,26 @@ Backups, sync tools, snapshots, and filesystem recovery may retain deleted conte
 
 Results carry machine tokens: `RESULT: <top> -- reason=<token> -- confirmation=<token>`. Key
 reasons: `renderer-owned`/`auto-loaded`/`foreground-switched` (delivered),
-`codex-foreground-deferred` (use `--foreground-policy switch --ack-foreground-switch`, switch away
-from Codex, or paste the file-drop line), `foreground-unidentified` (foreground app not provably
+`intended-host-not-running`/`host-inventory-incomplete`/`other-desktop-host-running` (fresh send
+gate refusal), `autoload-disabled` (default; no package activation), `protocol-host-not-package`
+(alternate hosts are never package-activated), `autoload-policy-refused` (helper exit 6: fresh
+activation gate refused),
+`codex-foreground-deferred` (if every other activation gate later qualifies, use
+`--foreground-policy switch --ack-foreground-switch`; otherwise switch away or paste the file-drop
+line), `foreground-unidentified` (foreground app not provably
 Codex; never auto-switched), `foreground-restore-unproven` (restore-if-known is fail-closed),
 `autoload-incomplete` (poll window expired), `target-not-found`/`target-archived`/
-`target-inspection-ambiguous` (positive proof required before any deep link),
+`target-non-root`/`target-model-empty`/`target-inspection-ambiguous` (positive target proof
+required before any maintained-wrapper live attempt),
 `router-pipe-failure`, `foreground-switch-unacknowledged`, `invalid-foreground-policy`.
+The target snapshot is run once before the first live attempt and reused across auto-load recovery;
+the host inventory still runs fresh before each send or retry. `target-non-root` may print a known
+parent UUID. Legacy null-source rows continue only as warned `legacy-root-assumed` targets when
+every available child indicator is absent. The toolkit never repairs `target-model-empty`.
+
+Direct-client `--model` or `--effort` values persist as stored-thread settings, must be nonempty
+after trimming, and require `--ack-thread-settings-change` even for dry-run request generation.
+The maintained wrapper omits both values.
 On an accepted send the wrapper emits one bounded confirmation token: `rollout-hit` (the exact
 dispatch pickup was observed in a rollout user message — admission only, not completion),
 `rollout-pending` (authoritative candidate readable but no pickup observed within budget — do not
@@ -36,17 +51,33 @@ infer non-delivery), or `rollout-unavailable` (observation could not determine a
 triggers an automatic resend. Thread-tail inspection can inform diagnosis, but negative bounded
 evidence cannot prove non-admission or authorize a resend.
 
+For a goal-driven target, leave `--request-goal` off and use thread-bound manual delivery with
+`--ipc <uuid> --deliver manual`, then have the operator paste its pickup line into the intended thread. Do not
+wait for a closed-turn gap before the paste. `pending` is expected until the named dispatch has its
+own completion evidence; never call `turn/interrupt` or resend merely to manufacture an idle gap.
+
+Opening a thread in another Desktop host makes that host a follower; it does not prove the earlier
+host was wrong or transfer ownership evidence. If the wrong host must close, that is an operator
+action. Retry creates another rollout page, so inspect the intended target and selected physical
+page before issuing any new dispatch.
+
 1. `RESULT: gui-delivered` — the router accepted exactly one target follower; this is not task
    completion or reply-file success. Read the rollout confirmation and use the printed
    `codex_ipc_wait.mjs` command. If the task still does not appear and the target may have been
    mid-turn, re-inspect the authoritative rollout before taking any recovery action.
-2. `RESULT: gui-unowned` — no renderer owns the thread and auto-load did not complete. Open
-   `codex://threads/<conversationId>` in the app, then rerun `/ipc`; or paste the printed
-   file-drop pickup line.
+2. `RESULT: gui-unowned` — structured policy or router evidence established non-admission, so the
+   live path stopped with `confirmation=not-attempted`. This category does not by itself prove the
+   thread's current owner: policy can refuse before router contact, or an exact `no-client-found`
+   can be followed by a refused recovery. Pickup additionally requires an inspected eligible
+   target. Eligible-target host refusal and exact no-client recovery keep the printed pickup;
+   early switch-acknowledgement refusal does not. Use only a printed safe pickup in the intended
+   host. Do not open the protocol URI manually to bypass the gate or automatically rerun `/ipc`.
 3. `RESULT: failed-closed` with `confirmation=not-attempted` — structured evidence proves that no
-   follower was admitted (target missing/archived, invalid arguments, refused policy, or exact
-   `no-client-found` followed by a later refusal). A router request may have occurred, but no turn
-   was admitted, so the printed file-drop pickup line is safe to paste.
+   follower was admitted, but that alone does not establish target eligibility. Invalid foreground
+   policy, Node absence, and missing/archived/child/empty-model/ambiguous targets retain the
+   envelope without pickup or `WAIT:`. Correct preparation and inspect a safe root target again;
+   do not paste the refused envelope or manually retarget its pickup. A known parent is guidance
+   for a new inspection. Exact no-client recovery after eligible inspection retains safe pickup.
 4. `RESULT: failed-closed` with `confirmation=unknown` — router/pipe failure *after* a send was
    attempted (app closed, timeout, protocol drift). **The envelope is preserved but no pickup line
    is printed, and you must not paste one or resend** — the turn may already have been admitted,
@@ -60,6 +91,11 @@ evidence cannot prove non-admission or authorize a resend.
 node "${CLAUDE_SKILL_DIR}/scripts/codex_ipc_revalidate.mjs" --thread <conversationId>
 # add --allow-live-ipc-read --timeout-ms 1500 to re-prove router framing (initialize only)
 ```
+
+The revalidator parses the PowerShell helpers, validates the descriptor and current host inventory,
+and suppresses the optional initialize probe when `checks.hostPolicy` refuses. `desktopVersionHint`
+is diagnostic. Neither revalidation nor a separately authorized write proof qualifies or bypasses
+package-update/effective-handler evidence for activation.
 
 If drift is confirmed and a live re-proof is genuinely needed, use
 `codex_ipc_write_proof.mjs` dry-run first, then the live path only with explicit operator approval
@@ -78,6 +114,30 @@ bytes by default; if truncation is reported, rerun with a sufficient `--max-byte
 filedrop do not auto-recover. The inspector's stored `sandboxPolicy`/`approvalMode` are advisory only
 (`permissionProfileAdvisory`): they may differ from the effective turn and never predict
 reply-writability.
+
+### Sandboxed thread rollout fallback
+
+Use thread-bound manual preparation when the operator will paste the pickup and the target may be
+unable to write the reply path:
+
+```bash
+"${CLAUDE_SKILL_DIR}/scripts/handoff_to_codex.sh" --ipc <uuid> --deliver manual -- "<task>"
+```
+
+The command keeps the normal `${CODEX_IPC_ROOT:-~/.claude/ipc}/<sid>/<uuid>/` envelope and prints
+the exact reply path plus a `WAIT:` command. Run that printed command; when the reply is genuinely
+absent but the named dispatch has a certifiable final message, it returns `done` with
+`replySource=rollout-fallback`. Render the body without creating a reply file:
+
+```bash
+"${CLAUDE_SKILL_DIR}/scripts/codex_ipc_replies.sh" --session <sid> -c <uuid> --rollout-path <inspector-page>
+```
+
+The public transport default remains `~/.claude/ipc`. Pointing `CODEX_IPC_ROOT` at a directory the
+target can write is an operator configuration choice; the dispatcher, receiver, waiter, and viewer
+must use the same explicit root. Never hard-code a different default or infer writability from the
+stored sandbox row. If the inspector page was unavailable during preparation, the wrapper omits
+`--rollout-path` and prints fixed `ROLLOUT-PATH:` guidance instead of guessing.
 
 ## Completion / wait triage (`codex_ipc_wait`)
 
@@ -109,6 +169,30 @@ determination exits 0.
   never certifies it. Issue a NEW dispatch if the goal still matters.
 - `unavailable`: no authoritative rollout candidate or rollout/reply-scan ambiguity — re-inspect;
   never infer non-delivery or auto-resend.
+
+The waiter writes detail as `WAIT_DIAGNOSTIC` on stderr; the harvester writes
+`ROLLOUT_DIAGNOSTIC`, and the reply viewer forwards the two named facts below:
+
+- `turn-error`: the dispatch's own `task_complete` or `turn_aborted` ended with no assistant
+  output. A completion may expose only `error.message`, capped at 512 UTF-8 bytes; siblings are
+  discarded. Abort carries no excerpt. The fact adds no waiter token and changes no source.
+- `turn-model-state`: the latest matching `turn_context` before the terminal reported `empty`,
+  `null`, or `invalid`. Raw model values and unrelated turns are never exposed. Missing or valid
+  nonempty state emits no diagnostic.
+
+These are correlated diagnostic data, not proof of host ownership or permission to retry. Local
+path aliases are likewise narrow: inspector accepts `CODEX_IPC_SESSIONS_ROOT`; waiter accepts that
+plus `CODEX_IPC_ROLLOUT_PATH`; observer accepts both aliases and explicit `--sessions-root`;
+harvester retains both aliases. A corresponding flag wins over a nonempty environment value,
+then the existing default/discovery applies. `CODEX_HOME` is unsupported. Locator `--since-*`
+filters use current indexed timestamps; reset/revert can make an older thread match, so inspect the
+candidate before delivery.
+
+An explicit external page needs its complete containing sessions root for successor discovery
+across dates. Use observer/waiter `--sessions-root`, or `CODEX_IPC_SESSIONS_ROOT` for the
+inspector/harvester/viewer. The wrapper passes inspector `rollout.sessionsRoot` into its observer
+and printed WAIT. An omitted or mismatched scope refuses certification; a page's date directory
+is not a substitute for the complete root.
 
 ## Encoding and mojibake recovery
 

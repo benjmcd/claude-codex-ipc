@@ -5,10 +5,13 @@
 # transport file, then you paste one line into your live Codex session (Desktop app
 # or TUI) to pick it up.
 #   ./scripts/handoff_to_codex.sh "task for Codex"
+#   ./scripts/handoff_to_codex.sh --request-goal "task for a new Codex goal"
 #
-# Live mode:
+# Thread-bound modes:
 #   ./scripts/handoff_to_codex.sh --ipc <conversationId> "task"  # inject into a live Desktop GUI thread
 #   ./scripts/handoff_to_codex.sh --ipc <conversationId> \
+#       [--deliver live|manual] [--request-goal] \
+#       [--autoload off|codex-uri] [--intended-host package|ABSOLUTE-EXE] \
 #       [--foreground-policy defer|switch|restore-if-known] [--ack-foreground-switch] [--] "task"
 #
 # The file-drop default is the recommended path: it appears in the Codex Desktop GUI (your own session
@@ -47,6 +50,9 @@
 #   CODEX_REASONING_EFFORT=<level>     advisory note added to the handoff when set
 #   CODEX_IPC_FOREGROUND_POLICY=<p>    --ipc foreground policy default: defer|switch|restore-if-known
 #                                      (default defer; the --foreground-policy flag overrides)
+#   CODEX_IPC_AUTOLOAD=off|codex-uri   Desktop activation policy (default off; --autoload overrides)
+#   CODEX_IPC_INTENDED_HOST=<host>     package or an absolute alternate executable path
+#                                      (--intended-host overrides)
 #   CODEX_IPC_FOREGROUND_SWITCH_STANDING_APPROVAL=1
 #                                      standing acknowledgement for switch policy (printed on
 #                                      every send when active; prefer per-invocation
@@ -70,14 +76,25 @@ case "${1:-}" in
             '' \
             'USAGE:' \
             '  handoff_to_codex.sh "<task>"                       file-drop (writes an envelope; prints a pickup line)' \
+            '  handoff_to_codex.sh --request-goal [--] "<task>"  file-drop with an explicit goal-setup request' \
             '  handoff_to_codex.sh --ipc <conversationId> "<task>" live delivery into an existing Desktop thread' \
-            '  handoff_to_codex.sh --ipc <conversationId> --foreground-policy switch --ack-foreground-switch -- "<task>"' \
+            '  handoff_to_codex.sh --ipc <conversationId> --deliver manual [--request-goal] -- "<task>"' \
+            '  handoff_to_codex.sh --ipc <conversationId> [--deliver live] [--request-goal] [--autoload off|codex-uri] [--intended-host package|ABSOLUTE-EXE] [--foreground-policy defer|switch|restore-if-known] [--ack-foreground-switch] -- "<task>"' \
             '  handoff_to_codex.sh -h | --help | -v | --version' \
             '' \
             'NOTES:' \
-            '  Exactly one conversationId per --ipc send. The envelope is always written first;' \
-            '  the pickup line is printed only when non-admission is structurally proven. After an ambiguous' \
+            '  Exactly one conversationId per --ipc invocation. The envelope is always written first.' \
+            '  Manual mode prints pickup + WAIT without a send. Live failure prints pickup only when' \
+            '  non-admission is structurally proven. After an ambiguous' \
             '  post-attempt result (confirmation=unknown) pickup is suppressed — do not resend.' \
+            '  Desktop activation defaults to off. Host settings resolve per field as flag > environment' \
+            '  > ${CODEX_IPC_ROOT}/host-policy.json > defaults (autoload=off, intended-host=package).' \
+            '  Malformed settings at any present layer fail closed. Alternate hosts may receive sends but' \
+            '  are never activated through codex://. Every send/retry rechecks the running host inventory.' \
+            '  --request-goal adds a goal-setup request to the payload. It is off by default and does not' \
+            '  inspect, replace, or otherwise change an existing goal.' \
+            '  --deliver manual writes the same thread-bound envelope, inspects the target, and prints' \
+            '  pickup + WAIT instructions without contacting the Desktop pipe, host helper, or opener.' \
             '  Transport root: ${CODEX_IPC_ROOT:-~/.claude/ipc}. Envelopes are kept by default.' \
             '  --app/--open/--exec were removed in v0.1.8 (No Codex CLI).' \
             '' \
@@ -267,6 +284,9 @@ fi
 MODE="filedrop"
 IPC_CID=""
 TASK=""
+REQUEST_GOAL=0
+DELIVERY="live"
+DELIVERY_FLAG_PRESENT=0
 
 # --- Foreground policy for live Desktop IPC (--ipc only; see SKILL.md) ---
 # defer (default): never navigate the visible Codex app; switch: navigate it to the
@@ -276,6 +296,10 @@ FOREGROUND_POLICY_SOURCE="${CODEX_IPC_FOREGROUND_POLICY:+env}"
 FOREGROUND_POLICY_SOURCE="${FOREGROUND_POLICY_SOURCE:-default}"
 ACK_FOREGROUND_SWITCH=0
 ACK_SOURCE="none"
+HOST_AUTOLOAD_FLAG_PRESENT=0
+HOST_AUTOLOAD_FLAG=""
+HOST_INTENDED_HOST_FLAG_PRESENT=0
+HOST_INTENDED_HOST_FLAG=""
 # Standing approval is deliberately loud: it is printed on every --ipc send below.
 if [[ "${CODEX_IPC_FOREGROUND_SWITCH_STANDING_APPROVAL:-0}" == "1" ]]; then
     ACK_FOREGROUND_SWITCH=1
@@ -288,8 +312,8 @@ TASK_AFTER_DASHDASH=0
 guard_task() {
     if [[ "$TASK" == --* ]]; then
         echo "ERROR: the task looks like a flag ('$TASK') -- the real task was likely dropped." >&2
-        echo "Note: --allow-any-thread is a CLIENT flag set internally by this wrapper; do NOT pass" >&2
-        echo "it (or any flag) as a wrapper argument. Usage: $0 --ipc <conversationId> \"<task>\"" >&2
+        echo "Note: --allow-any-thread is a CLIENT flag set internally by this wrapper; do NOT pass it." >&2
+        echo "Supported wrapper flags must appear in the positions shown by --help." >&2
         exit 1
     fi
 }
@@ -306,8 +330,10 @@ case "${1:-}" in
         fi
         IPC_CID="${1,,}"; shift
         # Foreground-policy argument loop. Canonical grammar:
-        #   --ipc <uuid> [--foreground-policy defer|switch|restore-if-known]
-        #                [--ack-foreground-switch] [--] "<task>"
+        #   --ipc <uuid> [--deliver live|manual] [--request-goal]
+        #                [--foreground-policy defer|switch|restore-if-known]
+        #                [--ack-foreground-switch] [--autoload off|codex-uri]
+        #                [--intended-host package|ABSOLUTE-EXE] [--] "<task>"
         # Legacy `--ipc <uuid> "<task>"` is preserved; the historical client-only
         # `--allow-any-thread` is absorbed as before; a bare `--` ends flag parsing so a
         # task may legitimately begin with a dash. Unknown flags fail closed.
@@ -316,6 +342,24 @@ case "${1:-}" in
                 --allow-any-thread)
                     # Client flag set internally by this wrapper; absorbed, never forwarded.
                     shift;;
+                --request-goal)
+                    REQUEST_GOAL=1; shift;;
+                --deliver)
+                    if [[ $# -lt 2 ]]; then
+                        echo "ERROR: --deliver requires a value (live|manual)." >&2
+                        exit 1
+                    fi
+                    if [[ "$DELIVERY_FLAG_PRESENT" -eq 1 ]]; then
+                        echo "ERROR: --deliver may be supplied only once." >&2
+                        exit 1
+                    fi
+                    case "$2" in
+                        live|manual) DELIVERY="$2" ;;
+                        *)
+                            echo "ERROR: --deliver requires live or manual (got '$2')." >&2
+                            exit 1;;
+                    esac
+                    DELIVERY_FLAG_PRESENT=1; shift 2;;
                 --foreground-policy)
                     if [[ -z "${2:-}" ]]; then
                         echo "ERROR: --foreground-policy requires a value (defer|switch|restore-if-known)." >&2
@@ -324,11 +368,23 @@ case "${1:-}" in
                     FOREGROUND_POLICY="$2"; FOREGROUND_POLICY_SOURCE="flag"; shift 2;;
                 --ack-foreground-switch)
                     ACK_FOREGROUND_SWITCH=1; ACK_SOURCE="flag"; shift;;
+                --autoload)
+                    if [[ $# -lt 2 ]]; then
+                        echo "ERROR: --autoload requires a value (off|codex-uri)." >&2
+                        exit 1
+                    fi
+                    HOST_AUTOLOAD_FLAG_PRESENT=1; HOST_AUTOLOAD_FLAG="$2"; shift 2;;
+                --intended-host)
+                    if [[ $# -lt 2 ]]; then
+                        echo "ERROR: --intended-host requires package or an absolute executable path." >&2
+                        exit 1
+                    fi
+                    HOST_INTENDED_HOST_FLAG_PRESENT=1; HOST_INTENDED_HOST_FLAG="$2"; shift 2;;
                 --)
                     TASK_AFTER_DASHDASH=1; shift; break;;
                 --*)
                     echo "ERROR: unknown --ipc flag '$1'." >&2
-                    echo "Usage: $0 --ipc <conversationId> [--foreground-policy defer|switch|restore-if-known] [--ack-foreground-switch] [--] \"<task>\"" >&2
+                    echo "Usage: $0 --ipc <conversationId> [--deliver live|manual] [--request-goal] [--autoload off|codex-uri] [--intended-host package|ABSOLUTE-EXE] [--foreground-policy defer|switch|restore-if-known] [--ack-foreground-switch] [--] \"<task>\"" >&2
                     exit 1;;
                 *)
                     break;;
@@ -341,6 +397,29 @@ case "${1:-}" in
         TASK="${1}"; shift
         # After an explicit `--`, a dash-leading task is intentional; otherwise a
         # flag-shaped task means the real task was dropped (fail closed).
+        [[ "$TASK_AFTER_DASHDASH" -eq 1 ]] || guard_task
+        if [[ $# -gt 0 ]]; then
+            echo "ERROR: unexpected trailing argument(s) after the task: $*" >&2
+            echo "(The task must be the final argument; quote it as one string.)" >&2
+            exit 1
+        fi
+        if [[ "$DELIVERY" == "manual" ]] &&
+           { [[ "$FOREGROUND_POLICY_SOURCE" == "flag" ]] || [[ "$ACK_SOURCE" == "flag" ]] ||
+             [[ "$HOST_AUTOLOAD_FLAG_PRESENT" -eq 1 ]] || [[ "$HOST_INTENDED_HOST_FLAG_PRESENT" -eq 1 ]]; }; then
+            echo "ERROR: --deliver manual cannot be combined with live-only host or foreground flags." >&2
+            exit 1
+        fi
+        ;;
+    --request-goal)
+        REQUEST_GOAL=1; shift
+        if [[ "${1:-}" == "--" ]]; then
+            TASK_AFTER_DASHDASH=1; shift
+        fi
+        if [[ -z "${1:-}" ]]; then
+            echo "ERROR: --request-goal requires a task: $0 --request-goal [--] \"task\"" >&2
+            exit 1
+        fi
+        TASK="${1}"; shift
         [[ "$TASK_AFTER_DASHDASH" -eq 1 ]] || guard_task
         if [[ $# -gt 0 ]]; then
             echo "ERROR: unexpected trailing argument(s) after the task: $*" >&2
@@ -489,6 +568,10 @@ EFFORT_NOTE=""
 [[ -n "${CODEX_REASONING_EFFORT:-}" ]] && EFFORT_NOTE="
 ## Suggested reasoning effort
 ${CODEX_REASONING_EFFORT}"
+GOAL_REQUEST_CLAUSE=""
+if [[ "$REQUEST_GOAL" -eq 1 ]]; then
+    GOAL_REQUEST_CLAUSE=", set your \`/goal\` to a concise summary of it"
+fi
 
 # --- Resolve Claude's own session transcript (OPT-IN orientation aid) ---
 # Transcript paths expose the full local session context, so they are included only
@@ -519,7 +602,7 @@ Generated: ${STAMP} on branch \`${BRANCH}\` (dispatch ${DISPATCH_ID})
 
 ## How to use this file
 You (Codex) have been handed follow-up work from a Claude Code session.
-Read the **Task** below, set your \`/goal\` to a concise summary of it, then complete it
+Read the **Task** below${GOAL_REQUEST_CLAUSE}, then complete it
 in the associated workspace at:
   ${WORKDIR}
 When finished, write your reply/result to this per-dispatch reply file (create it):
@@ -622,28 +705,28 @@ if [[ "$MODE" == "filedrop" ]]; then
     exit 0
 fi
 
-# --- IPC INJECT (opt-in; delivers straight into a live Desktop GUI thread) ---
-# Writes the file-drop first (so the fallback is always ready), then injects the
-# pickup line into the live thread via the proven owner-gated router route.
-# If no Desktop renderer owns the thread (router error "no-client-found"), the
-# thread is auto-loaded via the app's own codex://threads/<id> deep link with
-# automatic focus snapback (codex_ipc_autoload.ps1; foreground-aware: defers
-# while the operator is actively in the Codex app), then the send is retried.
+# --- Thread-bound IPC preparation (manual or live) ---
+# Writes the envelope first, proves one safe target snapshot, then either prints
+# operator pickup/recovery instructions or enters the live owner-gated route.
+# Before every pipe send, the shared host policy must identify exactly the configured
+# Desktop host. If no renderer owns the thread, optional package activation is handled
+# only by codex_ipc_autoload.ps1 after its own fresh gate; the public default is off.
 # Model/reasoning are renderer-controlled: this CANNOT change the thread's model
-# or reasoning effort, nor any other session's. Falls back to the file-drop pickup
-# line ONLY when the router contract proves that no follower was admitted; after an ambiguous
+# or reasoning effort, nor any other session's. Prints a thread-bound pickup line
+# ONLY for an inspected eligible target with proven non-admission; after an ambiguous
 # post-attempt result the envelope is preserved but pickup is suppressed (no resend).
 # Result taxonomy: gui-delivered | gui-unowned | failed-closed.
 if [[ "$MODE" == "ipc" ]]; then
     printf '%s\n' "$PAYLOAD" | atomic_write "$OUTBOUND_MSYS"
     echo "[ Handoff written to ${OUTBOUND} ]"
     SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-    # Safe fallback: ONLY when no follower admission was accepted
-    # (confirmation=not-attempted). An exact no-client response may still mean a router request
+    # Safe fallback requires an inspected eligible target AND proven non-admission.
+    # confirmation=not-attempted alone is insufficient. An exact no-client response may mean a router request
     # occurred; the token describes non-admission, not absence of every wire attempt.
     fallback() {
         echo "" >&2
-        echo "FALLBACK -- file-drop is ready. In your Codex session, paste:" >&2
+        echo "FALLBACK -- file-drop is ready." >&2
+        echo "Open the thread in your intended Desktop host's window, then paste:" >&2
         echo "    read \"${OUTBOUND}\" and proceed" >&2
     }
     # Ambiguous terminal: a send was attempted and its outcome is UNKNOWN. The client
@@ -663,38 +746,370 @@ if [[ "$MODE" == "ipc" ]]; then
         echo "Treat it as potentially admitted until exact full-history evidence establishes an outcome." >&2
         echo "If uncertainty remains, require an explicit operator decision before issuing equivalent work." >&2
     }
-    # Active policy and acknowledgement source are printed on EVERY --ipc send so a
-    # standing approval can never act silently.
-    echo "POLICY: foreground=${FOREGROUND_POLICY} (source: ${FOREGROUND_POLICY_SOURCE}) ack=${ACK_SOURCE}"
-    # Semantic policy validation AFTER the envelope write (file-drop-first invariant):
-    # a valid UUID/task invocation always leaves a usable fallback behind.
-    case "$FOREGROUND_POLICY" in
-        defer|switch|restore-if-known) : ;;
-        *)
-            echo "RESULT: failed-closed -- reason=invalid-foreground-policy -- confirmation=not-attempted" >&2
-            echo "('${FOREGROUND_POLICY}' is not one of: defer, switch, restore-if-known.)" >&2
-            fallback
-            exit 1;;
-    esac
-    if [[ "$FOREGROUND_POLICY" == "switch" && "$ACK_FOREGROUND_SWITCH" -ne 1 ]]; then
-        echo "RESULT: failed-closed -- reason=foreground-switch-unacknowledged -- confirmation=not-attempted" >&2
-        echo "(--foreground-policy switch requires --ack-foreground-switch or" >&2
-        echo " CODEX_IPC_FOREGROUND_SWITCH_STANDING_APPROVAL=1; it visibly navigates the Codex app.)" >&2
-        fallback
-        exit 1
+    if [[ "$DELIVERY" == "live" ]]; then
+        # Active policy and acknowledgement source are printed on EVERY live send so a
+        # standing approval can never act silently.
+        echo "POLICY: foreground=${FOREGROUND_POLICY} (source: ${FOREGROUND_POLICY_SOURCE}) ack=${ACK_SOURCE}"
+        # Semantic policy validation AFTER the envelope write (file-drop-first invariant):
+        # a valid UUID/task invocation retains its envelope; target eligibility is not yet known.
+        case "$FOREGROUND_POLICY" in
+            defer|switch|restore-if-known) : ;;
+            *)
+                echo "RESULT: failed-closed -- reason=invalid-foreground-policy -- confirmation=not-attempted" >&2
+                echo "('${FOREGROUND_POLICY}' is not one of: defer, switch, restore-if-known.)" >&2
+                echo "Envelope retained; correct the preparation and rerun inspection against a safe root target." >&2
+                exit 1;;
+        esac
+        if [[ "$FOREGROUND_POLICY" == "switch" && "$ACK_FOREGROUND_SWITCH" -ne 1 ]]; then
+            echo "RESULT: gui-unowned -- reason=foreground-switch-unacknowledged -- confirmation=not-attempted" >&2
+            echo "(--foreground-policy switch requires --ack-foreground-switch or" >&2
+            echo " CODEX_IPC_FOREGROUND_SWITCH_STANDING_APPROVAL=1; it visibly navigates the Codex app.)" >&2
+            echo "Envelope retained; correct the preparation and rerun inspection against a safe root target." >&2
+            exit 1
+        fi
     fi
     if ! command -v node &>/dev/null; then
-        echo "ERROR: node not found; --ipc needs Node." >&2
+        if [[ "$DELIVERY" == "manual" ]]; then
+            echo "ERROR: manual delivery refused -- reason=node-unavailable" >&2
+            exit 1
+        fi
+        echo "ERROR: node not found; live --ipc needs Node." >&2
         echo "RESULT: failed-closed -- reason=node-unavailable -- confirmation=not-attempted" >&2
-        fallback
+        echo "Envelope retained; correct the preparation and rerun inspection against a safe root target." >&2
         exit 1
     fi
+    classify_inspected_target() {
+        printf '%s' "$INSPECT_OUTPUT" | node --input-type=module -e '
+import fs from "node:fs";
+let value;
+try {
+  value = JSON.parse(fs.readFileSync(0, "utf8"));
+} catch {
+  process.stdout.write("ambiguous\t-\t-\t-");
+  process.exit(0);
+}
+const target = String(process.argv[1] || "").toLowerCase();
+const db = value?.dbThread;
+const thread = value?.dbThread?.thread;
+const classification = value?.targetClassification;
+const dbTrusted = db?.exists === true && db?.readOnlyOpenOk === true;
+const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const classValid =
+  classification &&
+  ["root", "non-root", "legacy-root-assumed", "ambiguous"].includes(classification.kind) &&
+  (classification.parentThreadId === null ||
+    (typeof classification.parentThreadId === "string" && uuid.test(classification.parentThreadId))) &&
+  Array.isArray(classification.reasons) &&
+  classification.reasons.every((item) => typeof item === "string") &&
+  Array.isArray(classification.warnings) &&
+  classification.warnings.every((item) => typeof item === "string");
+let state = "ambiguous";
+if (dbTrusted && thread?.exists === false) {
+  state = "missing";
+} else if (
+  value?.ok !== true ||
+  !dbTrusted ||
+  thread?.exists !== true ||
+  typeof thread.id !== "string" ||
+  thread.id.toLowerCase() !== target
+) {
+  state = "ambiguous";
+} else if (thread.archived === 1) {
+  state = "archived";
+} else if (thread.archived !== 0) {
+  state = "ambiguous";
+} else if (!classValid || classification.kind === "ambiguous") {
+  state = "ambiguous";
+} else if (classification.kind === "non-root") {
+  state = "non-root";
+} else if (typeof thread.model !== "string" || thread.model.trim() === "") {
+  state = "model-empty";
+} else if (classification.kind === "legacy-root-assumed") {
+  state = "legacy-root-assumed";
+} else {
+  state = "active";
+}
+const parent = classValid && classification.parentThreadId
+  ? classification.parentThreadId.toLowerCase()
+  : "-";
+const legacy = classValid && classification.warnings.includes("legacy-null-source")
+  ? "legacy-null-source"
+  : "-";
+const selection = value?.rollout?.selection;
+const rawRolloutPath = thread?.rolloutPath;
+function portablePath(value) {
+  if (typeof value !== "string" || value.length === 0 || /[\u0000\r\n\t]/u.test(value)) {
+    return "-";
+  }
+  let result = value;
+  if (/^\\\\\?\\UNC\\/iu.test(result)) {
+    result = `//${result.slice(8)}`;
+  } else if (/^\\\\\?\\/u.test(result)) {
+    result = result.slice(4);
+  }
+  return result.replaceAll("\\\\", "/");
+}
+let rolloutPath = "-";
+if (
+  typeof rawRolloutPath === "string" &&
+  rawRolloutPath.length > 0 &&
+  !/[\u0000\r\n\t]/u.test(rawRolloutPath) &&
+  selection?.status === "found" &&
+  selection?.authority === "db.rollout_path" &&
+  selection?.path === rawRolloutPath &&
+  value?.rollout?.primary?.parsedOk === true
+) {
+  rolloutPath = portablePath(rawRolloutPath);
+}
+const sessionsRoot = portablePath(value?.rollout?.sessionsRoot);
+process.stdout.write([state, parent, legacy, rolloutPath, sessionsRoot].join("\t"));
+' "$IPC_CID"
+    }
+    # Safe manual preparation and accepted live sends share one correlation-complete WAIT line.
+    print_wait_hint() {
+        local -a wait_args=(node "${SCRIPT_DIR}/codex_ipc_wait.mjs"
+            --thread "$IPC_CID" --dispatch "$DISPATCH_ID" --reply-path "$INBOUND")
+        [[ -z "$INSPECT_ROLLOUT_PATH" ]] || wait_args+=(--rollout-path "$INSPECT_ROLLOUT_PATH")
+        [[ -z "$INSPECT_SESSIONS_ROOT" ]] || wait_args+=(--sessions-root "$INSPECT_SESSIONS_ROOT")
+        wait_args+=(--accept-rollout-fallback --budget-ms 1800000 --interval-ms 1000 --status-exit-codes)
+        printf 'WAIT:'
+        printf ' %q' "${wait_args[@]}"
+        printf '\n'
+    }
+    # One read-only target snapshot gates both manual preparation and every possible send.
+    # It is reused across live auto-load recovery. Inspector diagnostics are suppressed because
+    # they may carry local paths.
+    INSPECT_OUTPUT=""
+    INSPECT_STATUS=126
+    INSPECT_STDERR=""
+    if INSPECT_STDERR=$(mktemp); then
+        if INSPECT_OUTPUT=$(node "${SCRIPT_DIR}/codex_ipc_session_inspect.mjs" \
+            --thread "${IPC_CID}" --tail-events 1 --summary 2>"$INSPECT_STDERR"); then
+            INSPECT_STATUS=0
+        else
+            INSPECT_STATUS=$?
+        fi
+        if [[ -s "$INSPECT_STDERR" ]]; then
+            echo "TARGET-WARNING: inspector diagnostics were suppressed." >&2
+        fi
+        rm -f "$INSPECT_STDERR"
+    fi
+    INSPECT_FIELDS=$(classify_inspected_target)
+    IFS=$'\t' read -r INSPECT_CLASS INSPECT_PARENT INSPECT_WARNING INSPECT_ROLLOUT_PATH INSPECT_SESSIONS_ROOT <<< "$INSPECT_FIELDS"
+    [[ "$INSPECT_ROLLOUT_PATH" == "-" ]] && INSPECT_ROLLOUT_PATH=""
+    [[ "$INSPECT_SESSIONS_ROOT" == "-" ]] && INSPECT_SESSIONS_ROOT=""
+    case "${INSPECT_STATUS}:${INSPECT_CLASS}" in
+        0:active|0:legacy-root-assumed|0:archived|0:non-root|0:model-empty|1:missing) : ;;
+        *) INSPECT_CLASS=ambiguous ;;
+    esac
+    TARGET_REFUSAL_REASON=""
+    TARGET_REFUSAL_DETAIL=""
+    case "$INSPECT_CLASS" in
+        missing)
+            TARGET_REFUSAL_REASON="target-not-found"
+            TARGET_REFUSAL_DETAIL="(Target thread was not found in trusted local Codex state; no send was attempted.)"
+            ;;
+        archived)
+            TARGET_REFUSAL_REASON="target-archived"
+            TARGET_REFUSAL_DETAIL="(Target thread is archived; unarchive it in the intended app first.)"
+            ;;
+        non-root)
+            TARGET_REFUSAL_REASON="target-non-root"
+            TARGET_REFUSAL_DETAIL="(Direct delivery to sub-agent and guardian-review threads is refused.)"
+            ;;
+        model-empty)
+            TARGET_REFUSAL_REASON="target-model-empty"
+            TARGET_REFUSAL_DETAIL="(The stored thread model is null, empty, or whitespace; repair it in the app.)"
+            ;;
+        legacy-root-assumed)
+            echo "TARGET-WARNING: legacy thread has no source classification; root status was assumed only because all available child indicators were absent." >&2
+            ;;
+        active) : ;;
+        *)
+            TARGET_REFUSAL_REASON="target-inspection-ambiguous"
+            TARGET_REFUSAL_DETAIL="(Inspector output did not prove one exact active root thread with a stored model.)"
+            ;;
+    esac
+    if [[ -n "$TARGET_REFUSAL_REASON" ]]; then
+        if [[ "$INSPECT_CLASS" == "non-root" && "$INSPECT_PARENT" != "-" ]]; then
+            echo "Target parent thread: ${INSPECT_PARENT}" >&2
+        fi
+        if [[ "$DELIVERY" == "manual" ]]; then
+            echo "ERROR: manual delivery refused -- reason=${TARGET_REFUSAL_REASON}" >&2
+            exit 1
+        fi
+        echo "RESULT: failed-closed -- reason=${TARGET_REFUSAL_REASON} -- confirmation=not-attempted" >&2
+        echo "$TARGET_REFUSAL_DETAIL" >&2
+        echo "Envelope retained; correct the preparation and rerun inspection against a safe root target." >&2
+        exit 1
+    fi
+    if [[ "$DELIVERY" == "manual" ]]; then
+        echo "MANUAL: thread-bound envelope is ready for operator pickup."
+        echo "Open the thread in your intended Desktop host's window, then paste:"
+        echo "    read \"${OUTBOUND}\" and proceed"
+        echo "Codex's reply will be written to ${INBOUND} (Claude Code reads it)."
+        if [[ -z "$INSPECT_ROLLOUT_PATH" ]]; then
+            echo "ROLLOUT-PATH: Supply the inspector's database-designated page with --rollout-path <path>." >&2
+        fi
+        print_wait_hint
+        exit 0
+    fi
     IPC_OUTPUT=""
+    HOST_POLICY_REFUSAL=0
+    HOST_POLICY_REFUSAL_REASON=""
+    HOST_POLICY_REASON_LIST=""
+    HOST_AUTOLOAD_EFFECTIVE=""
+    HOST_AUTOLOAD_SOURCE=""
+    HOST_INTENDED_KIND_EFFECTIVE=""
+    HOST_INTENDED_SOURCE=""
+    host_policy_send() {
+        HOST_POLICY_REFUSAL=0
+        HOST_POLICY_REFUSAL_REASON=""
+        HOST_POLICY_REASON_LIST=""
+        HOST_AUTOLOAD_EFFECTIVE=""
+        HOST_AUTOLOAD_SOURCE=""
+        HOST_INTENDED_KIND_EFFECTIVE=""
+        HOST_INTENDED_SOURCE=""
+
+        local policy_script="${SCRIPT_DIR}/codex_ipc_host_policy.ps1"
+        local policy_win ipc_root_win policy_stderr policy_status policy_fields structured_reason
+        local -a policy_args
+        if [[ ! -f "$policy_script" ]] || ! command -v powershell.exe &>/dev/null; then
+            HOST_POLICY_REFUSAL=1
+            HOST_POLICY_REFUSAL_REASON="host-policy-unavailable"
+            HOST_POLICY_REASON_LIST="shared policy script or powershell.exe unavailable"
+            return 1
+        fi
+
+        policy_win=$(to_win "$policy_script")
+        ipc_root_win=$(to_win "$IPC_ROOT")
+        policy_args=(-Purpose send -IpcRoot "$ipc_root_win")
+        [[ "$HOST_AUTOLOAD_FLAG_PRESENT" -eq 1 ]] && policy_args+=(-Autoload "$HOST_AUTOLOAD_FLAG")
+        [[ "$HOST_INTENDED_HOST_FLAG_PRESENT" -eq 1 ]] && policy_args+=(-IntendedHost "$HOST_INTENDED_HOST_FLAG")
+
+        policy_stderr=$(mktemp) || {
+            HOST_POLICY_REFUSAL=1
+            HOST_POLICY_REFUSAL_REASON="host-policy-unavailable"
+            HOST_POLICY_REASON_LIST="could not allocate policy diagnostics capture"
+            return 1
+        }
+        policy_status=0
+        if HOST_POLICY_OUTPUT=$(powershell.exe -NoProfile -ExecutionPolicy Bypass \
+            -File "$policy_win" "${policy_args[@]}" 2>"$policy_stderr"); then
+            policy_status=0
+        else
+            policy_status=$?
+        fi
+        if [[ -s "$policy_stderr" ]]; then
+            echo "HOST-WARNING: host policy diagnostics were suppressed." >&2
+        fi
+        rm -f "$policy_stderr"
+
+        if [[ "$policy_status" -ne 0 ]]; then
+            structured_reason=$(printf '%s' "$HOST_POLICY_OUTPUT" | node --input-type=module -e '
+import fs from "node:fs";
+try {
+  const value = JSON.parse(fs.readFileSync(0, "utf8"));
+  if (value?.schemaVersion === 1 && value?.ok === false &&
+      value?.error?.reason === "host-policy-invalid") {
+    process.stdout.write("host-policy-invalid");
+    process.exit(0);
+  }
+} catch {}
+process.exit(1);
+' 2>/dev/null) || structured_reason=""
+            HOST_POLICY_REFUSAL=1
+            if [[ "$structured_reason" == "host-policy-invalid" ]]; then
+                HOST_POLICY_REFUSAL_REASON="host-policy-invalid"
+                HOST_POLICY_REASON_LIST="configuration or inventory input was rejected"
+            else
+                HOST_POLICY_REFUSAL_REASON="host-policy-unavailable"
+                HOST_POLICY_REASON_LIST="policy process exited ${policy_status} without an authoritative refusal document"
+            fi
+            return 1
+        fi
+
+        policy_fields=$(printf '%s' "$HOST_POLICY_OUTPUT" | node --input-type=module -e '
+import fs from "node:fs";
+let value;
+try { value = JSON.parse(fs.readFileSync(0, "utf8")); } catch { process.exit(1); }
+const sources = new Set(["default", "descriptor", "environment", "flag"]);
+const reasons = value?.sendReasons;
+const inventory = value?.inventory;
+const guiHosts = inventory?.guiHosts;
+const autoload = value?.configuration?.autoload;
+const intended = value?.configuration?.intendedHost;
+if (value?.schemaVersion !== 1 || value?.ok !== true || value?.purpose !== "send" ||
+    value?.configuration?.valid !== true ||
+    !["off", "codex-uri"].includes(autoload?.value) || !sources.has(autoload?.source) ||
+    !["package", "alternate"].includes(intended?.kind) || !sources.has(intended?.source) ||
+    typeof inventory?.complete !== "boolean" || !Array.isArray(guiHosts) ||
+    !Array.isArray(inventory?.appServers) || typeof value?.sendEligible !== "boolean" ||
+    !Array.isArray(reasons) || !reasons.every((item) =>
+      ["host-inventory-incomplete", "intended-host-not-running", "other-desktop-host-running"].includes(item))) {
+  process.exit(1);
+}
+const intendedCount = guiHosts.filter((item) => item?.matchesIntended === true).length;
+const otherCount = guiHosts.filter((item) => item?.matchesIntended !== true).length;
+if (value.sendEligible === true &&
+    (inventory.complete !== true || intendedCount !== 1 || otherCount !== 0 || reasons.length !== 0)) {
+  process.exit(1);
+}
+if (value.sendEligible === false && reasons.length === 0) process.exit(1);
+process.stdout.write([
+  autoload.value,
+  autoload.source,
+  intended.kind,
+  intended.source,
+  value.sendEligible ? "true" : "false",
+  reasons.join(","),
+].join("\t"));
+' 2>/dev/null) || policy_fields=""
+        if [[ -z "$policy_fields" ]]; then
+            HOST_POLICY_REFUSAL=1
+            HOST_POLICY_REFUSAL_REASON="host-policy-invalid"
+            HOST_POLICY_REASON_LIST="policy output was empty, malformed, or internally inconsistent"
+            return 1
+        fi
+
+        local send_eligible
+        IFS=$'\t' read -r HOST_AUTOLOAD_EFFECTIVE HOST_AUTOLOAD_SOURCE \
+            HOST_INTENDED_KIND_EFFECTIVE HOST_INTENDED_SOURCE send_eligible \
+            HOST_POLICY_REASON_LIST <<< "$policy_fields"
+        echo "POLICY: autoload=${HOST_AUTOLOAD_EFFECTIVE} (source: ${HOST_AUTOLOAD_SOURCE}) intended-host=${HOST_INTENDED_KIND_EFFECTIVE} (source: ${HOST_INTENDED_SOURCE})"
+        if [[ "$send_eligible" != "true" ]]; then
+            HOST_POLICY_REFUSAL=1
+            case ",${HOST_POLICY_REASON_LIST}," in
+                *,other-desktop-host-running,*) HOST_POLICY_REFUSAL_REASON="other-desktop-host-running" ;;
+                *,host-inventory-incomplete,*) HOST_POLICY_REFUSAL_REASON="host-inventory-incomplete" ;;
+                *,intended-host-not-running,*) HOST_POLICY_REFUSAL_REASON="intended-host-not-running" ;;
+                *) HOST_POLICY_REFUSAL_REASON="host-policy-invalid" ;;
+            esac
+            return 1
+        fi
+        return 0
+    }
+    report_host_policy_refusal() {
+        echo "HOST-WARNING: live IPC refused by host policy (${HOST_POLICY_REASON_LIST:-$HOST_POLICY_REFUSAL_REASON})." >&2
+        echo "RESULT: gui-unowned -- reason=${HOST_POLICY_REFUSAL_REASON} -- confirmation=not-attempted" >&2
+        fallback
+    }
     send_live() {
-        IPC_OUTPUT=$(node "${SCRIPT_DIR}/codex_ipc_client.mjs" \
+        local send_status=0
+        IPC_OUTPUT=""
+        HOST_POLICY_REFUSAL=0
+        if ! host_policy_send; then
+            return 125
+        fi
+        if IPC_OUTPUT=$(node "${SCRIPT_DIR}/codex_ipc_client.mjs" \
             --thread "${IPC_CID}" \
             --task "read \"${OUTBOUND}\" and proceed" \
-            --allow-any-thread --send --ack-live-write --timeout-ms 9000)
+            --allow-any-thread --send --ack-live-write --timeout-ms 9000); then
+            send_status=0
+        else
+            send_status=$?
+        fi
+        return "$send_status"
     }
     authoritative_success() {
         printf '%s' "$IPC_OUTPUT" | node --input-type=module -e '
@@ -785,44 +1200,12 @@ console.log(JSON.stringify({
             printf '%s\n' "$IPC_OUTPUT" | sed -n '1,20p' >&2
         fi
     }
-    classify_inspected_target() {
-        printf '%s' "$INSPECT_OUTPUT" | node --input-type=module -e '
-import fs from "node:fs";
-let value;
-try {
-  value = JSON.parse(fs.readFileSync(0, "utf8"));
-} catch {
-  process.stdout.write("ambiguous");
-  process.exit(0);
-}
-const target = String(process.argv[1] || "").toLowerCase();
-const db = value?.dbThread;
-const thread = value?.dbThread?.thread;
-const dbTrusted = db?.exists === true && db?.readOnlyOpenOk === true;
-if (dbTrusted && thread?.exists === false) {
-  process.stdout.write("missing");
-} else if (
-  value?.ok !== true ||
-  !dbTrusted ||
-  thread?.exists !== true ||
-  typeof thread.id !== "string" ||
-  thread.id.toLowerCase() !== target
-) {
-  process.stdout.write("ambiguous");
-} else if (thread.archived === 1) {
-  process.stdout.write("archived");
-} else if (thread.archived !== 0) {
-  process.stdout.write("ambiguous");
-} else {
-  process.stdout.write("active");
-}
-' "$IPC_CID"
-    }
     observe_rollout() {
         local observation=""
-        if observation=$(node "${SCRIPT_DIR}/codex_ipc_rollout_observe.mjs" \
-            --thread "${IPC_CID}" \
-            --dispatch "${DISPATCH_ID}"); then
+        local -a observe_args=(--thread "${IPC_CID}" --dispatch "${DISPATCH_ID}")
+        [[ -z "$INSPECT_ROLLOUT_PATH" ]] || observe_args+=(--rollout-path "$INSPECT_ROLLOUT_PATH")
+        [[ -z "$INSPECT_SESSIONS_ROOT" ]] || observe_args+=(--sessions-root "$INSPECT_SESSIONS_ROOT")
+        if observation=$(node "${SCRIPT_DIR}/codex_ipc_rollout_observe.mjs" "${observe_args[@]}"); then
             case "$observation" in
                 rollout-hit|rollout-pending|rollout-unavailable)
                     printf '%s\n' "$observation"
@@ -836,13 +1219,6 @@ if (dbTrusted && thread?.exists === false) {
             echo "WARNING: rollout observer failed; using rollout-unavailable." >&2
         fi
         printf '%s\n' "rollout-unavailable"
-    }
-    # D3 wait hint: ONLY the two accepted live --ipc success branches print one POSIX-escaped,
-    # runnable WAIT: line (exact thread/dispatch/--reply-path + the D2 flag and 30-minute budget)
-    # BEFORE the single final RESULT: line. File-drop, exec, and every failure branch must not.
-    print_wait_hint() {
-        printf 'WAIT: node %q --thread %q --dispatch %q --reply-path %q --accept-rollout-fallback --budget-ms 1800000 --interval-ms 1000 --status-exit-codes\n' \
-            "${SCRIPT_DIR}/codex_ipc_wait.mjs" "$IPC_CID" "$DISPATCH_ID" "$INBOUND"
     }
     print_confirmation_disclaimer() {
         echo "(Rollout confirmation reflects bounded pickup observation only; it does not confirm" >&2
@@ -866,6 +1242,10 @@ if (dbTrusted && thread?.exists === false) {
         echo "RESULT: gui-delivered -- reason=renderer-owned -- confirmation=${CONFIRMATION}"
         exit 0
     fi
+    if [[ "$HOST_POLICY_REFUSAL" -eq 1 ]]; then
+        report_host_policy_refusal
+        exit 1
+    fi
     if ! authoritative_no_client; then
         # Router/pipe-level failure (app closed, timeout, protocol drift). This is
         # POST-ATTEMPT: the follower frame is written before the response is awaited,
@@ -877,55 +1257,30 @@ if (dbTrusted && thread?.exists === false) {
         fallback_ambiguous
         exit 1
     fi
-    # Guard the unowned path: never deep-link a target that does not exist or is archived.
-    # Positive proof requires an exact active DB row for this thread. A matching rollout alone is
-    # not target existence, and malformed/schema-drifted output is never permission to navigate.
-    # Parse stdout only. Node may emit a node:sqlite warning on stderr even when the inspector's
-    # JSON result is valid; merging streams would corrupt the structural authorization input.
-    # Preserve the process status as a second authority: only status 0 with an active/archived
-    # result or status 1 with the inspector's structured missing result is admissible.
-    INSPECT_STATUS=0
-    if INSPECT_OUTPUT=$(node "${SCRIPT_DIR}/codex_ipc_session_inspect.mjs" --thread "${IPC_CID}" --tail-events 1); then
-        INSPECT_STATUS=0
-    else
-        INSPECT_STATUS=$?
+    if [[ "$HOST_AUTOLOAD_EFFECTIVE" == "off" ]]; then
+        echo "RESULT: gui-unowned -- reason=autoload-disabled -- confirmation=not-attempted" >&2
+        echo "(The exact router response proved no renderer admission; Desktop activation is off.)" >&2
+        fallback
+        exit 1
     fi
-    INSPECT_CLASS=$(classify_inspected_target)
-    case "${INSPECT_STATUS}:${INSPECT_CLASS}" in
-        0:active|0:archived|1:missing) : ;;
-        *) INSPECT_CLASS=ambiguous ;;
-    esac
-    case "$INSPECT_CLASS" in
-        missing)
-            echo "RESULT: failed-closed -- reason=target-not-found -- confirmation=not-attempted" >&2
-            echo "(Target thread not found in local Codex state; refusing to auto-load.)" >&2
-            fallback
-            exit 1
-            ;;
-        archived)
-            echo "RESULT: failed-closed -- reason=target-archived -- confirmation=not-attempted" >&2
-            echo "(Target thread is archived; unarchive it in the app first.)" >&2
-            fallback
-            exit 1
-            ;;
-        active) : ;;
-        *)
-            echo "RESULT: failed-closed -- reason=target-inspection-ambiguous -- confirmation=not-attempted" >&2
-            echo "(Inspector output did not prove one exact active DB thread; refusing to auto-load.)" >&2
-            printf '%s\n' "$INSPECT_OUTPUT" | sed -n '1,10p' >&2
-            fallback
-            exit 1
-            ;;
-    esac
-    echo "Thread ${IPC_CID} is not loaded in Codex Desktop (no-client-found)."
-    echo "Auto-loading via codex://threads/... (policy: ${FOREGROUND_POLICY})..."
+    if [[ "$HOST_INTENDED_KIND_EFFECTIVE" != "package" ]]; then
+        echo "RESULT: gui-unowned -- reason=protocol-host-not-package -- confirmation=not-attempted" >&2
+        echo "(The intended alternate host is never activated through the package protocol.)" >&2
+        fallback
+        exit 1
+    fi
+    echo "Router answered no-client-found for thread ${IPC_CID}; this token has several possible causes."
+    echo "Requesting gated Desktop activation (foreground policy: ${FOREGROUND_POLICY})..."
     AUTOLOAD_PS1="${SCRIPT_DIR}/codex_ipc_autoload.ps1"
     AUTOLOAD_STATUS=0
     AUTOLOAD_OUTPUT=""
     if [[ -f "$AUTOLOAD_PS1" ]] && command -v powershell.exe &>/dev/null; then
         AUTOLOAD_WIN_PATH=$(cygpath -w "$AUTOLOAD_PS1" 2>/dev/null || printf '%s' "$AUTOLOAD_PS1")
-        AUTOLOAD_ARGS=(-ConversationId "${IPC_CID}" -ForegroundPolicy "${FOREGROUND_POLICY}")
+        IPC_ROOT_WIN=$(to_win "$IPC_ROOT")
+        AUTOLOAD_ARGS=(-ConversationId "${IPC_CID}" -ForegroundPolicy "${FOREGROUND_POLICY}" -IpcRoot "$IPC_ROOT_WIN")
         [[ "$ACK_FOREGROUND_SWITCH" -eq 1 ]] && AUTOLOAD_ARGS+=(-AckForegroundSwitch)
+        [[ "$HOST_AUTOLOAD_FLAG_PRESENT" -eq 1 ]] && AUTOLOAD_ARGS+=(-Autoload "$HOST_AUTOLOAD_FLAG")
+        [[ "$HOST_INTENDED_HOST_FLAG_PRESENT" -eq 1 ]] && AUTOLOAD_ARGS+=(-IntendedHost "$HOST_INTENDED_HOST_FLAG")
         if AUTOLOAD_OUTPUT=$(powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$AUTOLOAD_WIN_PATH" "${AUTOLOAD_ARGS[@]}" 2>&1); then
             AUTOLOAD_STATUS=0
         else
@@ -938,30 +1293,35 @@ if (dbTrusted && thread?.exists === false) {
     # unrecognized fails closed instead of falling through into the live-retry loop.
     case "$AUTOLOAD_STATUS" in
         0)  : ;;  # deep-link permitted/completed; proceed to the retry poll below
-        1)  echo "WARNING: focus restore could not be verified after auto-load." >&2
-            printf '%s\n' "$AUTOLOAD_OUTPUT" | sed -n '1,5p' >&2 ;;
+        1)  echo "WARNING: focus restore could not be verified after auto-load; helper diagnostics were suppressed." >&2 ;;
         2)  if [[ "$FOREGROUND_POLICY" == "defer" ]]; then
                 echo "RESULT: gui-unowned -- reason=codex-foreground-deferred -- confirmation=not-attempted" >&2
-                echo "(You are actively working in Codex; deferred instead of switching your view. Rerun /ipc" >&2
-                echo " when convenient, use --foreground-policy switch --ack-foreground-switch, or open" >&2
-                echo " codex://threads/${IPC_CID} yourself.)" >&2
+                echo "(You are actively working in Codex; activation was deferred instead of switching your view." >&2
+                echo " Use the file-drop pickup below in the intended Desktop host when convenient.)" >&2
             else
                 echo "RESULT: gui-unowned -- reason=foreground-unidentified -- confirmation=not-attempted" >&2
                 echo "(The foreground app could not be identified as Codex; refusing to auto-switch.)" >&2
             fi
             fallback
             exit 1 ;;
-        3)  echo "WARNING: autoload helper unavailable (missing codex_ipc_autoload.ps1 or powershell.exe); polling anyway." >&2 ;;
+        3)  echo "RESULT: gui-unowned -- reason=autoload-helper-unavailable -- confirmation=not-attempted" >&2
+            echo "(The gated activation helper or powershell.exe is unavailable; no retry was attempted.)" >&2
+            fallback
+            exit 1 ;;
         4)  echo "RESULT: gui-unowned -- reason=foreground-restore-unproven -- confirmation=not-attempted" >&2
             echo "(restore-if-known is fail-closed until a read-only selected-thread authority is proven.)" >&2
             fallback
             exit 1 ;;
-        5)  echo "RESULT: failed-closed -- reason=foreground-switch-unacknowledged -- confirmation=not-attempted" >&2
+        5)  echo "RESULT: gui-unowned -- reason=foreground-switch-unacknowledged -- confirmation=not-attempted" >&2
+            fallback
+            exit 1 ;;
+        6)  echo "RESULT: gui-unowned -- reason=autoload-policy-refused -- confirmation=not-attempted" >&2
+            echo "HOST-WARNING: the activation helper refused its fresh safety gate; helper diagnostics were suppressed." >&2
             fallback
             exit 1 ;;
         *)  echo "RESULT: failed-closed -- reason=autoload-unexpected-status -- confirmation=not-attempted" >&2
             echo "(Helper exit status ${AUTOLOAD_STATUS} is not part of the autoload contract.)" >&2
-            printf '%s\n' "$AUTOLOAD_OUTPUT" | sed -n '1,5p' >&2
+            echo "(Helper diagnostics were suppressed.)" >&2
             fallback
             exit 1 ;;
     esac
@@ -997,6 +1357,10 @@ if (dbTrusted && thread?.exists === false) {
             echo "RESULT: gui-delivered -- reason=${DELIVER_REASON} -- confirmation=${CONFIRMATION}"
             exit 0
         fi
+        if [[ "$HOST_POLICY_REFUSAL" -eq 1 ]]; then
+            report_host_policy_refusal
+            exit 1
+        fi
         # Retry ONLY on the authoritative "thread not loaded" answer. Any other
         # failure (timeout, closed pipe, protocol drift) is post-attempt and may have
         # already admitted the task -- retrying it is the duplicate-execution defect
@@ -1011,8 +1375,8 @@ if (dbTrusted && thread?.exists === false) {
     # Every iteration ended in an authoritative no-client-found, so nothing was ever
     # admitted and the pickup line is safe to emit.
     echo "RESULT: gui-unowned -- reason=autoload-incomplete -- confirmation=not-attempted" >&2
-    echo "(Auto-load did not complete within the ${POLL_DEADLINE_S}s poll window. Manual remediation:" >&2
-    echo " open codex://threads/${IPC_CID} in the app, then rerun /ipc.)" >&2
+    echo "(Gated activation did not complete within the ${POLL_DEADLINE_S}s poll window." >&2
+    echo " Use the file-drop pickup below in the intended Desktop host.)" >&2
     fallback
     exit 1
 fi

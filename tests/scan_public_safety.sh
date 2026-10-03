@@ -26,6 +26,20 @@ ROOT="$(cd "$SCRIPT_DIR/.." && pwd -P)" \
 [[ -n "$ROOT" && -d "$ROOT" ]] || fatal "repository root is not a directory"
 FAIL=0
 
+# This scanner inspects the repository selected by ROOT. Refuse inherited Git selectors and
+# trace sinks so a direct invocation cannot be redirected or write outside the checkout.
+while IFS= read -r _git_var; do
+    [[ "${_git_var^^}" == GIT_* ]] && unset "$_git_var"
+done < <(compgen -e)
+for _git_var in $(compgen -e); do
+    [[ "${_git_var^^}" != GIT_* ]] || fatal "could not clear inherited Git variable $_git_var"
+done
+unset _git_var
+export GIT_OPTIONAL_LOCKS=0 GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
+export GIT_ATTR_NOSYSTEM=1 GIT_PAGER=cat GIT_NO_REPLACE_OBJECTS=1
+export GIT_NO_LAZY_FETCH=1 GIT_TERMINAL_PROMPT=0
+export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0="$ROOT"
+
 # capture_match <output-variable> <context> <command...>
 # Returns 0 for matches and 1 for no match. Any other command status is fatal.
 capture_match() {
@@ -341,10 +355,9 @@ scan "assigned secret/password literal"   '(password|secret|api[_-]?key)[[:space
 # 5. Backup files must not exist (content-independent)
 all_bak_files=""
 capture_required all_bak_files "backup-file enumeration" \
-    find "$ROOT" \( -name '*.bak' -o -name '*.bak-*' \)
-bak_files=""
-capture_match bak_files "backup-file exclusion filter" \
-    grep -vE '/(\.git|worktrees)/' <<<"$all_bak_files" || true
+    find "$ROOT" \( -path "$ROOT/.git" -o -path "$ROOT/worktrees" \) -prune -o \
+        \( -name '*.bak' -o -name '*.bak-*' \) -print
+bak_files="$all_bak_files"
 if [[ -n "$bak_files" ]]; then
     echo "FAIL: backup files present"
     printf '%s\n' "$bak_files" | sed 's/^/    /'
@@ -380,8 +393,8 @@ fi
 #    or a session-UUID-named path leaks machine state without matching any content rule.
 state_dirs=""
 capture_required state_dirs "tool-state directory enumeration" \
-    find "$ROOT" \( -name '.omc' -o -name '.claude' -o -name '.codex' \) \
-        -not -path '*/.git/*' -not -path '*/worktrees/*'
+    find "$ROOT" \( -path "$ROOT/.git" -o -path "$ROOT/worktrees" \) -prune -o \
+        \( -name '.omc' -o -name '.claude' -o -name '.codex' \) -print
 if [[ -n "$state_dirs" ]]; then
     echo "FAIL: local tool-state directory present"
     printf '%s\n' "$state_dirs" | sed 's/^/    /'
@@ -392,7 +405,12 @@ fi
 
 all_paths=""
 capture_required all_paths "repository path enumeration" \
-    find "$ROOT" -not -path '*/.git/*' -not -path '*/worktrees/*'
+    find "$ROOT" \( -path "$ROOT/.git" -o -path "$ROOT/worktrees" \) -prune -o -print
+if ! grep -Fqx -- "$ROOT" <<<"$all_paths" \
+   || ! grep -Fqx -- "$ROOT/tests/scan_public_safety.sh" <<<"$all_paths"; then
+    fatal "structural traversal did not enumerate the repository root and scanner"
+fi
+echo "  ok: structural traversal covers the repository from this checkout path"
 path_uuid_matches=""
 capture_match path_uuid_matches "path UUID grep" \
     grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' \

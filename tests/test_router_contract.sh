@@ -67,7 +67,8 @@ if [[ ! -f "$METHOD_TABLE" ]]; then
 fi
 export CODEX_IPC_METHOD_TABLE="$METHOD_TABLE"
 
-TMP="$(mktemp -d)"
+TMP="$(mktemp -d)" && [[ -n "$TMP" && -d "$TMP" ]] \
+    || { echo "FATAL: could not create router-contract temporary directory" >&2; exit 1; }
 trap 'rm -rf "$TMP"' EXIT
 THREAD="22222222-2222-4222-8222-222222222222"
 TASK_TEXT="router contract sentinel"
@@ -77,6 +78,20 @@ FAIL=0
 
 ok(){ echo "  PASS: $1"; PASS=$((PASS+1)); }
 no(){ echo "  FAIL: $1"; FAIL=$((FAIL+1)); }
+fatal(){ echo "FATAL: $*" >&2; exit 1; }
+
+# Wrapper-side Git probes must not inherit tracing, redirecting, or repository-selection
+# variables from the caller. In particular, GIT_TRACE* can write outside this fixture.
+while IFS= read -r _git_var; do
+  [[ "${_git_var^^}" == GIT_* ]] && unset "$_git_var"
+done < <(compgen -e)
+for _git_var in $(compgen -e); do
+  [[ "${_git_var^^}" != GIT_* ]] || fatal "could not clear inherited Git variable $_git_var"
+done
+unset _git_var
+export GIT_OPTIONAL_LOCKS=0 GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
+export GIT_ATTR_NOSYSTEM=1 GIT_PAGER=cat GIT_NO_REPLACE_OBJECTS=1
+export GIT_NO_LAZY_FETCH=1 GIT_TERMINAL_PROMPT=0
 
 # CLI_GUARD_BEGIN: real processes and owned aliases only; no host state or IPC.
 if CLI_GUARD_SCRIPTS="$(dirname "$CLIENT")" \
@@ -348,6 +363,64 @@ assert_dry initialize "initialize request shape is exact"
 assert_dry follower "thread-follower-start-turn request shape is exact"
 assert_dry framing "observable frame totals include exactly four overhead bytes"
 
+settings_reject(){ # settings_reject <label> <expected-fragment> [client args...]
+  local label="$1" expected="$2" out err rc
+  shift 2
+  err="$TMP/settings-reject-$RANDOM.err"
+  out="$("$NODE_BIN" "$CLIENT" --thread "$THREAD" --task "$TASK_TEXT" "$@" 2>"$err")"
+  rc=$?
+  if [[ $rc -ne 0 && -z "$out" ]] && grep -qF -- "$expected" "$err"; then
+    ok "$label"
+  else
+    no "$label (rc=$rc, stdout=${out:-<empty>})"
+    sed -n '1,8p' "$err"
+  fi
+}
+
+settings_accept(){ # settings_accept <label> <model|null> <effort|null> [client args...]
+  local label="$1" expected_model="$2" expected_effort="$3" out err rc
+  shift 3
+  err="$TMP/settings-accept-$RANDOM.err"
+  out="$("$NODE_BIN" "$CLIENT" --thread "$THREAD" --task "$TASK_TEXT" "$@" 2>"$err")"
+  rc=$?
+  if [[ $rc -eq 0 ]] && printf '%s' "$out" | "$NODE_BIN" -e '
+const fs = require("node:fs");
+const value = JSON.parse(fs.readFileSync(0, "utf8"));
+const request = value?.requests?.[1]?.json?.params?.turnStart?.request;
+const wantModel = process.argv[1] === "null" ? undefined : process.argv[1];
+const wantEffort = process.argv[2] === "null" ? undefined : process.argv[2];
+const ok = request && request.model === wantModel && request.effort === wantEffort;
+process.exit(ok ? 0 : 1);
+' "$expected_model" "$expected_effort" >/dev/null 2>&1; then
+    ok "$label"
+  else
+    no "$label (rc=$rc)"
+    sed -n '1,8p' "$err"
+  fi
+}
+
+echo "== 1b. stored thread-setting rewrites require their own explicit acknowledgement =="
+settings_reject "model override without settings acknowledgement is rejected" \
+  "--ack-thread-settings-change" --model synthetic-model
+settings_reject "effort override without settings acknowledgement is rejected" \
+  "--ack-thread-settings-change" --effort high
+settings_reject "combined overrides without settings acknowledgement are rejected" \
+  "--ack-thread-settings-change" --model synthetic-model --effort high
+settings_reject "live-write acknowledgement does not acknowledge stored setting rewrites" \
+  "--ack-thread-settings-change" --model synthetic-model --ack-live-write
+settings_reject "acknowledged whitespace-only model is rejected" \
+  "--model must provide non-empty text" --model $' \t' --ack-thread-settings-change
+settings_reject "acknowledged whitespace-only effort is rejected" \
+  "--effort must provide non-empty text" --effort $' \t' --ack-thread-settings-change
+settings_accept "acknowledged model override is retained exactly" synthetic-model null \
+  --model '  synthetic-model  ' --ack-thread-settings-change
+settings_accept "acknowledged effort override is retained exactly" null high \
+  --effort '  high  ' --ack-thread-settings-change
+settings_accept "acknowledged combined overrides are retained exactly" synthetic-model high \
+  --model synthetic-model --effort high --ack-thread-settings-change
+settings_accept "settings acknowledgement alone preserves omission of both fields" null null \
+  --ack-thread-settings-change
+
 CANONICAL_CASE_THREAD="00000000-0000-4000-8000-00000000c0de"
 UPPER_THREAD="${CANONICAL_CASE_THREAD^^}"
 UPPER_OUT="$("$NODE_BIN" "$CLIENT" --thread "$UPPER_THREAD" --task "$TASK_TEXT" --client-type "$CLIENT_TYPE" 2>/dev/null)"
@@ -480,7 +553,7 @@ vacuity_case
 
 echo "== 3. wrapper process-result classification =="
 STUB_BIN="$TMP/bin"
-mkdir -p "$STUB_BIN"
+mkdir -p "$STUB_BIN" || fatal "could not create router-contract stub directory"
 TOOL_LOG="$TMP/tool.log"
 NODE_STUB="$STUB_BIN/node"
 cat > "$NODE_STUB" <<'EOF'
@@ -534,10 +607,10 @@ case "$name" in
         exit 0
         ;;
       no-client-archived)
-        printf '{"ok":true,"dbThread":{"exists":true,"readOnlyOpenOk":true,"thread":{"exists":true,"id":"%s","archived":1}}}\n' "$target"
+        printf '{"ok":true,"dbThread":{"exists":true,"readOnlyOpenOk":true,"thread":{"exists":true,"id":"%s","archived":1,"model":"synthetic-model","threadSource":"user"}},"targetClassification":{"kind":"root","parentThreadId":null,"reasons":["thread-source-root"],"warnings":[]}}\n' "$target"
         ;;
       no-client-invalid-archive)
-        printf '{"ok":true,"dbThread":{"exists":true,"readOnlyOpenOk":true,"thread":{"exists":true,"id":"%s","archived":null}}}\n' "$target"
+        printf '{"ok":true,"dbThread":{"exists":true,"readOnlyOpenOk":true,"thread":{"exists":true,"id":"%s","archived":null,"model":"synthetic-model","threadSource":"user"}},"targetClassification":{"kind":"root","parentThreadId":null,"reasons":["thread-source-root"],"warnings":[]}}\n' "$target"
         ;;
       no-client-db-unavailable)
         printf '%s\n' '{"ok":true,"dbThread":{"exists":false,"readOnlyOpenOk":false,"thread":{"exists":false}},"rollout":{"primary":{"parsedOk":true}}}'
@@ -547,38 +620,67 @@ case "$name" in
         printf '%s\n' '{"ok":false,"dbThread":{"exists":true,"readOnlyOpenOk":true,"thread":{"exists":false}}}'
         exit 1
         ;;
-      *) printf '%s\n' '{"ok":false,"dbThread":{"thread":{"exists":false}}}' ;;
+      *)
+        printf '{"ok":true,"dbThread":{"exists":true,"readOnlyOpenOk":true,"thread":{"exists":true,"id":"%s","archived":0,"model":"synthetic-model","threadSource":"user"}},"targetClassification":{"kind":"root","parentThreadId":null,"reasons":["thread-source-root"],"warnings":[]}}\n' "$target"
+        ;;
     esac
     exit 0
     ;;
   *) exec "$REAL_NODE" "$@" ;;
 esac
 EOF
+[[ $? -eq 0 ]] || fatal "could not materialize router-contract node stub"
+POLICY_LOG="$TMP/router-policy.log"
+: > "$POLICY_LOG"
 cat > "$STUB_BIN/powershell.exe" <<'EOF'
 #!/usr/bin/env bash
-printf 'powershell.exe invoked\n' >> "$TOOL_LOG"
+script=""
+previous=""
+for argument in "$@"; do
+  if [[ "$previous" == "-File" ]]; then script="${argument//\\//}"; break; fi
+  previous="$argument"
+done
+if [[ "${script##*/}" == "codex_ipc_host_policy.ps1" ]]; then
+  printf '%s\n' "$*" >> "$POLICY_LOG"
+  echo '{"schemaVersion":1,"ok":true,"purpose":"send","configuration":{"valid":true,"autoload":{"value":"codex-uri","source":"environment"},"intendedHost":{"kind":"package","executable":null,"source":"default"}},"inventory":{"complete":true,"guiHosts":[{"matchesIntended":true}],"appServers":[]},"sendEligible":true,"sendReasons":[],"activationEligible":false,"activationReasons":["not-checked"]}'
+  exit 0
+fi
+printf 'powershell.exe invoked: %s\n' "$*" >> "$TOOL_LOG"
 exit 99
 EOF
+[[ $? -eq 0 ]] || fatal "could not materialize router-contract PowerShell tripwire"
 cat > "$STUB_BIN/codex" <<'EOF'
 #!/usr/bin/env bash
 printf 'codex invoked\n' >> "$TOOL_LOG"
 exit 99
 EOF
-chmod +x "$NODE_STUB" "$STUB_BIN/powershell.exe" "$STUB_BIN/codex"
+[[ $? -eq 0 ]] || fatal "could not materialize router-contract Codex tripwire"
+chmod +x "$NODE_STUB" "$STUB_BIN/powershell.exe" "$STUB_BIN/codex" \
+  || fatal "could not make router-contract stubs executable"
+for _stub in node powershell.exe codex; do
+  _resolved="$(PATH="$STUB_BIN:$PATH" command -v "$_stub" 2>/dev/null)" \
+    || fatal "$_stub router-contract stub does not resolve"
+  [[ "$_resolved" == "$STUB_BIN/$_stub" ]] \
+    || fatal "$_stub resolved outside the harness: $_resolved"
+done
+unset _stub _resolved
 
 run_wrapper_case(){
   # $5 (optional): text that MUST NOT appear in the wrapper's combined output.
   local scenario="$1" expected_rc="$2" expected_result="$3" label="$4" forbidden="${5:-}" target="${6:-$THREAD}"
   local case_root="$TMP/$scenario" output rc
-  mkdir -p "$case_root/ipc" "$case_root/home"
+  mkdir -p "$case_root/ipc" "$case_root/home" \
+    || fatal "could not create router-contract fixture for $scenario"
   output="$(env \
     PATH="$STUB_BIN:$PATH" \
     REAL_NODE="$NODE_BIN" \
     ROUTER_CASE="$scenario" \
     TOOL_LOG="$TOOL_LOG" \
+    POLICY_LOG="$POLICY_LOG" \
     HOME="$case_root/home" \
     CLAUDE_SESSION_ID="33333333-3333-4333-8333-333333333333" \
     CODEX_IPC_ROOT="$case_root/ipc" \
+    CODEX_IPC_AUTOLOAD=codex-uri \
     CODEX_IPC_RETENTION_DAYS=0 \
     bash "$WRAPPER" --ipc "$target" "$TASK_TEXT" 2>&1)"
   rc=$?
@@ -642,8 +744,230 @@ run_wrapper_case malformed 1 \
   "malformed client failure fails closed as router-pipe-failure" \
   "FALLBACK -- file-drop is ready"
 
-if [[ ! -s "$TOOL_LOG" ]]; then
-  ok "sentinel invoked no Desktop, PowerShell, or Codex transport helper"
+echo "== revalidator host-policy authority =="
+REVALIDATOR="$(dirname "$CLIENT")/codex_ipc_revalidate.mjs"
+[[ -f "$REVALIDATOR" ]] || fatal "revalidator is missing"
+REVALIDATE_HOME="$TMP/revalidate-home"
+REVALIDATE_ROOT="$REVALIDATE_HOME/transport"
+REVALIDATE_LOG="$TMP/revalidate-spawns.log"
+REVALIDATE_LIVE="$TMP/revalidate-live.log"
+REVALIDATE_PRELOAD="$TMP/revalidate-preload.cjs"
+mkdir -p "$REVALIDATE_HOME/.codex/sessions" "$REVALIDATE_ROOT" \
+  || fatal "could not create revalidator fixture state"
+: > "$REVALIDATE_HOME/.codex/config.toml"
+: > "$REVALIDATE_HOME/.codex/state_5.sqlite"
+cat > "$REVALIDATE_PRELOAD" <<'REVALIDATOR_PRELOAD'
+const childProcess = require("node:child_process");
+const fs = require("node:fs");
+const path = require("node:path");
+const { syncBuiltinESMExports } = require("node:module");
+
+const originalExistsSync = fs.existsSync;
+const originalReaddirSync = fs.readdirSync;
+fs.existsSync = function (value) {
+  const text = String(value);
+  if (/^C:\\Program Files\\Git\\(?:bin|usr\\bin)\\bash\.exe$/i.test(text)) return true;
+  return originalExistsSync(value);
+};
+fs.readdirSync = function (value, ...rest) {
+  if (String(value) === "\\\\.\\pipe\\") return ["codex-ipc"];
+  return originalReaddirSync(value, ...rest);
+};
+
+function result(status, stdout = "", stderr = "", error = null) {
+  return { status, signal: null, stdout, stderr, error };
+}
+function policyDocument(mode) {
+  const eligible = {
+    schemaVersion: 1,
+    ok: true,
+    purpose: "send",
+    configuration: {
+      valid: true,
+      autoload: { value: "off", source: "default" },
+      intendedHost: { kind: "package", executable: null, source: "default" },
+      descriptor: { path: "x".repeat(3000), status: "absent" },
+    },
+    inventory: {
+      complete: true,
+      coverage: "synthetic",
+      errors: [],
+      packageRootsComplete: true,
+      packageRoots: [],
+      guiHosts: [{
+        pid: 10,
+        parentPid: 1,
+        name: "ChatGPT.exe",
+        executable: "C:\\Program Files\\WindowsApps\\OpenAI.Codex_fixture\\app\\ChatGPT.exe",
+        matchesIntended: true,
+        classification: "package",
+      }],
+      appServers: [{
+        pid: 11,
+        parentPid: 10,
+        name: "codex.exe",
+        executable: "C:\\Program Files\\WindowsApps\\OpenAI.Codex_fixture\\app\\resources\\codex.exe",
+        matchesIntended: true,
+        classification: "package",
+      }],
+    },
+    sendEligible: true,
+    sendReasons: [],
+    activationEligible: false,
+    activationReasons: ["autoload-disabled"],
+  };
+  if (mode === "refuse-other") {
+    eligible.inventory.guiHosts = [{
+      pid: 10,
+      parentPid: 1,
+      name: "ChatGPT.exe",
+      executable: "C:\\Alt\\Host\\ChatGPT.exe",
+      matchesIntended: false,
+      classification: "other",
+    }];
+    eligible.sendEligible = false;
+    eligible.sendReasons = ["other-desktop-host-running"];
+  } else if (mode === "incomplete") {
+    eligible.inventory.complete = false;
+    eligible.inventory.guiHosts = [];
+    eligible.sendEligible = false;
+    eligible.sendReasons = ["host-inventory-incomplete", "intended-host-not-running"];
+  }
+  return JSON.stringify(eligible);
+}
+
+childProcess.spawnSync = function (command, args = []) {
+  const commandText = String(command);
+  const argv = Array.from(args, String);
+  fs.appendFileSync(process.env.REVALIDATE_LOG, `${commandText}\t${argv.join("\t")}\n`);
+
+  if (/bash(?:\.exe)?$/i.test(commandText)) {
+    if (process.env.REVALIDATE_BASH_MODE === "path-bad" && commandText.toLowerCase() === "bash") {
+      return result(1, "", "synthetic WSL shim failure");
+    }
+    return result(0);
+  }
+  if (/powershell\.exe$/i.test(commandText)) {
+    const fileIndex = argv.findIndex((item) => item === "-File");
+    const script = fileIndex >= 0 ? argv[fileIndex + 1] : "";
+    if (path.basename(script).toLowerCase() === "codex_ipc_host_policy.ps1") {
+      const purposeIndex = argv.indexOf("-Purpose");
+      const rootIndex = argv.indexOf("-IpcRoot");
+      const policyArgsOk =
+        purposeIndex >= 0 && argv[purposeIndex + 1] === "send" &&
+        rootIndex >= 0 && argv[rootIndex + 1] === process.env.CODEX_IPC_ROOT;
+      fs.appendFileSync(process.env.REVALIDATE_LOG, "host-policy-args-ok=" + policyArgsOk + "\n");
+      const mode = process.env.REVALIDATE_POLICY_MODE || "eligible-long";
+      if (mode === "malformed") return result(0, "{bad");
+      if (mode === "empty") return result(0, "");
+      if (mode === "nonzero-ok") return result(7, policyDocument("eligible-long"));
+      return result(0, policyDocument(mode));
+    }
+    const commandBody = argv.join(" ");
+    if (commandBody.includes("PSParser")) return result(0, "PARSE-OK\n");
+    if (commandBody.includes("Get-AppxPackage")) {
+      return result(0, '{"packageInstalled":true,"guiIdentified":true}\n');
+    }
+    return result(97, "", "unexpected PowerShell command");
+  }
+  if (commandText === process.execPath) {
+    if (argv[0] === "--check") return result(0);
+    if (argv[0] === "-e" && argv.join(" ").includes("node:sqlite")) {
+      return result(0, "node:sqlite ok\n");
+    }
+    if (path.basename(argv[0] || "") === "codex_ipc_probe.mjs") {
+      fs.appendFileSync(process.env.REVALIDATE_LIVE, "live-probe\n");
+      return result(0, '{"ok":true}\n');
+    }
+  }
+  return result(null, "", "", Object.assign(new Error(`unexpected spawn: ${commandText}`), { code: "ENOENT" }));
+};
+
+syncBuiltinESMExports();
+REVALIDATOR_PRELOAD
+
+revalidate_case(){ # mode expected-rc predicate [extra args...]
+  local mode="$1" expected_rc="$2" predicate="$3"; shift 3
+  local output rc
+  : > "$REVALIDATE_LOG"
+  : > "$REVALIDATE_LIVE"
+  output="$(env \
+    HOME="$REVALIDATE_HOME" USERPROFILE="$REVALIDATE_HOME" \
+    CODEX_HOME="$REVALIDATE_HOME/.codex" CODEX_IPC_ROOT="$REVALIDATE_ROOT" \
+    REVALIDATE_POLICY_MODE="$mode" REVALIDATE_BASH_MODE="${REVALIDATE_BASH_MODE:-normal}" \
+    REVALIDATE_LOG="$REVALIDATE_LOG" REVALIDATE_LIVE="$REVALIDATE_LIVE" \
+    NODE_OPTIONS="--require=$REVALIDATE_PRELOAD" \
+    "$NODE_BIN" "$REVALIDATOR" "$@" 2>&1)"
+  rc=$?
+  if [[ "$rc" -eq "$expected_rc" ]] && REVALIDATE_PREDICATE="$predicate" \
+    printf '%s' "$output" | REVALIDATE_PREDICATE="$predicate" "$NODE_BIN" -e '
+let text = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => { text += chunk; });
+process.stdin.on("end", () => {
+  try {
+    const value = JSON.parse(text);
+    const predicate = new Function("value", `return Boolean(${process.env.REVALIDATE_PREDICATE});`);
+    process.exit(predicate(value) ? 0 : 1);
+  } catch { process.exit(1); }
+});
+'; then
+    ok "revalidator mode=$mode"
+  else
+    no "revalidator mode=$mode (rc=$rc, expected=$expected_rc)"
+    printf '%s\n' "$output" | sed -n '1,24p'
+  fi
+}
+
+revalidate_platform="$("$NODE_BIN" -p 'process.platform')"
+eligible_bash_mode=normal
+if [[ "$revalidate_platform" == "win32" ]]; then
+  eligible_bash_mode=path-bad
+fi
+REVALIDATE_BASH_MODE="$eligible_bash_mode" revalidate_case eligible-long 0 '
+  value.ok === true && value.checks.hostPolicy.ok === true &&
+  value.checks.hostPolicy.sendEligible === true &&
+  value.checks.hostPolicy.inventory.guiHosts.length === 1 &&
+  value.checks.hostPolicy.inventory.guiHosts[0].executable.endsWith("ChatGPT.exe") &&
+  value.checks.hostPolicy.inventory.guiHosts[0].classification === "package" &&
+  value.checks.hostPolicy.inventory.appServers.length === 1 &&
+  !("commandLine" in value.checks.hostPolicy.inventory.appServers[0]) &&
+  value.summary.failed.length === 0'
+first_bash="$(awk -F '\t' 'tolower($1) ~ /bash(\.exe)?$/ { print $1; exit }' "$REVALIDATE_LOG")"
+if [[ "$revalidate_platform" == "win32" ]]; then
+  [[ "$first_bash" == 'C:\Program Files\Git\bin\bash.exe' ]] \
+    && ok "Windows revalidator prefers pinned Git Bash before a failing PATH shim" \
+    || no "revalidator selected the wrong Bash first: $first_bash"
+else
+  ok "pinned Git Bash ordering is Windows-only"
+fi
+grep -Fqx 'host-policy-args-ok=true' "$REVALIDATE_LOG" \
+  && ok "revalidator passes send purpose and the resolved IPC root to host policy" \
+  || no "revalidator omitted host-policy purpose/root"
+
+REVALIDATE_BASH_MODE=normal revalidate_case refuse-other 1 '
+  value.ok === false && value.checks.hostPolicy.ok === false &&
+  value.checks.hostPolicy.sendEligible === false &&
+  value.checks.hostPolicy.inventory.guiHosts.length === 1 &&
+  value.checks.hostPolicy.inventory.guiHosts[0].executable === "C:\\Alt\\Host\\ChatGPT.exe" &&
+  value.checks.hostPolicy.inventory.guiHosts[0].classification === "other" &&
+  value.summary.failed.includes("hostPolicy")'
+for mode in malformed empty nonzero-ok incomplete; do
+  revalidate_case "$mode" 1 '
+    value.ok === false && value.checks.hostPolicy.ok === false &&
+    value.summary.failed.includes("hostPolicy")'
+done
+
+revalidate_case refuse-other 1 '
+  value.ok === false && value.checks.hostPolicy.ok === false &&
+  value.checks.liveIpcReadProbe.skipped === true' \
+  --allow-live-ipc-read
+[[ ! -s "$REVALIDATE_LIVE" ]] \
+  && ok "host-policy refusal suppresses the optional live probe" \
+  || no "live probe ran after host-policy refusal"
+
+if [[ ! -s "$TOOL_LOG" && -s "$POLICY_LOG" ]]; then
+  ok "sentinel invoked only the read-only host policy, no Desktop, activation, or Codex helper"
 else
   no "unexpected external helper invocation"
   cat "$TOOL_LOG"

@@ -12,7 +12,9 @@ for _cand in "$DIR/../skills/ipc/scripts/codex_ipc_replies.sh" "$DIR/../scripts/
 done
 [[ -n "$SCRIPT" ]] || { echo "FATAL: codex_ipc_replies.sh not found in repo or installed layout" >&2; exit 1; }
 REAL_FIND="$(command -v find)"; REAL_SORT="$(command -v sort)"
-TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
+TMP="$(mktemp -d)" && [[ -n "$TMP" && -d "$TMP" ]] \
+    || { echo "FATAL: could not create reply-view temporary directory" >&2; exit 1; }
+trap 'rm -rf "$TMP"' EXIT
 IPCROOT="$TMP/ipcroot"
 CODEX_IPC_SESSIONS_ROOT="$TMP/sessions"; export CODEX_IPC_SESSIONS_ROOT
 U1="11111111-1111-4111-8111-111111111111"; U2="22222222-2222-4222-8222-222222222222"
@@ -20,6 +22,21 @@ U1="11111111-1111-4111-8111-111111111111"; U2="22222222-2222-4222-8222-222222222
 PASS=0; FAIL=0
 ok(){ echo "  PASS: $1"; PASS=$((PASS+1)); }
 no(){ echo "  FAIL: $1"; FAIL=$((FAIL+1)); }
+fatal(){ echo "FATAL: $*" >&2; exit 1; }
+
+# The T23 wrapper seam performs Git probes. Strip inherited Git routing/tracing before any
+# fixture process runs so an ambient GIT_TRACE* path cannot write outside this temporary root.
+while IFS= read -r _git_var; do
+  [[ "${_git_var^^}" == GIT_* ]] && unset "$_git_var"
+done < <(compgen -e)
+for _git_var in $(compgen -e); do
+  [[ "${_git_var^^}" != GIT_* ]] || fatal "could not clear inherited Git variable $_git_var"
+done
+unset _git_var
+export GIT_OPTIONAL_LOCKS=0 GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
+export GIT_ATTR_NOSYSTEM=1 GIT_PAGER=cat GIT_NO_REPLACE_OBJECTS=1
+export GIT_NO_LAZY_FETCH=1 GIT_TERMINAL_PROMPT=0
+
 reset(){ rm -rf "$IPCROOT"; mkdir -p "$IPCROOT"; }
 mkreply(){ local sid="$1" th="$2" disp="$3" mt="$4" body="$5"; mkdir -p "$IPCROOT/$sid/$th"; printf '%s' "$body" > "$IPCROOT/$sid/$th/$disp.reply.md"; touch -d "@$mt" "$IPCROOT/$sid/$th/$disp.reply.md"; }
 mktask(){ local sid="$1" th="$2" disp="$3"; mkdir -p "$IPCROOT/$sid/$th"; printf 'task' > "$IPCROOT/$sid/$th/$disp.task.md"; }
@@ -191,6 +208,178 @@ RUNARGS=(); run CLAUDE_CODE_SESSION_ID=s22 PATH="/usr/bin:/bin"
 [[ $RC -eq 0 ]] && printf '%s' "$OUT" | grep -Fq '\x1B' && printf '%s' "$OUT" | grep -Fq '\xFF' \
   && ok "safe primary rendering still works without Node" || no "T22 no-Node safe renderer (rc=$RC)"
 
+echo "== T22b explicit and inspector-derived rollout page binding =="
+reset
+PAGE_DIR="$CODEX_IPC_SESSIONS_ROOT"; mkdir -p "$PAGE_DIR"
+PAGE22="$PAGE_DIR/rollout-page-$U1.jsonl"
+DISP22="9200000000-2-abcdef0123456789"
+mktask s22b "$U1" "$DISP22"
+mkreply s22b "$U1" "$DISP22" 2000 "PAGE-BOUND-PRIMARY"
+node - "$PAGE22" "$U1" "$DISP22" <<'NODE'
+const fs = require("node:fs");
+const [target, threadId, dispatchId] = process.argv.slice(2);
+const turnId = "33333333-3333-4333-8333-333333333333";
+const records = [
+  { type: "session_meta", payload: { id: threadId } },
+  { type: "event_msg", payload: { type: "task_started", turn_id: turnId } },
+  { type: "event_msg", payload: { type: "user_message", turn_id: turnId, message: `read C:/handoff/${dispatchId}.task.md and proceed` } },
+  { type: "event_msg", payload: { type: "agent_message", turn_id: turnId, phase: "final_answer", message: "ordinary final" } },
+  { type: "event_msg", payload: { type: "task_complete", turn_id: turnId, last_agent_message: "ordinary final" } },
+];
+fs.writeFileSync(target, `${records.map((item) => JSON.stringify(item)).join("\n")}\n`);
+NODE
+RUNARGS=(-c "$U1" --rollout-path "$PAGE22"); run CLAUDE_CODE_SESSION_ID=s22b
+[[ $RC -eq 0 && "$OUT" == *"PAGE-BOUND-PRIMARY"* \
+  && "$OUT" != *"ROLLOUT-PATH:"* && "$OUT" != *"REPLY-SUPERSESSION-UNAVAILABLE"* ]] \
+  && ok "explicit inspector page reaches primary supersession checks without warning" \
+  || no "T22b explicit rollout page (rc=$RC)"
+
+RUNARGS=(--rollout-path "$PAGE22"); run CLAUDE_CODE_SESSION_ID=s22b
+[[ $RC -eq 1 && "$OUT" == *"requires -c with a Codex conversation UUID"* ]] \
+  && ok "rollout page is refused for a session-wide view" || no "T22b session-wide page refusal"
+RUNARGS=(-c filedrop --rollout-path "$PAGE22"); run CLAUDE_CODE_SESSION_ID=s22b
+[[ $RC -eq 1 && "$OUT" == *"requires -c with a Codex conversation UUID"* ]] \
+  && ok "rollout page is refused for filedrop" || no "T22b filedrop page refusal"
+RUNARGS=(-c "$U1" --rollout-path "$PAGE22" --derive-rollout-path); run CLAUDE_CODE_SESSION_ID=s22b
+[[ $RC -eq 1 && "$OUT" == *"mutually exclusive"* ]] \
+  && ok "explicit and derived page modes are mutually exclusive" || no "T22b mutual exclusion"
+
+VIEW22="$TMP/view22"; mkdir -p "$VIEW22"
+cp "$SCRIPT" "$VIEW22/codex_ipc_replies.sh"
+cp "$DIR/../skills/ipc/scripts/codex_ipc_safe_render.sh" "$VIEW22/codex_ipc_safe_render.sh"
+cp "$DIR/../skills/ipc/scripts/codex_ipc_reply_harvest.mjs" "$VIEW22/codex_ipc_reply_harvest.mjs"
+cp "$DIR/../skills/ipc/scripts/codex_ipc_rollout_reader.mjs" "$VIEW22/codex_ipc_rollout_reader.mjs"
+INSPECT_COUNT="$TMP/inspect22.count"; INSPECT_ARGS="$TMP/inspect22.args"
+cat > "$VIEW22/codex_ipc_session_inspect.mjs" <<'NODE'
+import fs from "node:fs";
+fs.appendFileSync(process.env.INSPECT_COUNT, "1\n");
+fs.writeFileSync(process.env.INSPECT_ARGS, process.argv.slice(2).join("\t"));
+if (process.env.INSPECT_MODE === "fail") {
+  console.error("PRIVATE-INSPECTOR-PATH-C:/secret");
+  process.exit(7);
+}
+const threadId = process.env.INSPECT_THREAD;
+const page = process.env.DERIVED_PAGE;
+process.stdout.write(JSON.stringify({
+  ok: true,
+  dbThread: {
+    exists: true,
+    readOnlyOpenOk: true,
+    thread: { exists: true, id: threadId, rolloutPath: page },
+  },
+  rollout: {
+    selection: { status: "found", authority: "db.rollout_path", path: page },
+    primary: { parsedOk: true },
+  },
+}));
+NODE
+before="$(manifest)"
+OUT="$(env CODEX_IPC_ROOT="$IPCROOT" CLAUDE_CODE_SESSION_ID=s22b \
+  INSPECT_COUNT="$INSPECT_COUNT" INSPECT_ARGS="$INSPECT_ARGS" INSPECT_THREAD="$U1" \
+  DERIVED_PAGE="$PAGE22" bash "$VIEW22/codex_ipc_replies.sh" -c "$U1" \
+  --derive-rollout-path 2>&1)"; RC=$?
+after="$(manifest)"; [[ "$before" == "$after" ]] || no "READ-ONLY VIOLATION: derived-page viewer changed IPC manifest"
+[[ $RC -eq 0 && "$OUT" == *"PAGE-BOUND-PRIMARY"* \
+  && "$OUT" != *"ROLLOUT-PATH:"* && "$OUT" != *"REPLY-SUPERSESSION-UNAVAILABLE"* \
+  && "$(wc -l < "$INSPECT_COUNT" | tr -d ' ')" -eq 1 \
+  && "$(cat "$INSPECT_ARGS")" == $'--thread\t'$U1$'\t--tail-events\t1\t--summary' ]] \
+  && ok "derived mode calls the inspector once with the narrow summary contract" \
+  || no "T22b inspector-derived page (rc=$RC)"
+
+DISP22F="9200000001-2-abcdef0123456789"
+PAGE22F="$PAGE_DIR/rollout-fallback-$U1.jsonl"
+mktask s22c "$U1" "$DISP22F"
+node - "$PAGE22F" "$U1" "$DISP22F" <<'NODE'
+const fs = require("node:fs");
+const [target, threadId, dispatchId] = process.argv.slice(2);
+const turnId = "33333333-3333-4333-8333-333333333333";
+const body = "DERIVED-FALLBACK-BODY";
+const records = [
+  { type: "session_meta", payload: { id: threadId } },
+  { type: "event_msg", payload: { type: "task_started", turn_id: turnId } },
+  { type: "event_msg", payload: { type: "user_message", turn_id: turnId, message: `read C:/handoff/${dispatchId}.task.md and proceed` } },
+  { type: "event_msg", payload: { type: "agent_message", turn_id: turnId, phase: "final_answer", message: body } },
+  { type: "event_msg", payload: { type: "task_complete", turn_id: turnId, last_agent_message: body } },
+];
+fs.writeFileSync(target, `${records.map((item) => JSON.stringify(item)).join("\n")}\n`);
+NODE
+INSPECT_COUNT_F="$TMP/inspect22f.count"; INSPECT_ARGS_F="$TMP/inspect22f.args"
+OUT="$(env CODEX_IPC_ROOT="$IPCROOT" CLAUDE_CODE_SESSION_ID=s22c \
+  INSPECT_COUNT="$INSPECT_COUNT_F" INSPECT_ARGS="$INSPECT_ARGS_F" INSPECT_THREAD="$U1" \
+  DERIVED_PAGE="$PAGE22F" bash "$VIEW22/codex_ipc_replies.sh" -c "$U1" \
+  --derive-rollout-path 2>&1)"; RC=$?
+[[ $RC -eq 0 && "$OUT" == *"source=rollout-fallback"* \
+  && "$OUT" == *"DERIVED-FALLBACK-BODY"* \
+  && "$OUT" != *"ROLLOUT-PATH:"* && "$OUT" != *"REPLY-SUPERSESSION-UNAVAILABLE"* \
+  && "$(wc -l < "$INSPECT_COUNT_F" | tr -d ' ')" -eq 1 ]] \
+  && ok "derived page reaches fallback when the primary reply is absent" \
+  || no "T22b inspector-derived fallback (rc=$RC)"
+OUT="$(env CODEX_IPC_ROOT="$IPCROOT" CLAUDE_CODE_SESSION_ID=s22b INSPECT_MODE=fail \
+  INSPECT_COUNT="$INSPECT_COUNT" INSPECT_ARGS="$INSPECT_ARGS" INSPECT_THREAD="$U1" \
+  DERIVED_PAGE="$PAGE22" bash "$VIEW22/codex_ipc_replies.sh" -c "$U1" \
+  --derive-rollout-path 2>&1)"; RC=$?
+[[ $RC -eq 1 \
+  && "$OUT" == "ERROR: --derive-rollout-path could not obtain a trusted database-designated page." \
+  && "$OUT" != *"PRIVATE-INSPECTOR-PATH"* ]] \
+  && ok "inspector failure is fixed and suppresses private diagnostics" \
+  || no "T22b inspector failure privacy (rc=$RC out=$OUT)"
+
+echo "== T22c C7 diagnostics survive both viewer source branches =="
+reset
+PAGE22C="$PAGE_DIR/rollout-c7-$U1.jsonl"
+DISP22C_PRIMARY="9200000002-2-abcdef0123456789"
+DISP22C_MISSING="9200000003-2-abcdef0123456789"
+mktask s22c7 "$U1" "$DISP22C_PRIMARY"
+mkreply s22c7 "$U1" "$DISP22C_PRIMARY" 2000 "PRIMARY-C7-BODY"
+mktask s22c7 "$U1" "$DISP22C_MISSING"
+node - "$PAGE22C" "$U1" "$DISP22C_PRIMARY" "$DISP22C_MISSING" <<'NODE'
+const fs = require("node:fs");
+const [target, threadId, primaryDispatch, missingDispatch] = process.argv.slice(2);
+const records = [
+  { type: "session_meta", payload: { id: threadId } },
+];
+for (const [index, dispatchId] of [primaryDispatch, missingDispatch].entries()) {
+  const turnId = index === 0
+    ? "33333333-3333-4333-8333-333333333333"
+    : "00000000-0000-4000-8000-00000000c0de";
+  records.push(
+    { type: "event_msg", payload: { type: "task_started", turn_id: turnId } },
+    { type: "turn_context", payload: { turn_id: turnId, model: "" } },
+    { type: "event_msg", payload: {
+      type: "user_message",
+      turn_id: turnId,
+      message: `read C:/handoff/${dispatchId}.task.md and proceed`,
+    } },
+    { type: "event_msg", payload: {
+      type: "task_complete",
+      turn_id: turnId,
+      last_agent_message: null,
+      error: {
+        message: index === 0 ? "primary synthetic failure" : "missing synthetic failure",
+        codex_error_info: "PRIVATE-VIEWER-SIBLING",
+      },
+    } },
+  );
+}
+fs.writeFileSync(target, `${records.map((item) => JSON.stringify(item)).join("\n")}\n`);
+NODE
+before="$(manifest)"
+RUNARGS=(-c "$U1" -n 2 --rollout-path "$PAGE22C"); run CLAUDE_CODE_SESSION_ID=s22c7
+after="$(manifest)"; [[ "$before" == "$after" ]] \
+  || no "READ-ONLY VIOLATION: C7 viewer changed IPC manifest"
+TURN_ERROR_COUNT="$(printf '%s\n' "$OUT" | grep -c 'ROLLOUT_DIAGNOSTIC {"code":"turn-error"' || true)"
+MODEL_STATE_COUNT="$(printf '%s\n' "$OUT" | grep -c 'ROLLOUT_DIAGNOSTIC {"code":"turn-model-state"' || true)"
+if [[ $RC -eq 0 && "$OUT" == *"source=reply-file"* && "$OUT" == *"PRIMARY-C7-BODY"* \
+      && "$OUT" == *"source=none | reason=unavailable"* \
+      && "$OUT" == *"primary synthetic failure"* \
+      && "$OUT" == *"missing synthetic failure"* \
+      && "$TURN_ERROR_COUNT" -eq 2 && "$MODEL_STATE_COUNT" -eq 2 \
+      && "$OUT" != *"PRIVATE-VIEWER-SIBLING"* ]]; then
+  ok "viewer exposes named bounded turn-error/model facts for primary and absent replies"
+else
+  no "T22c C7 viewer diagnostics (rc=$RC errors=$TURN_ERROR_COUNT models=$MODEL_STATE_COUNT out=$OUT)"
+fi
+
 echo "== Static audit: no write/lock idioms =="
 if grep -nE 'mkdir|mktemp|[^-]mv |[^_]rm |touch |-delete|flock|>>?[^&].*IPC_ROOT' "$SCRIPT" | grep -v '^\s*#' >/dev/null 2>&1; then
   no "static audit: found a write/lock idiom (review grep hits)"; grep -nE 'mkdir|mktemp|mv |rm |touch |-delete|flock' "$SCRIPT" | grep -v '^\s*#'
@@ -227,12 +416,22 @@ if [[ -z "$WRAPPER" ]]; then
   no "T23 seam: handoff_to_codex.sh not found in repo or installed layout"
 else
   bash -n "$WRAPPER" && ok "bash -n handoff_to_codex.sh clean" || no "syntax error in wrapper"
-  SEAMROOT="$TMP/seamroot"; mkdir -p "$SEAMROOT"
-  BIN23="$TMP/bin23"; mkdir -p "$BIN23"
-  printf '#!/usr/bin/env bash\necho "{\\"ok\\":true}"\nexit 0\n' > "$BIN23/node"
-  printf '#!/usr/bin/env bash\nexit 0\n' > "$BIN23/codex"
-  printf '#!/usr/bin/env bash\nexit 0\n' > "$BIN23/powershell.exe"
-  chmod +x "$BIN23"/*
+  SEAMROOT="$TMP/seamroot"; mkdir -p "$SEAMROOT" || fatal "could not create T23 seam root"
+  BIN23="$TMP/bin23"; mkdir -p "$BIN23" || fatal "could not create T23 stub directory"
+  for _stub in node powershell.exe codex; do
+    printf '%s\n' '#!/usr/bin/env bash' \
+      'printf "FATAL: unexpected T23 wrapper child: %s\\n" "${0##*/}" >&2' \
+      'exit 97' > "$BIN23/$_stub" \
+      || fatal "could not materialize T23 $_stub tripwire"
+  done
+  chmod +x "$BIN23"/* || fatal "could not make T23 tripwires executable"
+  for _stub in node powershell.exe codex; do
+    _resolved="$(PATH="$BIN23:$PATH" command -v "$_stub" 2>/dev/null)" \
+      || fatal "T23 $_stub tripwire does not resolve"
+    [[ "$_resolved" == "$BIN23/$_stub" ]] \
+      || fatal "T23 $_stub resolved outside the harness: $_resolved"
+  done
+  unset _stub _resolved
   seam_manifest(){ "$REAL_FIND" "$SEAMROOT" -printf '%p|%s|%T@\n' 2>/dev/null | "$REAL_SORT"; }
   WOUT="$( cd "$TMP" && CODEX_IPC_ROOT="$SEAMROOT" CLAUDE_CODE_SESSION_ID=seam23 PATH="$BIN23:$PATH" bash "$WRAPPER" "seam probe task" 2>&1 )"; WRC=$?
   wtask="$("$REAL_FIND" "$SEAMROOT/seam23" -name '*.task.md' -type f 2>/dev/null | head -1)"
@@ -249,6 +448,343 @@ else
   sm_b="$(seam_manifest)"; VOUT="$( env CODEX_IPC_ROOT="$SEAMROOT" CLAUDE_CODE_SESSION_ID=seam23 bash "$SCRIPT" 2>&1 )"; VRC=$?; sm_a="$(seam_manifest)"
   [[ "$sm_b" == "$sm_a" ]] || no "READ-ONLY VIOLATION: seam manifest changed during viewer run (post-reply)"
   [[ $VRC -eq 0 ]] && printf '%s' "$VOUT" | grep -q "SEAM-REPLY-BODY-73" && ok "viewer renders the reply landed at the wrapper-advertised path" || no "viewer did not render seam reply (rc=$VRC)"
+fi
+
+echo "== T23b thread-bound manual envelope -> multi-page waiter/viewer fallback =="
+if [[ -z "$WRAPPER" ]]; then
+  no "T23b seam: wrapper unavailable"
+else
+  REAL_NODE23B="$(command -v node 2>/dev/null)" || REAL_NODE23B=""
+  if [[ -z "$REAL_NODE23B" ]]; then
+    no "T23b seam: real Node unavailable"
+  else
+    SEAM23B_ROOT="$TMP/seam23b-root"
+    SEAM23B_PAGES="$TMP/seam23b-pages"
+    SEAM23B_HOME="$TMP/seam23b-home"
+    SEAM23B_WORK="$TMP/seam23b-work"
+    BIN23B="$TMP/bin23b"
+    mkdir -p "$SEAM23B_ROOT" "$SEAM23B_PAGES" "$SEAM23B_HOME" "$SEAM23B_WORK" "$BIN23B" \
+      || fatal "could not create T23b isolated roots"
+    PAGE23B_OLD="$SEAM23B_PAGES/rollout-old-$U1.jsonl"
+    PAGE23B_CURRENT="$SEAM23B_PAGES/rollout-current-${U1}_${U2}.jsonl"
+    make_pages23b(){
+      "$REAL_NODE23B" - "$PAGE23B_OLD" "$PAGE23B_CURRENT" "$U1" <<'NODE'
+const fs = require("node:fs");
+const [oldPage, currentPage, threadId] = process.argv.slice(2);
+const predecessor = `${JSON.stringify({ type: "session_meta", payload: { id: threadId } })}\n`;
+const header = {
+  type: "session_meta",
+  payload: {
+    id: threadId,
+    session_id: threadId,
+    history_mode: "paginated",
+    history_base: {
+      thread_id: threadId,
+      end_byte_offset: Buffer.byteLength(predecessor, "utf8"),
+    },
+  },
+};
+fs.writeFileSync(oldPage, predecessor);
+fs.writeFileSync(currentPage, `${JSON.stringify(header)}\n`);
+NODE
+    }
+    make_pages23b
+    INSPECT23B_COUNT="$TMP/inspect23b.count"
+    FORBIDDEN23B="$TMP/forbidden23b.log"
+    cat > "$BIN23B/node" <<'EOF'
+#!/usr/bin/env bash
+case "${1##*/}" in
+  codex_ipc_session_inspect.mjs)
+    printf '1\n' >> "$INSPECT23B_COUNT"
+    "$REAL_NODE23B" - "$PAGE23B_CURRENT" "$THREAD23B" "$SEAM23B_PAGES" <<'NODE'
+const [page, threadId, sessionsRoot] = process.argv.slice(2);
+process.stdout.write(JSON.stringify({
+  ok: true,
+  dbThread: {
+    exists: true,
+    readOnlyOpenOk: true,
+    thread: {
+      exists: true,
+      id: threadId,
+      archived: 0,
+      model: "synthetic-model",
+      threadSource: "user",
+      rolloutPath: page,
+    },
+  },
+  targetClassification: {
+    kind: "root",
+    parentThreadId: null,
+    reasons: ["thread-source-root"],
+    warnings: [],
+  },
+  rollout: {
+    sessionsRoot,
+    selection: { status: "found", authority: "db.rollout_path", path: page },
+    primary: { parsedOk: true, path: page },
+  },
+}));
+NODE
+    ;;
+  codex_ipc_client.mjs)
+    if [[ "${MODE23B:-manual}" == accepted ]]; then
+      printf 'client\n' >> "$EVENTS23B"
+      "$REAL_NODE23B" - "$PAGE23B_CURRENT" "$THREAD23B" "$CLIENT23B_ARGS" "$CLIENT23B_TASK" "$@" <<'NODE'
+const fs = require("node:fs");
+const [page, thread, argsPath, taskPath, script, ...args] = process.argv.slice(2);
+const value = (flag) => args.filter((arg) => arg === flag).length === 1 ? args[args.indexOf(flag) + 1] : undefined;
+const pickup = value("--task");
+const match = /^read "(.+\.task\.md)" and proceed$/.exec(pickup ?? "");
+if (value("--thread") !== thread || !match || !fs.readFileSync(match[1], "utf8").includes("C2 accepted synthetic task")) process.exit(97);
+fs.writeFileSync(argsPath, JSON.stringify(args));
+fs.writeFileSync(taskPath, match[1]);
+const turnId = "33333333-3333-4333-8333-333333333333";
+fs.appendFileSync(page, [
+  { type: "event_msg", payload: { type: "task_started", turn_id: turnId } },
+  { type: "event_msg", payload: { type: "user_message", turn_id: turnId, message: pickup } },
+].map((record) => `${JSON.stringify(record)}\n`).join(""));
+process.stdout.write(JSON.stringify({ ok: true, targetThreadId: thread, sentRequests: [
+  { name: "thread-follower-start-turn", json: { method: "thread-follower-start-turn", params: { conversationId: thread } } },
+], response: { resultType: "success" } }));
+NODE
+      exit $?
+    fi
+    printf 'forbidden-node %s\n' "$*" >> "$FORBIDDEN23B"
+    exit 97
+    ;;
+  codex_ipc_rollout_observe.mjs)
+    if [[ "${MODE23B:-manual}" == accepted ]]; then
+      printf 'observe\n' >> "$EVENTS23B"
+      printf '%s\0' "$@" > "$OBSERVE23B_ARGS"
+      task="$(cat "$CLIENT23B_TASK")"
+      sha256sum "$task" "$PAGE23B_OLD" "$PAGE23B_CURRENT" > "$OBSERVE23B_BEFORE"
+      "$REAL_NODE23B" "$@" > "$OBSERVE23B_OUT"
+      rc=$?
+      sha256sum "$task" "$PAGE23B_OLD" "$PAGE23B_CURRENT" > "$OBSERVE23B_AFTER"
+      printf '%s\n' "$rc" > "$OBSERVE23B_STATUS"
+      cat "$OBSERVE23B_OUT"
+      exit "$rc"
+    fi
+    printf 'forbidden-node %s\n' "$*" >> "$FORBIDDEN23B"
+    exit 97
+    ;;
+  *) exec "$REAL_NODE23B" "$@";;
+esac
+EOF
+    for _stub in powershell.exe codex; do
+      cat > "$BIN23B/$_stub" <<'EOF'
+#!/usr/bin/env bash
+printf 'forbidden-child %s %s\n' "${0##*/}" "$*" >> "$FORBIDDEN23B"
+exit 97
+EOF
+    done
+    cat > "$BIN23B/powershell.exe" <<'EOF'
+#!/usr/bin/env bash
+script=""; previous=""
+for argument in "$@"; do
+  if [[ "$previous" == -File ]]; then script="${argument//\\//}"; break; fi
+  previous="$argument"
+done
+if [[ "${MODE23B:-manual}" == accepted && "$script" == "$POLICY23B" ]]; then
+  printf 'policy\n' >> "$EVENTS23B"
+  echo '{"schemaVersion":1,"ok":true,"purpose":"send","configuration":{"valid":true,"autoload":{"value":"off","source":"default"},"intendedHost":{"kind":"package","executable":null,"source":"default"}},"inventory":{"complete":true,"guiHosts":[{"matchesIntended":true}],"appServers":[]},"sendEligible":true,"sendReasons":[],"activationEligible":false,"activationReasons":["autoload-disabled"]}'
+  exit 0
+fi
+printf 'forbidden-child powershell.exe %s\n' "$*" >> "$FORBIDDEN23B"
+exit 97
+EOF
+    chmod +x "$BIN23B"/* || fatal "could not make T23b stubs executable"
+    for _stub in node powershell.exe codex; do
+      _resolved="$(PATH="$BIN23B:$PATH" command -v "$_stub" 2>/dev/null)" \
+        || fatal "T23b $_stub stub does not resolve"
+      [[ "$_resolved" == "$BIN23B/$_stub" ]] \
+        || fatal "T23b $_stub resolved outside the harness: $_resolved"
+    done
+    unset _stub _resolved
+
+    WOUT="$( cd "$SEAM23B_WORK" && env \
+      -u CODEX_IPC_ROLLOUT_PATH -u NODE_OPTIONS -u NODE_PATH -u BASH_ENV -u ENV \
+      HOME="$SEAM23B_HOME" USERPROFILE="$SEAM23B_HOME" \
+      TMPDIR="$SEAM23B_HOME" TMP="$SEAM23B_HOME" TEMP="$SEAM23B_HOME" \
+      CODEX_IPC_ROOT="$SEAM23B_ROOT" CODEX_IPC_RETENTION_DAYS=0 \
+      CODEX_IPC_GIT_CONTEXT=bounded CODEX_IPC_INCLUDE_TRANSCRIPT=0 \
+      CLAUDE_CODE_SESSION_ID=seam23b CODEX_IPC_SESSIONS_ROOT="$SEAM23B_PAGES" \
+      SEAM23B_PAGES="$SEAM23B_PAGES" \
+      REAL_NODE23B="$REAL_NODE23B" INSPECT23B_COUNT="$INSPECT23B_COUNT" \
+      FORBIDDEN23B="$FORBIDDEN23B" PAGE23B_CURRENT="$PAGE23B_CURRENT" THREAD23B="$U1" \
+      PATH="$BIN23B:$PATH" bash "$WRAPPER" --ipc "$U1" --deliver manual -- "C3 synthetic task" 2>&1 )"; WRC=$?
+    mapfile -t TASKS23B < <("$REAL_FIND" "$SEAM23B_ROOT/seam23b/$U1" -maxdepth 1 -name '*.task.md' -type f 2>/dev/null | "$REAL_SORT")
+    WAIT23B_COUNT="$(printf '%s\n' "$WOUT" | grep -c '^WAIT:' || true)"
+    PICKUP23B_COUNT="$(printf '%s\n' "$WOUT" | grep -c '^    read ".*\.task\.md" and proceed$' || true)"
+    if [[ $WRC -eq 0 && "${#TASKS23B[@]}" -eq 1 && "$WAIT23B_COUNT" -eq 1 && "$PICKUP23B_COUNT" -eq 1 \
+          && "$WOUT" != *"RESULT:"* ]]; then
+      ok "manual wrapper produced one real thread-bound envelope, pickup, and WAIT without RESULT"
+      TASK23B="${TASKS23B[0]}"
+      DISPATCH23B="$(basename "$TASK23B" .task.md)"
+      REPLY23B="${TASK23B%.task.md}.reply.md"
+      WAIT23B="$(printf '%s\n' "$WOUT" | grep '^WAIT:' | head -1)"
+      PICKUP23B="$(printf '%s\n' "$WOUT" | grep '^    read ".*\.task\.md" and proceed$' | head -1)"
+      if [[ "$WAIT23B" == *"--thread $U1"* && "$WAIT23B" == *"--dispatch $DISPATCH23B"* \
+            && "$WAIT23B" == *"--reply-path"* && "$WAIT23B" == *"--rollout-path"* ]]; then
+        ok "manual WAIT binds the actual thread, dispatch, reply, and designated page"
+      else
+        no "manual WAIT lost exact correlation (line=$WAIT23B)"
+      fi
+
+      "$REAL_NODE23B" - "$PAGE23B_CURRENT" "$PICKUP23B" <<'NODE'
+const fs = require("node:fs");
+const [page, pickup] = process.argv.slice(2);
+const turnId = "33333333-3333-4333-8333-333333333333";
+const body = "C3-SANDBOX-FALLBACK-BODY";
+const records = [
+  { type: "event_msg", payload: { type: "task_started", turn_id: turnId } },
+  { type: "event_msg", payload: { type: "user_message", turn_id: turnId, message: pickup } },
+  { type: "event_msg", payload: { type: "agent_message", turn_id: turnId, phase: "final_answer", message: body } },
+  { type: "event_msg", payload: { type: "task_complete", turn_id: turnId, last_agent_message: body } },
+];
+fs.appendFileSync(page, `${records.map((item) => JSON.stringify(item)).join("\n")}\n`);
+NODE
+      HASH23B_BEFORE="$(sha256sum "$TASK23B" "$PAGE23B_OLD" "$PAGE23B_CURRENT")"
+      WAIT23B_OUT="$TMP/wait23b.out"; WAIT23B_ERR="$TMP/wait23b.err"
+      WAIT23B_CMD="${WAIT23B#WAIT: }"
+      (
+        export HOME="$SEAM23B_HOME" USERPROFILE="$SEAM23B_HOME"
+        export TMPDIR="$SEAM23B_HOME" TMP="$SEAM23B_HOME" TEMP="$SEAM23B_HOME"
+        export CODEX_IPC_ROOT="$SEAM23B_ROOT" CODEX_IPC_SESSIONS_ROOT="$SEAM23B_PAGES"
+        export REAL_NODE23B INSPECT23B_COUNT FORBIDDEN23B PAGE23B_CURRENT
+        export THREAD23B="$U1" PATH="$BIN23B:$PATH"
+        eval "$WAIT23B_CMD --budget-ms 0"
+      ) >"$WAIT23B_OUT" 2>"$WAIT23B_ERR"; WAIT23B_RC=$?
+      printf 'done\n' > "$TMP/wait23b.expected"
+      if [[ $WAIT23B_RC -eq 0 ]] && cmp -s "$TMP/wait23b.expected" "$WAIT23B_OUT" \
+          && [[ "$(wc -l < "$WAIT23B_ERR" | tr -d ' ')" -eq 1 ]] \
+          && grep -Fxq 'WAIT_DIAGNOSTIC {"code":"reply-source","source":"rollout-fallback"}' "$WAIT23B_ERR" \
+          && ! grep -Fq 'C3-SANDBOX-FALLBACK-BODY' "$WAIT23B_OUT" "$WAIT23B_ERR"; then
+        ok "real waiter certifies the absent-reply dispatch from the bound multi-page rollout"
+      else
+        no "real waiter failed multi-page fallback (rc=$WAIT23B_RC out=$(cat "$WAIT23B_OUT") err=$(cat "$WAIT23B_ERR"))"
+      fi
+
+      VOUT="$(env CODEX_IPC_ROOT="$SEAM23B_ROOT" CLAUDE_CODE_SESSION_ID=seam23b \
+        CODEX_IPC_SESSIONS_ROOT="$SEAM23B_PAGES" REAL_NODE23B="$REAL_NODE23B" \
+        INSPECT23B_COUNT="$INSPECT23B_COUNT" FORBIDDEN23B="$FORBIDDEN23B" \
+        PAGE23B_CURRENT="$PAGE23B_CURRENT" THREAD23B="$U1" PATH="$BIN23B:$PATH" \
+        bash "$SCRIPT" --session seam23b -c "$U1" --rollout-path "$PAGE23B_CURRENT" 2>&1)"; VRC=$?
+      HASH23B_AFTER="$(sha256sum "$TASK23B" "$PAGE23B_OLD" "$PAGE23B_CURRENT")"
+      if [[ $VRC -eq 0 && "$VOUT" == *"source=rollout-fallback"* \
+            && "$VOUT" == *"C3-SANDBOX-FALLBACK-BODY"* ]]; then
+        ok "real viewer renders the certified multi-page rollout fallback body"
+      else
+        no "real viewer failed multi-page fallback rendering (rc=$VRC out=$VOUT)"
+      fi
+      if [[ ! -e "$REPLY23B" && "$HASH23B_BEFORE" == "$HASH23B_AFTER" \
+            && "$(wc -l < "$INSPECT23B_COUNT" | tr -d ' ')" -eq 1 \
+            && ! -e "$FORBIDDEN23B" ]]; then
+        ok "fallback path stays read-only, keeps reply absent, inspects once, and makes zero live contacts"
+      else
+        no "fallback seam mutated evidence, created a reply, re-inspected, or touched a live child"
+      fi
+    else
+      no "T23b manual wrapper setup failed (rc=$WRC tasks=${#TASKS23B[@]} waits=$WAIT23B_COUNT pickups=$PICKUP23B_COUNT out=$WOUT)"
+    fi
+
+    echo "== T23c inert accepted send -> real multi-page observer -> printed WAIT pending =="
+    # Independent pages/session: the manual run's completed turn cannot certify this dispatch.
+    SEAM23B_PAGES="$TMP/accepted-pages"
+    SEAM23B_HOME="$TMP/accepted-home"
+    mkdir -p "$SEAM23B_PAGES" "$SEAM23B_HOME" || fatal "could not isolate accepted seam"
+    PAGE23B_OLD="$SEAM23B_PAGES/rollout-old-$U1.jsonl"
+    PAGE23B_CURRENT="$SEAM23B_PAGES/rollout-current-${U1}_${U2}.jsonl"
+    make_pages23b
+    INSPECT23B_COUNT="$TMP/accepted-inspect.count"
+    FORBIDDEN23B="$TMP/accepted-forbidden.log"
+    EVENTS23B="$TMP/accepted-events.log"
+    CLIENT23B_ARGS="$TMP/accepted-client.args"
+    CLIENT23B_TASK="$TMP/accepted-client.task"
+    OBSERVE23B_ARGS="$TMP/accepted-observe.args"
+    OBSERVE23B_BEFORE="$TMP/accepted-observe.before"
+    OBSERVE23B_AFTER="$TMP/accepted-observe.after"
+    OBSERVE23B_OUT="$TMP/accepted-observe.out"
+    OBSERVE23B_STATUS="$TMP/accepted-observe.status"
+    POLICY23B="$(cd "$(dirname "$WRAPPER")" && pwd)/codex_ipc_host_policy.ps1"
+    POLICY23B="$(cygpath -m "$POLICY23B" 2>/dev/null || printf '%s' "$POLICY23B")"
+    export REAL_NODE23B INSPECT23B_COUNT FORBIDDEN23B EVENTS23B CLIENT23B_ARGS CLIENT23B_TASK
+    export OBSERVE23B_ARGS OBSERVE23B_BEFORE OBSERVE23B_AFTER OBSERVE23B_OUT OBSERVE23B_STATUS
+    export PAGE23B_OLD PAGE23B_CURRENT SEAM23B_PAGES POLICY23B
+    WOUT="$( cd "$SEAM23B_WORK" && env \
+      -u CODEX_IPC_SESSIONS_ROOT -u CODEX_IPC_ROLLOUT_PATH \
+      -u CODEX_IPC_AUTOLOAD -u CODEX_IPC_INTENDED_HOST -u CODEX_IPC_FOREGROUND_POLICY \
+      -u CODEX_IPC_FOREGROUND_SWITCH_STANDING_APPROVAL -u NODE_OPTIONS -u NODE_PATH -u BASH_ENV -u ENV \
+      HOME="$SEAM23B_HOME" USERPROFILE="$SEAM23B_HOME" \
+      TMPDIR="$SEAM23B_HOME" TMP="$SEAM23B_HOME" TEMP="$SEAM23B_HOME" \
+      CODEX_IPC_ROOT="$SEAM23B_ROOT" CODEX_IPC_RETENTION_DAYS=0 \
+      CODEX_IPC_GIT_CONTEXT=bounded CODEX_IPC_INCLUDE_TRANSCRIPT=0 \
+      CLAUDE_CODE_SESSION_ID=seam23c MODE23B=accepted THREAD23B="$U1" \
+      PATH="$BIN23B:$PATH" bash "$WRAPPER" --ipc "$U1" -- "C2 accepted synthetic task" 2>&1 )"; WRC=$?
+    mapfile -t TASKS23C < <("$REAL_FIND" "$SEAM23B_ROOT/seam23c/$U1" -maxdepth 1 -name '*.task.md' -type f 2>/dev/null)
+    if [[ $WRC -eq 0 && "${#TASKS23C[@]}" -eq 1 ]] \
+        && [[ "$(printf '%s\n' "$WOUT" | grep -c '^WAIT:')" -eq 1 ]] \
+        && [[ "$(printf '%s\n' "$WOUT" | grep -c '^RESULT:')" -eq 1 ]] \
+        && printf '%s\n' "$WOUT" | grep -Fxq 'RESULT: gui-delivered -- reason=renderer-owned -- confirmation=rollout-hit' \
+        && ! printf '%s\n' "$WOUT" | grep -Eq '^(FALLBACK|    read )'; then
+      ok "accepted wrapper emits one envelope, WAIT and exact renderer-owned/rollout-hit result"
+      TASK23C="${TASKS23C[0]}"; DISPATCH23C="$(basename "$TASK23C" .task.md)"
+      REPLY23C="${TASK23C%.task.md}.reply.md"
+      WAIT23C="$(printf '%s\n' "$WOUT" | grep '^WAIT:')"
+      # Decode the printed shell argument boundaries without running a substitute waiter.
+      ( eval "set -- ${WAIT23C#WAIT: }"; printf '%s\0' "$@" ) > "$TMP/accepted-wait.args"
+      "$REAL_NODE23B" - "$CLIENT23B_ARGS" "$OBSERVE23B_ARGS" "$TMP/accepted-wait.args" \
+        "$U1" "$DISPATCH23C" "$TASK23C" "$REPLY23C" "$PAGE23B_CURRENT" "$SEAM23B_PAGES" <<'NODE'
+const fs = require("node:fs");
+const path = require("node:path");
+const [clientPath, observerPath, waitPath, thread, dispatch, task, reply, page, root] = process.argv.slice(2);
+const client = JSON.parse(fs.readFileSync(clientPath, "utf8"));
+const observer = fs.readFileSync(observerPath, "utf8").split("\0").filter(Boolean);
+const wait = fs.readFileSync(waitPath, "utf8").split("\0").filter(Boolean);
+const value = (args, flag) => args.filter((arg) => arg === flag).length === 1 ? args[args.indexOf(flag) + 1] : undefined;
+const samePath = (a, b) => typeof a === "string" && path.resolve(a) === path.resolve(b);
+const pickup = /^read "(.+\.task\.md)" and proceed$/.exec(value(client, "--task") ?? "");
+if (value(client, "--thread") !== thread || !pickup || !samePath(pickup[1], task) ||
+    !observer[0].endsWith("/codex_ipc_rollout_observe.mjs") || wait[0] !== "node" || !wait[1].endsWith("/codex_ipc_wait.mjs") ||
+    ![observer, wait].every((args) => value(args, "--thread") === thread && value(args, "--dispatch") === dispatch &&
+      samePath(value(args, "--rollout-path"), page) && samePath(value(args, "--sessions-root"), root)) ||
+    !samePath(value(wait, "--reply-path"), reply) || !wait.includes("--status-exit-codes")) process.exit(1);
+process.stdout.write(`  EVIDENCE: accepted thread=${thread} dispatch=${dispatch} page=${path.basename(page)} scope=${path.basename(root)} exact-argv=true\n`);
+NODE
+      [[ $? -eq 0 ]] && ok "client, real observer and printed WAIT bind exact argument boundaries and page scope" \
+        || no "accepted seam lost thread/dispatch/reply/page/root argument binding"
+      printf 'rollout-hit\n' > "$TMP/accepted-observe.expected"
+      [[ "$(cat "$OBSERVE23B_STATUS")" == 0 ]] \
+        && cmp -s "$TMP/accepted-observe.expected" "$OBSERVE23B_OUT" \
+        && cmp -s "$OBSERVE23B_BEFORE" "$OBSERVE23B_AFTER" \
+        && ok "real multi-page observer finds only the accepted pickup and leaves task/pages unchanged" \
+        || no "real observer missed pickup or changed task/page bytes"
+      HASH23C_BEFORE="$(sha256sum "$TASK23C" "$PAGE23B_OLD" "$PAGE23B_CURRENT")"
+      (
+        unset CODEX_IPC_SESSIONS_ROOT CODEX_IPC_ROLLOUT_PATH NODE_OPTIONS NODE_PATH BASH_ENV ENV
+        export HOME="$SEAM23B_HOME" USERPROFILE="$SEAM23B_HOME"
+        export TMPDIR="$SEAM23B_HOME" TMP="$SEAM23B_HOME" TEMP="$SEAM23B_HOME"
+        export CODEX_IPC_ROOT="$SEAM23B_ROOT" MODE23B=accepted THREAD23B="$U1" PATH="$BIN23B:$PATH"
+        eval "${WAIT23C#WAIT: } --budget-ms 0"
+      ) > "$TMP/accepted-wait.out" 2> "$TMP/accepted-wait.err"; WAIT23C_RC=$?
+      printf 'pending\n' > "$TMP/accepted-wait.expected"
+      [[ $WAIT23C_RC -eq 2 ]] && cmp -s "$TMP/accepted-wait.expected" "$TMP/accepted-wait.out" \
+        && [[ ! -s "$TMP/accepted-wait.err" ]] \
+        && ok "actual printed real WAIT returns exactly pending/exit 2 with scope aliases unset" \
+        || no "printed WAIT is not correlated pending (rc=$WAIT23C_RC out=$(cat "$TMP/accepted-wait.out") err=$(cat "$TMP/accepted-wait.err"))"
+      HASH23C_AFTER="$(sha256sum "$TASK23C" "$PAGE23B_OLD" "$PAGE23B_CURRENT")"
+      [[ "$HASH23C_BEFORE" == "$HASH23C_AFTER" && ! -e "$REPLY23C" && ! -e "$FORBIDDEN23B" ]] \
+        && [[ "$(wc -l < "$INSPECT23B_COUNT" | tr -d ' ')" -eq 1 ]] \
+        && [[ "$(tr '\n' ' ' < "$EVENTS23B")" == 'policy client observe ' ]] \
+        && ! grep -Eq 'agent_message|task_complete' "$PAGE23B_CURRENT" \
+        && ok "pending remains read-only and reply-absent after one inspection/policy/send/observer, no helper" \
+        || no "accepted seam mutated evidence, fabricated completion, repeated contact or reached a tripwire"
+      printf '  EVIDENCE: accepted wait-exit=%s stdout=pending events=%s task/page SHA256:\n%s\n' \
+        "$WAIT23C_RC" "$(tr '\n' ',' < "$EVENTS23B")" "$HASH23C_AFTER"
+    else
+      no "accepted wrapper setup failed (rc=$WRC tasks=${#TASKS23C[@]} out=$WOUT)"
+    fi
+  fi
 fi
 
 echo ""

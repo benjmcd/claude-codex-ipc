@@ -58,6 +58,20 @@ root_dir_for() {
 
 die() { echo "ERROR: $*" >&2; exit 2; }
 
+# Manifest refs and blobs must come from REPO_ROOT, and generation must remain write-bounded
+# to its explicit outputs. Strip inherited Git selectors and GIT_TRACE* destinations first.
+while IFS= read -r _git_var; do
+  [[ "${_git_var^^}" == GIT_* ]] && unset "$_git_var"
+done < <(compgen -e)
+for _git_var in $(compgen -e); do
+  [[ "${_git_var^^}" != GIT_* ]] || die "could not clear inherited Git variable $_git_var"
+done
+unset _git_var
+export GIT_OPTIONAL_LOCKS=0 GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
+export GIT_ATTR_NOSYSTEM=1 GIT_PAGER=cat GIT_NO_REPLACE_OBJECTS=1
+export GIT_NO_LAZY_FETCH=1 GIT_TERMINAL_PROMPT=0
+export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0="$REPO_ROOT"
+
 # ---- file-set membership (mirrors install.sh allowlist semantics) ------------------------
 in_scope() { # in_scope <repo-relative-path> <runtime|overlay>
   local p="$1" scope="$2" runtime=0
@@ -239,7 +253,8 @@ cmd_cross_check() {
     }
   done
   t="$(printf '\t')"
-  tmp="$(mktemp -d)"
+  tmp="$(mktemp -d)" && [ -n "$tmp" ] && [ -d "$tmp" ] \
+    || { echo "CROSS FAIL: could not create manifest cross-check temporary directory" >&2; return 1; }
 
   # C1 -- the two overlay roots are one inventory.
   if cmp -s "$MANIFEST_DIR/root-claude.manifest" "$MANIFEST_DIR/root-agents.manifest"; then

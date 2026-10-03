@@ -23,25 +23,46 @@
 # + a PPID walk. Windows: MSYS `ps -e` builds the runner's descendant closure in MSYS pid
 # space (Win32 parent links break at MSYS fork/exec stubs, so a raw Win32 PPID walk cannot
 # span bash-to-bash boundaries) and maps each member to its Windows PID; Get-CimInstance
-# Win32_Process (ProcessId+ParentProcessId+Name, full table) then attributes every
+# Win32_Process (ProcessId+ParentProcessId+Name+CreationDate, positive-PID table) attributes every
 # node.exe — including node spawned by node, which MSYS ps cannot see — whose Win32 parent
 # chain reaches that closure. Global / pre-existing node is never counted (it is not a
 # descendant). FAIL-CLOSED: if enumeration fails, returns an unparseable snapshot, or
 # omits the runner's own PID (impossible for a live shell), the run ABORTS with GATE ERROR
 # (exit 3) — an owned count of 0 is never fabricated from a failed measurement.
 # KNOWN LIMITATION (documented, NOT covered): an owned node whose intermediate parents
-# already exited (orphan/reparent; or Windows PID reuse breaking a chain) can no longer be
-# attributed by ancestry and escapes the bound.
+# already exited (orphan/reparent; or rejected Windows PID reuse breaking a chain) can no longer be
+# attributed by ancestry and escapes the bound. Two Win32 snapshots bracket PRE mapping
+# reads. Stable MSYS PRE/POST mappings certify anchors, including settled exec remaps.
+# A missing POST may retain earlier ownership only with matching nondefunct PS/PRE mappings
+# and the same native identity in both snapshots; runner and enumeration-owner paths stay strict.
+# Old PS aliases and unbracketed mappings stay uncertain. Node attribution uses only the late
+# population; unresolved sampled ancestry fails measurement and only certified identities enter cleanup.
 #
 # Usage:
 #   run_release_gates.sh                 # preflight + 13 suites + text/docs/manifest/safety/contract
 #   run_release_gates.sh [suite ...]     # named suites + same unskippable outer gates
 #   run_release_gates.sh --no-safety [suite ...]  # skip safety only
 #   run_release_gates.sh --self-test-monitor      # exclusive watchdog self-test
+# Set IPC_GATE_LOG_DIR to a new private directory to retain complete child/enum evidence.
 set -uo pipefail
 
 TDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BASH_BIN="$(command -v bash)"
+
+# The outer manifest and safety gates invoke Git. Clear every inherited Git selector,
+# redirection, and trace sink here so the complete release battery cannot write through an
+# ambient GIT_TRACE* path or inspect a caller-selected repository.
+for _git_var in $(compgen -e); do
+  [[ "${_git_var^^}" == GIT_* ]] && unset "$_git_var"
+done
+for _git_var in $(compgen -e); do
+  [[ "${_git_var^^}" == GIT_* ]] \
+    && { echo "GATE ABORT: could not clear inherited Git variable $_git_var" >&2; exit 2; }
+done
+unset _git_var
+export GIT_OPTIONAL_LOCKS=0 GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
+export GIT_ATTR_NOSYSTEM=1 GIT_PAGER=cat GIT_NO_REPLACE_OBJECTS=1
+export GIT_NO_LAZY_FETCH=1 GIT_TERMINAL_PROMPT=0
 
 # ---- pinned budgets (NEXT-STEPS §5.1) ----------------------------------------------------
 # Correctness gates (UNCHANGED — never weakened): the process bound (PEAK_LIMIT=2,
@@ -55,8 +76,8 @@ KILL_DEADLINE_S=5            # on timeout, kill/reap the owned tree within this 
 # that recalibrate-and-record authorization is hereby extended to the per-suite value on Windows.
 # Historical calibration measured the then-nine standalone suites (all green, 381 assertions, 0 failures):
 #   * test_ipc.sh       ~362s
-#   * test_reply_view.sh ~453s  (its T23 nests a FULL test_ipc re-run — a Phase-5/WS-D de-dup
-#                                candidate; NOT fixed here)
+#   * test_reply_view.sh ~453s  (historical measurement from when T23 nested test_ipc; current
+#                                T23 uses a bounded wrapper/viewer seam)
 # Both exceed the provisional 300s per-suite cap on this host, so the caps are raised WITH margin:
 # per-suite 300 -> 600s; whole-layout 600 -> 1800s (raised proportionally). No correctness gate
 # above is touched.
@@ -110,80 +131,414 @@ is_windows() { case "$(uname -s 2>/dev/null)" in *NT*|*MINGW*|*MSYS*|*CYGWIN*) r
 # silently degrades to an empty set. Ownership = the process's parent chain reaches
 # RUNNER_PID (see header for the per-OS mechanism and the orphaned-parent limitation).
 RUNNER_PID=$$
+RUNNER_WINPID=""
+RUNNER_CREATED=""
+RUNNER_MSYS_START=""
+
+# Pure Git-for-Windows /proc stat parser. The comm field may contain spaces or
+# parentheses; consume through its last closing ") " before indexing the suffix.
+# Field 22 (suffix token 20) is retained as opaque decimal text, never clock-converted.
+# It is diagnostic, not identity: Cygwin recomputes it against a queried boot-time reference.
+# https://github.com/cygwin/cygwin/blob/main/winsup/cygwin/fhandler/process.cc
+parse_msys_stat() {
+  local expected="$1" record="$2" suffix fields=()
+  MSYS_STAT_PID="" MSYS_STAT_STATE="" MSYS_STAT_PPID="" MSYS_STAT_START=""
+  [[ "$record" =~ ^([1-9][0-9]*)[[:space:]]+\(.*\)[[:space:]](.*)$ ]] || return 1
+  MSYS_STAT_PID="${BASH_REMATCH[1]}"; suffix="${BASH_REMATCH[2]}"
+  [ "$MSYS_STAT_PID" = "$expected" ] || return 1
+  read -r -a fields <<<"$suffix"
+  [ "${#fields[@]}" -ge 20 ] || return 1
+  # Known /proc live states R/S/D/T/t/W/K/P/I and dead states Z/X/x; unknown states fail closed.
+  [[ "${fields[0]}" =~ ^[RSDTtWKPIZXx]$ && "${fields[1]}" =~ ^[0-9]+$ && "${fields[19]}" =~ ^[0-9]+$ ]] || return 1
+  MSYS_STAT_STATE="${fields[0]}"; MSYS_STAT_PPID="${fields[1]}"; MSYS_STAT_START="${fields[19]}"
+}
+
+unreadable_msys_endpoint() {
+  if [ -d "/proc/$2" ]; then printf '%s MALFORMED %s\n' "$1" "$2"
+  else printf '%s MISSING %s\n' "$1" "$2"; fi
+}
+
+# Pure endpoint classifier, shared with fixtures that exercise state and identity churn.
+classify_msys_endpoint() {
+  local p="$1" stat1="$2" win1="$3" stat2="$4" win2="$5" pid1 parent1 start1 state1
+  if ! parse_msys_stat "$p" "$stat1"; then printf 'MALFORMED %s\n' "$p"; return; fi
+  pid1="$MSYS_STAT_PID"; parent1="$MSYS_STAT_PPID"; start1="$MSYS_STAT_START"; state1="$MSYS_STAT_STATE"
+  if ! parse_msys_stat "$p" "$stat2"; then printf 'MALFORMED %s\n' "$p"; return; fi
+  if [[ "$state1" == [ZXx] || "$MSYS_STAT_STATE" == [ZXx] ]]; then
+    printf 'DEAD %s\n' "$p"; return
+  fi
+  if [[ ! "$win1" =~ ^[1-9][0-9]*$ || ! "$win2" =~ ^[1-9][0-9]*$ ]]; then
+    printf 'MALFORMED %s\n' "$p"; return
+  fi
+  if [ "$pid1" != "$MSYS_STAT_PID" ] || [ "$parent1" != "$MSYS_STAT_PPID" ] \
+    || [ "$win1" != "$win2" ]; then
+    printf 'TRANSITION %s\n' "$p"; return
+  fi
+  printf 'LIVE %s %s %s %s\n' "$p" "$parent1" "$start1" "$win1"
+}
+
+# Builtins only: each PS-listed logical PID is read stat1 -> winpid1 -> stat2 -> winpid2.
+# A phase emits one explicit availability result; changing R/S is not identity churn.
+collect_msys_endpoints() {
+  local phase="$1" table="$2" line fields=() p stat1 stat2 win1 win2 key leaf read_rc failed
+  local -A listed=()
+  while IFS= read -r line; do
+    read -r -a fields <<<"$line"
+    if [[ "${fields[0]:-}" =~ ^[A-Z]$ ]]; then fields=("${fields[@]:1}"); fi
+    p="${fields[0]:-}"
+    [[ "$p" =~ ^[1-9][0-9]*$ ]] && listed["$p"]=1
+  done <<<"$table"
+  for p in "${!listed[@]}"; do
+    stat1=""; stat2=""; win1=""; win2=""
+    failed=0
+    for key in stat1 win1 stat2 win2; do
+      read_rc=unattempted
+      if [ "$failed" -eq 0 ]; then
+        leaf=stat; [[ "$key" == win* ]] && leaf=winpid
+        printf 'READ %s %s %s\n' "$phase" "$p" "$key" >&8 || return 2
+        read_msys_endpoint_value "$key" "$p" "$leaf" 2>&8; read_rc=$?
+        [ "$read_rc" -eq 0 ] || [ -n "${!key}" ] || failed=1
+      fi
+      # NUL framing retains each original read value without shell evaluation.
+      printf '%s\0' "$phase" "$p" "$key" "$read_rc" "${!key}" >&7 || return 2
+    done
+    if [ "$failed" -ne 0 ]; then unreadable_msys_endpoint "$phase" "$p"; continue; fi
+    printf '%s ' "$phase"
+    classify_msys_endpoint "$p" "$stat1" "$win1" "$stat2" "$win2"
+  done
+}
+
+read_msys_endpoint_value() { IFS= read -r "$1" <"/proc/$2/$3"; }
+
+# Pure classifier shared by live enumeration and deterministic ownership fixtures.
+# Input: PS <raw MSYS row>; PRE/POST <status> <pid> [<ppid> <start> <winpid>];
+# CIM_PRE/CIM SELF <pid>; CIM_PRE/CIM <pid> <ppid> <name> <UTC creation>.
+# UTC identities use yyyyMMddHHmmssffffff (the common CIM/.NET microsecond precision).
+classify_windows_process_rows() {
+  awk -v me="$RUNNER_PID" -v enummsys="${1:-0}" -v pinnedpid="$RUNNER_WINPID" -v pinnedtime="$RUNNER_CREATED" '
+    function fail(s) { error = s }
+    function positive(s) { return s ~ /^[0-9]+$/ && s + 0 > 0 }
+    function timestamp(s,yr,mo,day,days) {
+      if (length(s) != 20 || s !~ /^[0-9]+$/) return 0
+      yr = substr(s,1,4)+0; mo = substr(s,5,2)+0; day = substr(s,7,2)+0
+      days = (mo == 2 ? 28 + (yr%4 == 0 && (yr%100 != 0 || yr%400 == 0)) :
+              (mo == 4 || mo == 6 || mo == 9 || mo == 11 ? 30 : 31))
+      return yr > 0 && mo >= 1 && mo <= 12 && day >= 1 && day <= days &&
+             substr(s,9,2)+0 < 24 && substr(s,11,2)+0 < 60 && substr(s,13,2)+0 < 60
+    }
+    function before(a,b) { return ("t" a) < ("t" b) }
+    function same(a,b) { return ("t" a) == ("t" b) }
+    function settled(p,a,b) {
+      a = "PRE" SUBSEP p; b = "POST" SUBSEP p
+      return !mdead[p] && estate[a] == "LIVE" && estate[b] == "LIVE" &&
+             same(eparent[a],eparent[b]) && same(ewin[a],ewin[b]) &&
+             same(eparent[a],mppid[p])
+    }
+    function certified(w) {
+      return w in wppid && w in bppid && same(bppid[w],wppid[w]) &&
+             same(bname[w],wname[w]) && same(btime[w],wtime[w])
+    }
+    function anchor(p) { return ewin["PRE" SUBSEP p] }
+    function stable(p) {
+      return settled(p) && (same(anchor(p),mwin[p]) ||
+             (p != me && p != enummsys && certified(anchor(p))))
+    }
+    function missing_post(p,a,b) {
+      a = "PRE" SUBSEP p; b = "POST" SUBSEP p
+      return p != me && p != enummsys && !mdead[p] &&
+             estate[a] == "LIVE" && estate[b] == "MISSING" &&
+             same(eparent[a],mppid[p]) && same(ewin[a],mwin[p]) &&
+             certified(anchor(p))
+    }
+    $1 == "PS" {
+      i = 2; status = ""
+      if ($i ~ /^[A-Z]$/) { status = $i; i++ } # optional MSYS status prefix
+      if ($i == "PID") next
+      p = $i; parent = $(i+1); win = $(i+3)
+      if (NF < i+7 || !positive(p) || parent !~ /^[0-9]+$/ ||
+          $(i+2) !~ /^[0-9]+$/ || win !~ /^[0-9]+$/) {
+        fail("malformed MSYS process row"); next
+      }
+      dead = (status == "Z" || $NF == "<defunct>")
+      if (p in mppid && (mppid[p] != parent || mwin[p] != win || mdead[p] != dead)) {
+        fail("conflicting MSYS process row"); next
+      }
+      mppid[p] = parent; mwin[p] = win; mdead[p] = dead; next
+    }
+    $1 == "PRE" || $1 == "POST" {
+      if (!positive($3) || !($3 in mppid) ||
+          ($2 != "LIVE" && $2 != "DEAD" && $2 != "MISSING" && $2 != "TRANSITION" && $2 != "MALFORMED") ||
+          ($2 == "LIVE" && (NF != 6 || $4 !~ /^[0-9]+$/ || $5 !~ /^[0-9]+$/ || !positive($6))) ||
+          ($2 != "LIVE" && NF != 3)) {
+        fail("malformed MSYS endpoint record"); next
+      }
+      key = $1 SUBSEP $3
+      if (++ecount[key] != 1) {
+        fail("duplicate MSYS endpoint record"); next
+      }
+      if ($2 == "MALFORMED") fail("malformed or unreadable MSYS endpoint")
+      estate[key] = $2; eparent[key] = $4; estart[key] = $5; ewin[key] = $6; next
+    }
+    $1 == "CIM_PRE" && $2 == "SELF" {
+      if (NF != 3 || !positive($3) || (preself != "" && preself != $3))
+        fail("malformed or conflicting early enumeration identity")
+      preself = $3; next
+    }
+    $1 == "CIM_PRE" {
+      if (NF != 5 || $2 !~ /^[0-9]+$/ || $3 !~ /^[0-9]+$/ || !timestamp($5)) {
+        fail("malformed early Win32 process identity"); next
+      }
+      if ($2 in bppid && (bppid[$2] != $3 || bname[$2] != $4 || !same(btime[$2],$5))) {
+        fail("conflicting early Win32 process row"); next
+      }
+      bppid[$2] = $3; bname[$2] = $4; btime[$2] = $5; next
+    }
+    $1 == "CIM" && $2 == "SELF" {
+      if (NF != 3 || !positive($3) || (enumself != "" && enumself != $3))
+        fail("malformed or conflicting enumeration identity")
+      enumself = $3; next
+    }
+    $1 == "CIM" {
+      if (NF != 5 || $2 !~ /^[0-9]+$/ || $3 !~ /^[0-9]+$/ || !timestamp($5)) {
+        fail("malformed Win32 process identity"); next
+      }
+      if ($2 in wppid && (wppid[$2] != $3 || wname[$2] != $4 || !same(wtime[$2],$5))) {
+        fail("conflicting Win32 process row"); next
+      }
+      wppid[$2] = $3; wname[$2] = $4; wtime[$2] = $5; next
+    }
+    NF { fail("unexpected process row") }
+    END {
+      runner = (me in mwin ? mwin[me] : "")
+      if (!(me in mppid) || !stable(me)) fail("runner MSYS continuity unavailable")
+      if (!positive(enummsys) || !(enummsys in mppid) || !stable(enummsys))
+        fail("enumeration-owner MSYS continuity unavailable")
+      for (p in mppid) {
+        if (ecount["PRE" SUBSEP p] != 1 || ecount["POST" SUBSEP p] != 1)
+          fail("missing or duplicate MSYS endpoint record")
+        if (stable(p) && !(anchor(p) in wppid)) fail("stable MSYS identity absent from Win32 snapshot")
+        if (stable(p) && anchor(p) in wppid) {
+          w = anchor(p)
+          if (!(w in bppid)) fail("stable MSYS identity absent from early Win32 snapshot")
+          else if (!same(bppid[w],wppid[w]) || !same(bname[w],wname[w]) || !same(btime[w],wtime[w]))
+            fail("stable MSYS Win32 identity changed during collection")
+        }
+      }
+      if (!positive(preself) || !(preself in bppid))
+        fail("early enumerator absent from Win32 snapshot")
+      if (!positive(enumself) || !(enumself in wppid))
+        fail("enumerator absent from Win32 snapshot")
+      if (error != "") { print "ENUM_ERROR:" error; exit 1 }
+      created = wtime[runner]; runnerstart = estart["PRE" SUBSEP me]
+      if ((pinnedpid != "" || pinnedtime != "") &&
+          (runner != pinnedpid || !same(created,pinnedtime)))
+        fail("runner identity changed across samples")
+      # Logical MSYS edges can span fork/exec stubs; they have no time ordering.
+      for (p in mppid) {
+        cur = p; hit = 0; walk++
+        while (cur in mppid) {
+          if (seen[cur] == walk) { fail("MSYS parent cycle"); break }
+          seen[cur] = walk
+          # A later missing endpoint does not invalidate certified PRE ownership.
+          # The enumeration owner path still requires stable endpoints throughout.
+          if (!stable(cur) && !(p != enummsys && missing_post(cur))) break
+          if (cur == me) { hit = 1; break }
+          cur = mppid[cur]
+        }
+        win = anchor(p)
+        if (hit && positive(win) && win in wppid) {
+          if (before(wtime[win],created))
+            fail("ambiguous MSYS mapped process identity")
+          else root[win] = 1
+        }
+      }
+      # Preserve possible runner paths through uncertain sampled edges, without certifying
+      # any identity. PS and available endpoint parents are evidence of possible ownership.
+      possible[me] = 1
+      do {
+        changed = 0
+        for (p in mppid) {
+          a = "PRE" SUBSEP p; b = "POST" SUBSEP p
+          if (!(p in possible) && (mppid[p] in possible ||
+              (estate[a] == "LIVE" && eparent[a] in possible) ||
+              (estate[b] == "LIVE" && eparent[b] in possible))) {
+            possible[p] = 1; changed = 1
+          }
+        }
+      } while (changed)
+      for (p in possible) {
+        a = "PRE" SUBSEP p; b = "POST" SUBSEP p
+        if (positive(mwin[p]) && !(mwin[p] in root)) uncertain[mwin[p]] = 1
+        if (positive(ewin[a]) && !(ewin[a] in root)) uncertain[ewin[a]] = 1
+        if (positive(ewin[b]) && !(ewin[b] in root)) uncertain[ewin[b]] = 1
+      }
+      if (!(mwin[enummsys] in root)) fail("enumeration owner has no certified runner path")
+      cur = enummsys; walk++
+      while (cur in mppid && cur != me) {
+        if (seen[cur] == walk) { fail("MSYS bookkeeping cycle"); break }
+        seen[cur] = walk
+        win = mwin[cur]
+        if (!stable(cur) || !(win in root)) break
+        book[win] = 1
+        cur = mppid[cur]
+      }
+      for (w in wname) {
+        if (before(wtime[w],created)) continue
+        cur = w; owned = 0; bookkeeping = 0; ambiguous = 0; walk++
+        while (cur in wppid) { # Existence must precede root membership.
+          if (seen[cur] == walk) { fail("Win32 parent cycle"); break }
+          seen[cur] = walk
+          if (cur in book) { bookkeeping = 1; break }
+          if (cur in root) { owned = 1; break }
+          if (cur in uncertain) ambiguous = 1
+          parent = wppid[cur]
+          if (!positive(parent) || !(parent in wppid)) break
+          # A parent created later than its child is a recycled PID, not ancestry.
+          if (before(wtime[cur],wtime[parent])) break
+          cur = parent
+        }
+        if (ambiguous && !owned && !bookkeeping && tolower(wname[w]) == "node.exe")
+          fail("candidate MSYS ancestry continuity unavailable")
+        if (owned && !bookkeeping && w != runner && w != enumself)
+          output[w] = w " " wname[w] " " wtime[w]
+      }
+      if (error != "") { print "ENUM_ERROR:" error; exit 1 }
+      print "RUNNER", runner, created, runnerstart
+      for (w in output) print output[w]
+    }'
+}
+
+# Only successful sample scratch is reused. A failed/incomplete sample is never
+# overwritten; the next index is selected with builtins, without an archival child.
+begin_enum_capture() {
+  local index prior stage
+  IFS= read -r index <"$RUNDIR/enum-next" && [[ "$index" =~ ^[0-9]+$ ]] || return 2
+  ENUM_FILE="$RUNDIR/enum-$index"
+  if [ -f "$ENUM_FILE.status" ]; then
+    IFS= read -r prior <"$ENUM_FILE.status" || return 2
+    if [ "$prior" != 0 ]; then
+      index=$((index + 1)); ENUM_FILE="$RUNDIR/enum-$index"
+      printf '%s\n' "$index" >"$RUNDIR/enum-next" || return 2
+    fi
+  fi
+  printf 'incomplete\n' >"$ENUM_FILE.status" || return 2
+  for stage in ps ps.err cim-pre cim-pre.err pre pre.err post post.err cim cim.err input output classifier.err endpoints endpoint.err; do
+    : >"$ENUM_FILE.$stage" || return 2
+  done
+}
+
+finish_enum_capture() {
+  local result="$1" capture_rc=0
+  printf 'context=%s\nrunner_pid=%s\nrunner_winpid=%s\nrunner_created=%s\nrunner_msys_start=%s\nenum_owner_pid=%s\nPS=%s\nCIM_PRE=%s\nPRE=%s\nPOST=%s\nCIM=%s\nCLASSIFIER=%s\n' \
+    "${ENUM_CONTEXT:-unspecified}" "$RUNNER_PID" "$RUNNER_WINPID" "$RUNNER_CREATED" "$RUNNER_MSYS_START" "$enum_owner_pid" \
+    "$ps_rc" "$cim_pre_rc" "$pre_rc" "$post_rc" "$cim_rc" "$classifier_rc" >"$ENUM_FILE.meta" || capture_rc=2
+  [ "$capture_rc" -eq 0 ] && printf '%s\n' "$result" >"$ENUM_FILE.status" || capture_rc=2
+  if [ "$capture_rc" -ne 0 ]; then
+    echo "CAPTURE ERROR: incomplete enumeration evidence at $ENUM_FILE" >&2
+    [ "$result" -ne 0 ] || result=2
+  fi
+  if [ "$result" -ne 0 ]; then
+    printf 'enumeration evidence: %s (context=%s)\n' "$ENUM_FILE" "${ENUM_CONTEXT:-unspecified}" >&2
+  fi
+  return "$result"
+}
+
+enum_collection_error() {
+  printf '%s\n' "$1" >"$ENUM_FILE.output" || echo "CAPTURE ERROR: enumeration diagnostic incomplete" >&2
+  printf '%s\n' "$1"
+  finish_enum_capture 1
+}
+
+# Normalize names for strict framing; retain all positive native PIDs and immutable birth times.
+collect_windows_snapshot() {
+  powershell.exe -NoProfile -NonInteractive -Command "\$ErrorActionPreference='Stop'; 'SELF {0}' -f \$PID; Get-CimInstance Win32_Process | Where-Object { \$_.ProcessId -gt 0 } | ForEach-Object { '{0} {1} {2} {3}' -f \$_.ProcessId, \$_.ParentProcessId, (\$_.Name -replace '\\s','_'), \$_.CreationDate.ToUniversalTime().ToString('yyyyMMddHHmmssffffff',[Globalization.CultureInfo]::InvariantCulture) }"
+}
 
 owned_process_rows() {
-  local enum_owner_pid="$BASHPID"
+  local enum_owner_pid="$BASHPID" ENUM_FILE ps_rc=unattempted pre_rc=unattempted
+  local cim_pre_rc=unattempted cim_rc=unattempted post_rc=unattempted classifier_rc=unattempted result out
+  if ! begin_enum_capture; then
+    echo "CAPTURE ERROR: could not acquire enumeration scratch" >&2
+    return 2
+  fi
   if is_windows; then
-    local pstab cimtab
+    local pstab cimpretab cimtab pretab posttab
     # Layer 1: MSYS process table (PID PPID PGID WINPID ... after a header line).
-    if ! pstab="$(ps -e)"; then
-      echo "ENUM_ERROR:MSYS ps enumeration failed (nonzero exit)"; return 1
+    ps -e >"$ENUM_FILE.ps" 2>"$ENUM_FILE.ps.err"; ps_rc=$?
+    if [ "$ps_rc" -ne 0 ]; then
+      enum_collection_error "ENUM_ERROR:MSYS ps enumeration failed (nonzero exit)"; return $?
     fi
-    if ! printf '%s\n' "$pstab" | awk -v me="$RUNNER_PID" 'NR>1 && $1==me{f=1} END{exit f?0:1}'; then
-      echo "ENUM_ERROR:runner pid $RUNNER_PID absent from MSYS ps snapshot (enumeration untrustworthy)"; return 1
+    pstab="$(<"$ENUM_FILE.ps")" || {
+      echo 'CAPTURE ERROR: original PS output unreadable' >&2; finish_enum_capture 2; return $?;
+    }
+    # Windows births bracket PRE mapping reads; PRE/POST bracket the late population.
+    # POST is a later logical check, not a source of counted Windows identities.
+    # Only a missing POST with an unchanged PS/PRE mapping can retain bracketed ownership.
+    collect_windows_snapshot >"$ENUM_FILE.cim-pre" 2>"$ENUM_FILE.cim-pre.err"; cim_pre_rc=$?
+    if [ "$cim_pre_rc" -ne 0 ]; then
+      enum_collection_error "ENUM_ERROR:early Win32_Process enumeration failed (powershell.exe nonzero exit)"; return $?
     fi
-    # Layer 2: full Win32 process table "ProcessId ParentProcessId Name" (NO name filter:
-    # ancestry has to be walked through non-node intermediaries). Failure is NOT swallowed.
-    if ! cimtab="$(powershell.exe -NoProfile -NonInteractive -Command "'SELF {0}' -f \$PID; Get-CimInstance Win32_Process | ForEach-Object { '{0} {1} {2}' -f \$_.ProcessId, \$_.ParentProcessId, \$_.Name }")"; then
-      echo "ENUM_ERROR:Win32_Process enumeration failed (powershell.exe nonzero exit)"; return 1
+    collect_msys_endpoints PRE "$pstab" >"$ENUM_FILE.pre" 2>"$ENUM_FILE.pre.err" \
+      7>"$ENUM_FILE.endpoints" 8>"$ENUM_FILE.endpoint.err"; pre_rc=$?
+    if [ "$pre_rc" -ne 0 ]; then
+      if [ "$pre_rc" -eq 2 ]; then
+        echo "CAPTURE ERROR: MSYS PRE collection incomplete" >&2
+        finish_enum_capture 2; return $?
+      fi
+      enum_collection_error "ENUM_ERROR:MSYS PRE identity collection failed"; return $?
     fi
-    cimtab="$(printf '%s\n' "$cimtab" | tr -d '\r')"
-    if ! printf '%s\n' "$cimtab" | grep -qE '^SELF [0-9]+$' || ! printf '%s\n' "$cimtab" | grep -qE '^[0-9]+ [0-9]+ .'; then
-      echo "ENUM_ERROR:Win32_Process enumeration returned no parseable rows"; return 1
+    pretab="$(<"$ENUM_FILE.pre")" || {
+      echo 'CAPTURE ERROR: original PRE output unreadable' >&2; finish_enum_capture 2; return $?;
+    }
+    # Layer 2: this late positive-PID population alone supplies native ancestry/counts.
+    # Missing parents and PID0 are not roots; collection failure is never a zero count.
+    collect_windows_snapshot >"$ENUM_FILE.cim" 2>"$ENUM_FILE.cim.err"; cim_rc=$?
+    if [ "$cim_rc" -ne 0 ]; then
+      enum_collection_error "ENUM_ERROR:Win32_Process enumeration failed (powershell.exe nonzero exit)"; return $?
     fi
+    collect_msys_endpoints POST "$pstab" >"$ENUM_FILE.post" 2>"$ENUM_FILE.post.err" \
+      7>>"$ENUM_FILE.endpoints" 8>>"$ENUM_FILE.endpoint.err"; post_rc=$?
+    if [ "$post_rc" -ne 0 ]; then
+      if [ "$post_rc" -eq 2 ]; then
+        echo "CAPTURE ERROR: MSYS POST collection incomplete" >&2
+        finish_enum_capture 2; return $?
+      fi
+      enum_collection_error "ENUM_ERROR:MSYS POST identity collection failed"; return $?
+    fi
+    posttab="$(<"$ENUM_FILE.post")" || {
+      echo 'CAPTURE ERROR: original POST output unreadable' >&2; finish_enum_capture 2; return $?;
+    }
+    cimpretab="$(<"$ENUM_FILE.cim-pre")" || {
+      echo 'CAPTURE ERROR: original early CIM output unreadable' >&2; finish_enum_capture 2; return $?;
+    }
+    cimpretab="${cimpretab//$'\r'/}"
+    cimtab="$(<"$ENUM_FILE.cim")" || {
+      echo 'CAPTURE ERROR: original CIM output unreadable' >&2; finish_enum_capture 2; return $?;
+    }
+    cimtab="${cimtab//$'\r'/}"
     {
-      printf '%s\n' "$pstab" | awk 'NR>1 { print "PS", $1, $2, $4 }'
-      printf '%s\n' "$cimtab" | awk '{ print "CIM", $1, $2, $3 }'
-    } | awk -v me="$RUNNER_PID" -v enummsys="$enum_owner_pid" '
-      $1 == "PS" { mppid[$2] = $3; mwin[$2] = $4; next }
-      $1 == "CIM" && $2 == "SELF" { enumself = $3; next }
-      $1 == "CIM" { wppid[$2] = $3; wname[$2] = $4; next }
-      END {
-        if (mwin[me] == "") { print "ENUM_ERROR:runner row in MSYS ps snapshot has no WINPID"; exit 1 }
-        # (1) descendant closure of the runner in MSYS pid space -> Windows PID roots.
-        for (p in mppid) {
-          cur = p; d = 0; hit = 0
-          while (d++ < 64) {
-            if (cur == me) { hit = 1; break }
-            if (!(cur in mppid)) break
-            nxt = mppid[cur]; if (nxt == cur) break
-            cur = nxt
-          }
-          if (hit && mwin[p] != "") root[mwin[p]] = 1
-        }
-        if (!(mwin[me] in wppid)) {
-          print "ENUM_ERROR:runner winpid " mwin[me] " absent from Win32_Process snapshot"; exit 1
-        }
-        cur = enummsys; d = 0
-        while (d++ < 64) {
-          if (cur == me) break
-          if (mwin[cur] != "") book[mwin[cur]] = 1
-          if (!(cur in mppid)) break
-          nxt = mppid[cur]; if (nxt == cur) break
-          cur = nxt
-        }
-        # (2) every Win32 row whose parent chain reaches a closure root.
-        for (w in wname) {
-          cur = w; d = 0; owned = 0; bookkeeping = 0
-          while (d++ < 64) {
-            if (cur in book) { bookkeeping = 1; break }
-            if (cur in root) { owned = 1; break }
-            if (!(cur in wppid)) break            # parent exited: chain unresolvable (see limitation)
-            nxt = wppid[cur]; if (nxt == cur) break
-            cur = nxt
-          }
-          if (owned && !bookkeeping && w != mwin[me] && w != enumself) print w, wname[w]
-        }
-      }'
+      printf '%s\n' "$pstab" | awk '{ print "PS", $0 }' &&
+      printf '%s\n' "$cimpretab" | awk 'NF { print "CIM_PRE", $0 }' &&
+      printf '%s\n' "$pretab" &&
+      printf '%s\n' "$posttab" &&
+      printf '%s\n' "$cimtab" | awk 'NF { print "CIM", $0 }'
+    } >"$ENUM_FILE.input" || { echo 'CAPTURE ERROR: classifier input unavailable' >&2; finish_enum_capture 2; return $?; }
+    classify_windows_process_rows "$enum_owner_pid" <"$ENUM_FILE.input" >"$ENUM_FILE.output" 2>"$ENUM_FILE.classifier.err"
+    classifier_rc=$?
   else
     local tab
-    if ! tab="$(sh -c 'printf "SELF %s\n" "$$"; exec ps -e -o pid=,ppid=,comm=')"; then
-      echo "ENUM_ERROR:ps enumeration failed (nonzero exit)"; return 1
+    sh -c 'printf "SELF %s\n" "$$"; exec ps -e -o pid=,ppid=,comm=' >"$ENUM_FILE.ps" 2>"$ENUM_FILE.ps.err"; ps_rc=$?
+    if [ "$ps_rc" -ne 0 ]; then
+      enum_collection_error "ENUM_ERROR:ps enumeration failed (nonzero exit)"; return $?
     fi
+    tab="$(<"$ENUM_FILE.ps")" || {
+      echo 'CAPTURE ERROR: original PS output unreadable' >&2; finish_enum_capture 2; return $?;
+    }
     if ! printf '%s\n' "$tab" | awk -v me="$RUNNER_PID" '$1==me{f=1} END{exit f?0:1}'; then
-      echo "ENUM_ERROR:runner pid $RUNNER_PID absent from ps snapshot (enumeration untrustworthy)"; return 1
+      enum_collection_error "ENUM_ERROR:runner pid $RUNNER_PID absent from ps snapshot (enumeration untrustworthy)"; return $?
     fi
-    printf '%s\n' "$tab" | awk -v me="$RUNNER_PID" -v enum="$enum_owner_pid" '
+    printf '%s\n' "$tab" >"$ENUM_FILE.input" || { echo 'CAPTURE ERROR: classifier input unavailable' >&2; finish_enum_capture 2; return $?; }
+    awk -v me="$RUNNER_PID" -v enum="$enum_owner_pid" '
       $1 == "SELF" { enumself = $2; next }
       { ppid[$1] = $2; comm[$1] = $3 }
       END {
@@ -206,32 +561,54 @@ owned_process_rows() {
           }
           if (hit && !bookkeeping && p != me && p != enumself) print p, comm[p]
         }
-      }'
+      }' <"$ENUM_FILE.input" >"$ENUM_FILE.output" 2>"$ENUM_FILE.classifier.err"
+    classifier_rc=$?
   fi
+  result=0; [ "$classifier_rc" -eq 0 ] || result=1
+  # A failed read must not become an empty owned set or mark this scratch reusable.
+  out="$(<"$ENUM_FILE.output")" || {
+    echo 'CAPTURE ERROR: original classifier output unreadable' >&2
+    [ "$result" -ne 0 ] || result=2
+    finish_enum_capture "$result"; return $?
+  }
+  finish_enum_capture "$result"; result=$?
+  printf '%s\n' "$out"
+  return "$result"
 }
 
 owned_descendant_pids() {
   local out rc
   out="$(owned_process_rows)"; rc=$?
   [ "$rc" -eq 0 ] || { printf '%s\n' "$out"; return "$rc"; }
-  printf '%s\n' "$out" | awk 'NF >= 2 { print $1 }'
+  if is_windows; then
+    printf '%s\n' "$out" | awk '$1 != "RUNNER" && NF == 3 { print $1, $3 }'
+  else
+    printf '%s\n' "$out" | awk 'NF >= 2 { print $1 }'
+  fi
+}
+
+# Pure projection of certified rows; every later owned_node_pids call enumerates anew.
+node_pids_from_rows() {
+  printf '%s\n' "$1" | awk '$1 != "RUNNER" && NF >= 2 && tolower($2) ~ /(^|\/)node(\.exe)?$/ { print $1 }'
 }
 
 owned_node_pids() {
   local out rc
   out="$(owned_process_rows)"; rc=$?
   [ "$rc" -eq 0 ] || { printf '%s\n' "$out"; return "$rc"; }
-  printf '%s\n' "$out" | awk 'NF >= 2 && tolower($2) ~ /(^|\/)node(\.exe)?$/ { print $1 }'
+  node_pids_from_rows "$out"
 }
 
 # count_owned_node: prints the owned count on success; on enumeration failure prints the
-# ENUM_ERROR reason to stderr and returns 1. Callers MUST treat rc!=0 as fatal (fail closed).
+# ENUM_ERROR reason to stderr and returns 1 (capture failure: 2). Callers fail closed.
 count_owned_node() {
   local out rc
   out="$(owned_node_pids)"; rc=$?
   if [ "$rc" -ne 0 ]; then
-    printf '%s\n' "$out" | grep '^ENUM_ERROR:' >&2 || echo "ENUM_ERROR:unknown enumeration failure" >&2
-    return 1
+    if [ "$rc" -ne 2 ]; then
+      printf '%s\n' "$out" | grep '^ENUM_ERROR:' >&2 || echo "ENUM_ERROR:unknown enumeration failure" >&2
+    fi
+    return "$rc"
   fi
   printf '%s\n' "$out" | sed '/^$/d' | grep -c . || true
 }
@@ -240,25 +617,48 @@ count_owned_descendants() {
   local out rc
   out="$(owned_descendant_pids)"; rc=$?
   if [ "$rc" -ne 0 ]; then
-    printf '%s\n' "$out" | grep '^ENUM_ERROR:' >&2 || echo "ENUM_ERROR:unknown enumeration failure" >&2
-    return 1
+    if [ "$rc" -ne 2 ]; then
+      printf '%s\n' "$out" | grep '^ENUM_ERROR:' >&2 || echo "ENUM_ERROR:unknown enumeration failure" >&2
+    fi
+    return "$rc"
   fi
   printf '%s\n' "$out" | sed '/^$/d' | grep -c . || true
+}
+
+reap_direct_child() {
+  local spid="${1:-}" k0
+  if [ -n "$spid" ]; then
+    k0=$SECONDS
+    # $spid is the direct child returned by this shell, not inferred ancestry.
+    kill "$spid" 2>/dev/null || true
+    while kill -0 "$spid" 2>/dev/null && [ $((SECONDS - k0)) -lt "$POST_SUITE_DRAIN_S" ]; do sleep 0.2; done
+    if kill -0 "$spid" 2>/dev/null; then kill -KILL "$spid" 2>/dev/null || true; fi
+    k0=$SECONDS
+    while kill -0 "$spid" 2>/dev/null && [ $((SECONDS - k0)) -lt "$KILL_DEADLINE_S" ]; do sleep 0.2; done
+    if kill -0 "$spid" 2>/dev/null; then
+      echo "  ENUM ABORT: direct suite child $spid still alive; bounded reap failed" >&2
+    else
+      wait "$spid" 2>/dev/null || true
+      echo "  ENUM ABORT: direct suite child $spid reaped" >&2
+    fi
+  fi
 }
 
 # enum_abort: fail the whole run closed when the owned set cannot be measured.
 # enum_abort <context> [suite-child-pid]
 enum_abort() {
-  local ctx="$1" spid="${2:-}" k0
-  if [ -n "$spid" ]; then
-    kill "$spid" 2>/dev/null || true
-    k0=$SECONDS
-    while kill -0 "$spid" 2>/dev/null && [ $((SECONDS - k0)) -lt "$KILL_DEADLINE_S" ]; do sleep 0.2; done
-    if kill -0 "$spid" 2>/dev/null; then kill -KILL "$spid" 2>/dev/null || true; fi
-    wait "$spid" 2>/dev/null || true
-  fi
+  local ctx="$1" spid="${2:-}"
+  reap_direct_child "$spid"
   echo "GATE ERROR: owned-Node enumeration failed ($ctx); the process bound cannot be measured — failing closed (exit 3). Suite child processes may need manual cleanup." >&2
   exit 3
+}
+
+measurement_abort() {
+  local rc="$1" ctx="$2" spid="${3:-}"
+  [ "$rc" -eq 2 ] || enum_abort "$ctx" "$spid"
+  reap_direct_child "$spid"
+  echo "GATE ABORT: required evidence capture failed ($ctx); incomplete evidence (exit 2)" >&2
+  exit 2
 }
 
 kill_owned_tree() {
@@ -271,14 +671,83 @@ kill_owned_tree() {
       return 1
     fi
   fi
+  if is_windows; then
+    captured_windows_processes kill "$pids"
+    return $?
+  fi
   for pid in $pids; do
     case "$pid" in ''|*[!0-9]*) continue;; esac
-    if is_windows; then
-      taskkill //PID "$pid" //T //F >/dev/null 2>&1 || true
-    else
-      kill -TERM "$pid" 2>/dev/null || true
-    fi
+    kill -TERM "$pid" 2>/dev/null || true
   done
+}
+
+# Carry PID + CreationDate through cleanup. Opening Handle binds this Process object
+# to one kernel process; StartTime and Kill use that retained handle, even after PID reuse.
+# A replacement is neither terminated nor reported as a survivor of the captured set.
+captured_windows_processes() {
+  local mode="$1" identities="$2" cleanup_script
+  IFS= read -r -d '' cleanup_script <<'POWERSHELL' || true
+    # IPC_GATE_IDENTITY_CLEANUP (fixture shim distinguishes cleanup from enumeration)
+    $ErrorActionPreference = "Stop"
+    $mode = $env:IPC_GATE_CLEANUP_MODE
+    if ($mode -ne "kill" -and $mode -ne "live") { throw "Invalid cleanup mode" }
+    $rows = @([Console]::In.ReadToEnd() -split "\r?\n" | Where-Object { $_ -ne "" })
+    foreach ($row in $rows) {
+      if ($row -notmatch "^[1-9][0-9]* [0-9]{20}$") { throw "Malformed captured identity" }
+    }
+    $failed = $false
+    foreach ($row in $rows) {
+      $fields = $row -split " "
+      $proc = $null
+      try {
+        try { $proc = [Diagnostics.Process]::GetProcessById([int]$fields[0]) }
+        catch [Management.Automation.MethodInvocationException] {
+          if ($_.Exception.InnerException -is [ArgumentException]) { continue }
+          throw
+        }
+        # Method syntax preserves typed getter errors; property reads can yield null.
+        # On this fresh local object, .NET reports an exited PID with this exception.
+        try { $handle = $proc.get_Handle() } catch [InvalidOperationException] { continue }
+        if ($null -eq $handle -or $handle -eq [IntPtr]::Zero) { throw "Captured process handle unavailable" }
+        if ($proc.HasExited) { continue }
+        $created = $proc.StartTime.ToUniversalTime().ToString("yyyyMMddHHmmssffffff",[Globalization.CultureInfo]::InvariantCulture)
+        if ($created -ne $fields[1]) { continue }
+        if ($mode -eq "kill") {
+          try { $proc.Kill() }
+          catch [ComponentModel.Win32Exception] {
+            # ERROR_ACCESS_DENIED can mean this identity-verified process has exited.
+            # Certify only with the same retained handle, before disposing it.
+            $killMessage = $_.Exception.Message
+            $win32 = $_.Exception
+            if ($win32 -isnot [ComponentModel.Win32Exception]) { $win32 = $win32.InnerException }
+            $gone = $false
+            if ($win32 -is [ComponentModel.Win32Exception] -and $win32.NativeErrorCode -eq 5) {
+              try { $gone = $proc.HasExited } catch { $gone = $false }
+            }
+            if (-not $gone) {
+              [Console]::Error.WriteLine("Identity cleanup failed: " + $row + ": " + $killMessage)
+              $failed = $true
+            }
+            continue
+          }
+        }
+        if (-not $proc.HasExited) { $row }
+      } catch [InvalidOperationException] {
+        if ($null -eq $proc -or -not $proc.HasExited) {
+          [Console]::Error.WriteLine("Identity cleanup failed: " + $row + ": " + $_.Exception.Message)
+          $failed = $true
+        }
+      } catch {
+        [Console]::Error.WriteLine("Identity cleanup failed: " + $row + ": " + $_.Exception.Message)
+        $failed = $true
+      } finally { if ($null -ne $proc) { $proc.Dispose() } }
+    }
+    if ($failed) { exit 1 }
+    exit 0
+POWERSHELL
+  printf '%s\n' "$identities" \
+    | IPC_GATE_CLEANUP_MODE="$mode" powershell.exe -NoProfile -NonInteractive -Command "$cleanup_script" \
+    | tr -d '\r'
 }
 
 # Prints the retained POSIX PID subset that is still present. Timeout cleanup sends KILL to
@@ -321,7 +790,7 @@ record_fail() { FAILURES+=("$1"); echo "  GATE FAIL: $1"; }
 # run_monitored <label> <argv...>
 run_monitored() {
   local label="$1"; shift
-  local logf spid peak=0 owned t0 rc=0 timed_out=0 deadline remaining
+  local logf logfd spid peak=0 owned t0 rc=0 timed_out=0 deadline remaining ENUM_CONTEXT
   local d0 drained=0 residual captured="" captured_residual="" live_captured="" reasons=() skips sl text k0 pid skip_lines=()
   [ "$#" -gt 0 ] || { record_fail "$label: rc=2 empty argv"; INFRA_FAILURE=1; return 2; }
   MONITOR_COUNTER=$((MONITOR_COUNTER + 1))
@@ -334,24 +803,49 @@ run_monitored() {
   deadline="$MONITOR_TIMEOUT_S"
   [ "$remaining" -lt "$deadline" ] && deadline="$remaining"
   echo "== running $label =="
-  "$@" >"$logf" 2>&1 &
+  printf '  child log: %s -> %s\n' "$label" "$logf"
+  if ! printf '%s\t%s\n' "$label" "$logf" >>"$RUNDIR/children"; then
+    record_fail "$label: rc=2 child log mapping unavailable; child not launched"
+    INFRA_FAILURE=1; return 2
+  fi
+  if ! exec {logfd}>"$logf"; then
+    record_fail "$label: rc=2 child log unavailable; child not launched"
+    INFRA_FAILURE=1; return 2
+  fi
+  "$@" >&"$logfd" 2>&1 &
   spid=$!
+  exec {logfd}>&-
   t0=$SECONDS
   while kill -0 "$spid" 2>/dev/null; do
-    owned="$(count_owned_node)" || enum_abort "mid-child sample, $label" "$spid"
+    ENUM_CONTEXT="mid-child sample, $label"
+    owned="$(count_owned_node)" || measurement_abort "$?" "$ENUM_CONTEXT" "$spid"
     [ "$owned" -gt "$peak" ] && peak="$owned"
     if [ $((SECONDS - t0)) -ge "$deadline" ]; then
       timed_out=1; rc=124
-      captured="$(owned_descendant_pids)" || enum_abort "timeout snapshot, $label" "$spid"
+      ENUM_CONTEXT="timeout snapshot, $label"
+      captured="$(owned_descendant_pids)" || measurement_abort "$?" "$ENUM_CONTEXT" "$spid"
       echo "  MONITOR TIMEOUT: $label after ${deadline}s; captured descendant(s): ${captured:-<none>}" >&2
       k0=$SECONDS
-      kill_owned_tree "$captured" || true
-      kill "$spid" 2>/dev/null || true
       if is_windows; then
-        while kill -0 "$spid" 2>/dev/null && [ $((SECONDS - k0)) -lt "$KILL_DEADLINE_S" ]; do sleep 0.2; done
-        if kill -0 "$spid" 2>/dev/null; then kill -KILL "$spid" 2>/dev/null || true; fi
-        wait "$spid" 2>/dev/null || true
+        if ! kill_owned_tree "$captured" >/dev/null; then
+          reasons+=("identity-cleanup-failed")
+        fi
+        while [ $((SECONDS - k0)) -lt "$KILL_DEADLINE_S" ]; do
+          captured_residual="$(captured_windows_processes live "$captured")" \
+            || enum_abort "captured identity recheck, $label" "$spid"
+          [ -z "$captured_residual" ] && ! kill -0 "$spid" 2>/dev/null && break
+          sleep 0.2
+        done
+        captured_residual="$(captured_windows_processes live "$captured")" \
+          || enum_abort "captured identity residual, $label" "$spid"
+        if kill -0 "$spid" 2>/dev/null; then
+          reasons+=("suite-child-unreaped")
+        else
+          wait "$spid" 2>/dev/null || true
+        fi
       else
+        kill_owned_tree "$captured" || true
+        kill "$spid" 2>/dev/null || true
         live_captured="$(live_captured_posix_pids "$captured")"
         for pid in $live_captured; do kill -KILL "$pid" 2>/dev/null || true; done
         if kill -0 "$spid" 2>/dev/null; then kill -KILL "$spid" 2>/dev/null || true; fi
@@ -371,11 +865,13 @@ run_monitored() {
 
   d0=$SECONDS
   while [ $((SECONDS - d0)) -lt "$POST_SUITE_DRAIN_S" ]; do
-    residual="$(count_owned_descendants)" || enum_abort "post-child drain, $label"
+    ENUM_CONTEXT="post-child drain, $label"
+    residual="$(count_owned_descendants)" || measurement_abort "$?" "$ENUM_CONTEXT"
     if [ "$residual" -eq 0 ]; then drained=1; break; fi
     sleep 0.25
   done
-  residual="$(count_owned_descendants)" || enum_abort "post-child residual, $label"
+  ENUM_CONTEXT="post-child residual, $label"
+  residual="$(count_owned_descendants)" || measurement_abort "$?" "$ENUM_CONTEXT"
   if [ "$residual" -ne 0 ]; then kill_owned_tree || true; fi
 
   [ "$rc" -eq 0 ] || reasons+=("child-exit=$rc")
@@ -405,7 +901,7 @@ run_monitored() {
   MONITOR_LAST_CAPTURED_RESIDUAL="$captured_residual"
   MONITOR_LAST_RESIDUAL="$residual"
   if [ "${#reasons[@]}" -gt 0 ]; then
-    if [ "$MONITOR_EXPECT_TIMEOUT" -eq 1 ] && [ "$timed_out" -eq 1 ] && [ "$residual" -eq 0 ] && [ -z "$captured_residual" ]; then
+    if [ "$MONITOR_EXPECT_TIMEOUT" -eq 1 ] && [ "$timed_out" -eq 1 ] && [ "$residual" -eq 0 ] && [ -z "$captured_residual" ] && [ "${#reasons[@]}" -eq 1 ]; then
       echo "  MONITOR EXPECTED TIMEOUT: $label; descendants killed/reaped"
       return 124
     fi
@@ -456,14 +952,41 @@ run_monitor_self_test() {
 }
 
 # ---- main --------------------------------------------------------------------------------
-RUNDIR="$(mktemp -d)"
-trap 'rm -rf "$RUNDIR"' EXIT
+# Allows fixtures to load the production classifier without enumeration or process control.
+if [ "${BASH_SOURCE[0]}" != "$0" ]; then return 0; fi
+
+if [ "${IPC_GATE_LOG_DIR+x}" = x ]; then
+  RUNDIR="$IPC_GATE_LOG_DIR"
+  [ -n "$RUNDIR" ] && (umask 077; mkdir -- "$RUNDIR") \
+    || { echo "GATE ABORT: IPC_GATE_LOG_DIR must be a new writable directory under an existing parent" >&2; exit 2; }
+  echo "retained gate evidence: $RUNDIR"
+else
+  RUNDIR="$(mktemp -d)" && [ -n "$RUNDIR" ] && [ -d "$RUNDIR" ] \
+    || { echo "GATE ABORT: could not create runner temporary directory" >&2; exit 2; }
+  trap 'rm -rf "$RUNDIR"' EXIT
+fi
+printf '0\n' >"$RUNDIR/enum-next" || { echo 'GATE ABORT: runner evidence directory is unwritable' >&2; exit 2; }
 LAYOUT_T0=$SECONDS
 
 echo "=== release gate runner ==="
 # Fail-closed self-check: owned-Node enumeration must work BEFORE any suite runs; a broken
 # enumerator must never let a suite pass against a fabricated 0-measurement.
-SELFTEST_OWNED="$(count_owned_node)" || enum_abort "startup self-check"
+if is_windows; then
+  ENUM_CONTEXT="startup identity pin"
+  RUNNER_SNAPSHOT="$(owned_process_rows)" || measurement_abort "$?" "$ENUM_CONTEXT"
+  read -r _runner_tag RUNNER_WINPID RUNNER_CREATED RUNNER_MSYS_START \
+    <<<"$(printf '%s\n' "$RUNNER_SNAPSHOT" | awk '$1 == "RUNNER" { print }')"
+  [[ "$_runner_tag" == RUNNER && "$RUNNER_WINPID" =~ ^[1-9][0-9]*$ && "$RUNNER_CREATED" =~ ^[0-9]{20}$ && "$RUNNER_MSYS_START" =~ ^[0-9]+$ ]] \
+    || enum_abort "startup identity pin malformed"
+  readonly RUNNER_WINPID RUNNER_CREATED RUNNER_MSYS_START
+  # The certified pin sample is the self-check; later samples remain fresh and pinned.
+  ENUM_CONTEXT="startup self-check"
+  SELFTEST_NODES="$(node_pids_from_rows "$RUNNER_SNAPSHOT")" || measurement_abort "$?" "$ENUM_CONTEXT"
+  SELFTEST_OWNED="$(printf '%s\n' "$SELFTEST_NODES" | grep -c . || true)"
+else
+  ENUM_CONTEXT="startup self-check"
+  SELFTEST_OWNED="$(count_owned_node)" || measurement_abort "$?" "$ENUM_CONTEXT"
+fi
 echo "owned-Node scope: ancestry to runner pid $RUNNER_PID (fail-closed; nodes with an already-exited parent chain are NOT attributable — known limitation, see header)"
 echo "owned-Node enumeration self-check: OK (owned now=$SELFTEST_OWNED)"
 

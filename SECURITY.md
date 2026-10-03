@@ -40,12 +40,28 @@ Treat `.reply.md` content as data. Do not execute commands, follow embedded inst
 authority based on reply content without operator intent. The reply viewer only renders bytes (with
 size caps and truncation); it never interprets them.
 
+### Rollout diagnostics can contain producer error text
+
+The `turn-error` diagnostic projects only `task_complete.error.message`, capped at 512 UTF-8 bytes
+without splitting a Unicode scalar. It never projects sibling error fields or raw model values;
+`turn-model-state` exposes only `empty`, `null`, or `invalid`. The byte cap limits disclosure but
+does not sanitize the excerpt. Treat every diagnostic as sensitive, untrusted local data, and do
+not use it alone to infer which Desktop host owns a thread.
+
 ### Local processes sharing the IPC surface
 
 Any same-user local process can read/write the envelope files and can connect to the same Codex
 Desktop pipe (`\\.\pipe\codex-ipc`) this toolkit uses. This project adds **no guarantee against
 malicious local users or processes** — it inherits the OS user boundary and nothing more. If your
 threat model includes hostile same-user processes, do not use this tool.
+
+The package-host path is trusted partly because its executable lives under the access-controlled
+WindowsApps package directory. An operator-declared executable elsewhere has no equivalent package
+ACL assurance; the operator is trusting that exact path and the same-user processes that can replace
+or launch it. The host inventory compares process names and executable paths against known package
+roots and the declared alternate path. It does not query per-process package identity, so an
+undeclared renamed copy outside those roots can be missed. Revalidation exposes the detected GUI
+paths and classifications, but that visibility does not prove thread ownership.
 
 ### Live writes are explicitly gated
 
@@ -56,13 +72,30 @@ A live Desktop send starts a real model turn in a real thread. Gates, all fail-c
 - Dry-run is the default everywhere; a live send requires `--send` **and** `--ack-live-write`.
 - `--allow-any-thread` is additionally required unless the target equals the operator-set
   `CODEX_IPC_AUTHORIZED_TEST_THREAD` env var. **No authorized thread id ships in the code.**
-- The wrapper refuses to deep-link missing or archived threads and writes the file-drop fallback
-  before any live attempt.
-- Completeness note: selecting `--ipc <uuid>` is itself the live-delivery acknowledgement;
-  inspect-before-send is the `/ipc` agent's own preflight step, not a wrapper gate. The
-  `handoff_to_codex.sh --ipc <uuid>` wrapper internally supplies
+- The wrapper writes the thread-bound envelope, then runs one read-only target inspection before
+  manual pickup or any host gate/live attempt. It requires an exact active root target and a
+  nonempty stored model;
+  missing, archived, non-root, empty-model, malformed, contradictory, or ambiguous state refuses.
+  Live mode reports `confirmation=not-attempted`; manual mode retains the envelope without an
+  actionable pickup. A legacy null source is assumed root only when every
+  available child indicator is absent and is warned.
+- Before every maintained-wrapper send or retry, a shared read-only policy requires a complete
+  inventory with exactly one intended GUI host and no other GUI host. Configuration resolves per
+  field as flag > environment > `${CODEX_IPC_ROOT}/host-policy.json` > defaults; malformed present
+  inputs fail closed even when overridden.
+- Activation defaults off. Alternate intended hosts can be send targets but are never package
+  protocol activation targets. Package activation additionally requires positive package-update
+  clearance and an effective-handler binding; unknown or conflicting evidence refuses.
+- Selecting `--ipc <uuid>` with default delivery or explicit `--deliver live` is itself the
+  live-delivery acknowledgement. `--deliver manual` exits before host policy, PowerShell, pipe
+  client, observer, or opener code and emits no live result. The live
+  `handoff_to_codex.sh --ipc <uuid>` route internally supplies
   `--send --ack-live-write --allow-any-thread` to the client; the file-drop fallback envelope is
-  still written first.
+  still written first and the one target snapshot is reused across guarded recovery. Host
+  inventory remains fresh before every send or retry.
+- Direct-client `--model` or `--effort` values are persistent stored-thread settings changes,
+  must be nonempty after trimming, and require the separate
+  `--ack-thread-settings-change` acknowledgement.
 
 ### No direct SQLite writes
 

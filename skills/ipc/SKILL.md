@@ -68,8 +68,9 @@ cwd, recency, or project name.
 
 The IPC tooling does not invoke the Codex CLI. As of v0.1.8 the `--app`, `--open` and `--exec`
 modes are removed: they fail with a stable error before any transport access or child launch.
-Delivery is the file-drop default (paste one line into your Codex session) or live `--ipc`
-injection into a Desktop GUI thread — neither shells out to a `codex` binary.
+Delivery is the file-drop default, thread-bound manual pickup with
+`--ipc <uuid> --deliver manual`, or live `--ipc` injection into a Desktop GUI thread. None shells
+out to a `codex` binary.
 
 The IPC transport envelope (the `.task.md`/`.reply.md` pair) is deliberately machine-local under
 `${CODEX_IPC_ROOT:-~/.claude/ipc}` — that is the ONE exception to the rule below. Envelopes and
@@ -92,7 +93,13 @@ constraints, and context — so the handoff is self-contained and needs no follo
 
 ## Existing-session mode
 
-Before using existing-session `/ipc`, the /ipc agent must run the read-only inspector as its separate preflight step. Selecting `--ipc <uuid>` is itself the live-delivery acknowledgement; the wrapper supplies the client's `--send --ack-live-write --allow-any-thread` internally. Inspect-before-send is the /ipc agent's own preflight step, not a wrapper gate.
+Before using existing-session `/ipc`, run the read-only inspector to preview the target. The
+wrapper independently runs that inspector exactly once after publishing the thread-bound envelope.
+Manual delivery exits after that snapshot; live delivery reuses it across any guarded auto-load
+recovery; the shared host policy still runs fresh immediately before every send or retry. Selecting
+`--ipc <uuid>` with the default delivery or explicit `--deliver live` is itself the live-delivery
+acknowledgement; `--deliver manual` makes no live attempt. The wrapper supplies the client's
+`--send --ack-live-write --allow-any-thread` internally only on the live route.
 
 Run the read-only inspector (requires a Node.js version with `node:sqlite`; see
 [references/troubleshooting.md](references/troubleshooting.md)):
@@ -132,9 +139,19 @@ may differ from the effective turn, and MUST NOT gate the dispatch or be read as
 reply-writability prediction. A blocked reply write is expected, not an error. For a known-UUID
 `--ipc` dispatch, `codex_ipc_wait --accept-rollout-fallback` certifies named-dispatch completion
 and `replySource=rollout-fallback` but intentionally emits no body; retrieve and render the body
-with the existing read-only dual-source `scripts/codex_ipc_replies.sh` viewer. Display is capped at
-4096 bytes by default; if truncation is reported, rerun with a sufficient `--max-bytes`. This is
-never a policy gate. Identify the latest
+with the existing read-only dual-source `scripts/codex_ipc_replies.sh` viewer. Also inspect
+`targetClassification`, `threadSource`, and any parent facts. Exact `user` and
+`agent_created_thread` declarations identify roots only after all other evidence passes inspection.
+Native `source` enums `cli`, `vscode`, `exec`, and `mcp` accept bare or JSON-quoted storage. Explicit
+`subagent` and `guardian_review` declarations, `subagent` or `internal` source JSON, agent metadata
+that marks a child, a spawn edge, or a rollout parent veto root admission. Unknown source strings,
+objects, other thread declarations (including `agent_forked_thread`), and encoded JSON null refuse.
+A null legacy source is allowed only when every available child indicator is absent; it is labelled
+`legacy-root-assumed` and warned. Contradictory, invalid, or unreadable classification evidence is
+ambiguous and refuses delivery. Locator
+`targetKindHint` values are discovery hints only; the pre-send inspector remains authoritative.
+Display is capped at 4096 bytes by default; if truncation is reported, rerun with a sufficient
+`--max-bytes`. This is never a policy gate. Identify the latest
 user/agent/task-complete signals; and `activitySignals.turnActivity` — the authoritative
 open/closed/ambiguous read of the latest turn boundary from the shared turn-boundary machine over
 the FULL rollout stream (`open` = a start/user turn with no matching terminal; `closed` = the
@@ -188,22 +205,89 @@ Codex. Use the maintained wrapper, not raw IPC:
 "${CLAUDE_SKILL_DIR}/scripts/handoff_to_codex.sh" --ipc <conversationId> "<task>"
 ```
 
+For operator pickup with the same thread/reply correlation and no pipe, host-policy, helper,
+observer, or opener contact:
+
+```bash
+"${CLAUDE_SKILL_DIR}/scripts/handoff_to_codex.sh" --ipc <conversationId> --deliver manual -- "<task>"
+```
+
+Manual mode publishes the ordinary envelope under the UUID channel, runs the same missing,
+archived, root/child, and stored-model checks, then prints exactly one pickup instruction and one
+correlation-complete `WAIT:` command. It includes the trusted inspector page when known; otherwise
+it omits `--rollout-path` and emits the fixed `ROLLOUT-PATH:` guidance. It prints no live `POLICY:`
+or `RESULT:` line. Explicit live-only `--autoload`, `--intended-host`, `--foreground-policy`, and
+`--ack-foreground-switch` flags are refused with `--deliver manual`; ambient live settings are
+irrelevant because no live path is entered.
+
 On Windows PowerShell, run the `.sh` wrapper through Git Bash.
 
+Goal setup is off by default. Add `--request-goal` before the task only when the operator
+explicitly wants the receiving thread to set a goal for this dispatch. The flag restores the
+payload's goal-setting request; it does not inspect, replace, or otherwise change an existing goal.
+
+For a known goal-driven target, use thread-bound manual delivery without `--request-goal`, then ask
+the operator to paste the printed pickup line into the intended thread.
+A closed turn is not a precondition for that paste. Expect `pending` until the named dispatch has
+its own completion evidence. Never call `turn/interrupt`, and never resend merely because pickup or
+completion remains pending.
+
 `--allow-any-thread` is a **client** flag (`codex_ipc_client.mjs`) that the wrapper sets
-**internally** on the explicit-thread path; it is NOT a `handoff_to_codex.sh` argument. Do not pass
-it — or any flag — to the wrapper after the conversationId; the wrapper reads the next argument as
-the task. (The wrapper gracefully absorbs a mistakenly-forwarded `--allow-any-thread` and fails
-closed on any other stray flag.) It is accepted on the client because production `--ipc` requires
-a caller-supplied UUID, the router is conversation-scoped, and the script writes a file-drop
-fallback first. Keep the invariant: one explicit conversationId per send.
+**internally** on the explicit-thread path; it is NOT a `handoff_to_codex.sh` argument. The wrapper's
+supported policy flags go after the conversationId and before `--` and the task. A positional task
+may still follow the UUID directly when no policy flag is needed. The wrapper gracefully absorbs a
+mistakenly-forwarded `--allow-any-thread` and fails closed on unsupported flags. The client accepts
+`--allow-any-thread` because production `--ipc` requires a caller-supplied UUID, the router is
+conversation-scoped, and the script writes a file-drop fallback first. Keep the invariant: one
+explicit conversationId per send.
+
+The wrapper applies one shared **Desktop host policy** before every initial send and every retry.
+It requires a complete read-only process/package inventory with exactly one running intended GUI
+host and no other GUI host identity. External native helper roles require a matching
+executable token and complete leading `-c`/`--config key=value` pairs. A direct intended-GUI
+`app-server` establishes the runtime executable; further `app-server`, `exec-server`, and `sandbox`
+helpers require that same executable and complete readable, acyclic ancestry back to the GUI.
+Role words inside config values or later payload text do not establish a role. A resource path
+alone never establishes a backend role. Typed Electron children require a complete readable,
+acyclic chain of the same executable to a proven GUI anchor. Unproven backend and typed-process
+claims remain competing candidates, even alone under a package root. Plain renamed package GUIs
+remain supported; their typed children refuse unless the GUI anchor is proven. Unknown roles,
+broken ancestry, and another GUI identity still refuse. Configuration resolves per field in this order:
+wrapper flag, environment (`CODEX_IPC_AUTOLOAD`, `CODEX_IPC_INTENDED_HOST`),
+`${CODEX_IPC_ROOT}/host-policy.json`, then defaults. The defaults are `autoload=off` and
+`intendedHost=package`. Every present layer is validated even when a higher-priority value wins;
+malformed, unreadable, incomplete, mixed-host, missing-host, or duplicate-host evidence refuses
+before the follower client runs. An alternate intended host is an absolute executable path: it can
+receive an explicitly targeted IPC send when it is the sole proven GUI host, but the package
+`codex://` protocol is never used to activate it. Wrapper output prints only the effective host kind
+and configuration source; it does not print executable paths or process command lines. A readable
+foreground `Codex` or `ChatGPT` path that does not match the intended inventory refuses immediately
+as `foreground-alternate-host`; it never enters the defer wait or reaches protocol activation.
+
+Minimal descriptor:
+
+```json
+{"schemaVersion":1,"autoload":"off","intendedHost":{"kind":"package"}}
+```
+
+For standalone policy or helper use, the descriptor root resolves as explicit `-IpcRoot`, then a
+nonempty `CODEX_IPC_ROOT`, then `.claude/ipc` under `USERPROFILE` or `HOME`. An explicitly blank
+root refuses instead of silently skipping the descriptor. The wrapper always passes its already
+resolved transport root.
+
+The wrapper's one pre-send inspection must report a trusted read-only DB open, one exact active row,
+a `root` or warned `legacy-root-assumed` classification, and a nonempty stored model. Missing,
+archived, non-root, empty-model, malformed, contradictory, or ambiguous state refuses before host
+policy or pipe contact with `confirmation=not-attempted`; no refusal attempts to repair the
+thread. When a parent is known for a refused non-root target, the wrapper prints its UUID. The
+snapshot's database-designated rollout page is passed unchanged to pickup observation and to the
+printed waiter command. One inspection supplies both routes, including auto-load retry; neither
+route re-inspects or guesses a page.
 
 The wrapper treats `no-client-found` as authority to consider auto-load only when the parsed client
 result is structurally exact: failed result for this target, the exact router error, and exactly
-one matching follower request. Nested or incidental text never qualifies. Before any deep link,
-the inspector must likewise report a successful read-only DB open and one thread row with the exact
-target ID and numeric active archive state (`0`); a matching rollout without that trusted row is not
-target authority. Missing, archived, malformed, or ambiguous state fails closed without navigation.
+one matching follower request. Nested or incidental text never qualifies. The already-completed
+pre-send inspection is reused; a matching rollout without its trusted row is not target authority.
 Neither the initial renderer-owned path nor a post-autoload retry treats client exit 0 alone as
 delivery. Both require parsed `ok: true`, the exact `targetThreadId`,
 `response.resultType: "success"`, and exactly one follower occurrence whose `name`, `method`, and
@@ -212,14 +296,16 @@ ambiguous: it is not classified as delivered and is never automatically retried.
 necessary before considering a manual retry, but negative bounded/recent-tail evidence cannot
 prove non-admission. Retry only after an exact full-history outcome proves non-admission, or after
 an explicit owner decision that acknowledges the unresolved duplicate-send risk.
-This recheck is defense-in-depth on the authoritative unowned branch only. The renderer-owned fast
-path deliberately does not repeat the inspector before its initial attempt; the separate agent
-preflight above remains mandatory. That preserves the fast path but leaves a disclosed
-preflight-to-send state-change window. Exact target binding prevents heuristic retargeting, while
-any ambiguous post-attempt outcome still requires inspection and forbids automatic retry.
+The single target snapshot precedes both renderer-owned and unowned paths. It is intentionally not
+repeated during auto-load recovery, while exact target binding prevents heuristic retargeting and
+the fresh host check gates each contact. Any ambiguous post-attempt outcome still requires
+inspection and forbids automatic retry. The snapshot can change after inspection; it does not
+prove future admission, completion, or reply writability.
 
-Every `--ipc` send reports exactly one machine-parseable result:
+Every live `--ipc` send reports exactly one machine-parseable result:
 `RESULT: gui-delivered|gui-unowned|failed-closed -- reason=<token> -- confirmation=<token>`.
+Successful manual preparation reports no `RESULT:` because it certifies neither admission nor
+completion; use its printed pickup and `WAIT:` lines.
 After router acceptance, confirmation is:
 
 - `rollout-hit`: the exact dispatch task basename was observed in a rollout user message. This
@@ -231,11 +317,16 @@ After router acceptance, confirmation is:
 
 All three preserve `gui-delivered` and exit 0 after an accepted send. Observer failure maps to
 `rollout-unavailable`; pending/unavailable never cause an automatic resend.
-See [references/architecture.md](references/architecture.md) for the full taxonomy, the auto-load
-/focus-snapback behavior (experimental, Windows-only), and their disclosed residues. The file-drop
-**envelope** is preserved in every outcome; the **pickup line** is printed only when the failure is
-structurally proven not to have admitted a follower. `confirmation=not-attempted` names that
-non-admission state; an exact `no-client-found` router request may still have occurred. After an
+See [references/architecture.md](references/architecture.md) for the full taxonomy, the gated
+activation/focus behavior (experimental, Windows-only), and its disclosed residues. The file-drop
+**envelope** is preserved in every outcome; the **pickup line** requires both an inspected eligible
+root target and structurally proven non-admission.
+`gui-unowned` and `confirmation=not-attempted` alone do not authorize pickup.
+Early foreground-policy/acknowledgement or Node refusals and missing, archived, child,
+empty-model, or ambiguous targets retain the envelope without pickup or `WAIT:`. Correct the
+preparation and inspect a safe root target again. Eligible-target host refusals and exact
+`no-client-found` recovery retain the safe pickup instruction for the intended host; that router
+request may still have occurred. After an
 ambiguous post-attempt result (`confirmation=unknown`) pickup is suppressed and resending is
 forbidden — the turn may already have been admitted.
 
@@ -243,13 +334,23 @@ When the target is unowned and Codex itself is the operator's foreground window,
 policy** applies (default `defer` — never navigate the visible app). Canonical grammar:
 
 ```bash
-"${CLAUDE_SKILL_DIR}/scripts/handoff_to_codex.sh" --ipc <conversationId> --foreground-policy switch --ack-foreground-switch -- "<task>"
+"${CLAUDE_SKILL_DIR}/scripts/handoff_to_codex.sh" --ipc <conversationId> --autoload codex-uri --foreground-policy switch --ack-foreground-switch -- "<task>"
 ```
 
-`switch` requires the explicit acknowledgement (it visibly navigates the Codex app and leaves it
-on the target thread); `restore-if-known` is fail-closed until in-app thread restoration can be
-proven by a read-only authority. The active policy and acknowledgement source are printed on every
-send. Valid UUID/task invocations always write the file-drop envelope before any policy refusal.
+`--autoload codex-uri` is a separate explicit request for package-protocol activation; it does not
+bypass the shared host gate. `switch` requires the explicit acknowledgement (it visibly navigates
+the Codex app and leaves it on the target thread); `restore-if-known` is fail-closed until in-app
+thread restoration can be proven by a read-only authority. The active host settings, their sources,
+the foreground policy, and the acknowledgement source are printed without exposing host paths.
+Valid UUID/task invocations always write the file-drop envelope before any policy refusal.
+
+The shipped real-machine activation evidence readers are intentionally stricter than candidate
+registration or deployment-history presence. They currently do not establish either a complete
+negative package-update state or the effective Shell protocol handler. Consequently, a real
+unowned-thread `codex-uri` request currently refuses with `autoload-policy-refused`; mocked dry-run
+tests exercise the positive decision path without granting real activation authority. A future
+qualified current-state package reader and effective-handler resolver must land before real
+activation can become eligible. Revalidation and historical live proof do not waive these gates.
 
 Do not send while the target appears mid-turn unless the user explicitly asked to interrupt,
 continue, or manage that active state. Router acceptance alone does not prove pickup. Use the
@@ -318,16 +419,37 @@ candidate for that root (including when a trailing second UUID makes the legacy 
 the name to another root), or an unreadable subtree. The token-collision exception is a recognized
 paginated basename whose page ID merely equals the target while its root is another session. The
 scan never discards unresolved diagnostics to select the valid file. Polling remains bound to the
-selected physical file, so automatic page rollover from N to N+1 is not certified or supported.
+selected physical file. It never auto-hops or stitches records onto a successor. After each
+certifying read, and during no-growth waits, a SQLite-free veto scans the configured sessions root
+for one direct paginated successor whose first complete `session_meta` links
+`history_base.thread_id` to the bound page ID. Its `end_byte_offset` must be a safe integer, fall
+on a newline record boundary, and not exceed the bound page size. One verified successor makes the
+old page non-authoritative: a dispatch marker at or beyond the cutoff is
+`dispatch-history-abandoned`; an earlier marker is `rollout-page-superseded`. Malformed,
+incomplete, or multiple successor claims are `page-supersession-unproven`. All three veto positive
+observer, waiter, and rollout-fallback results without changing the page being read.
 A renamed or copied mismatch yields `unavailable` rather than reading the wrong thread. A
 target-thread ID that Desktop internally remaps to a differently owned physical rollout is likewise
 `unavailable`: no trusted alias authority exists, so rollout observation/fallback never follows the
 remap heuristically. File-primary replies and the preserved file-drop envelope are unaffected. The
 standalone observer, waiter, and harvester accept but do not derive the DB-designated path; pass
-their exact `--rollout-path` when it is known, or accept root-only discovery ambiguity. Cursor
-polling revalidates the canonical path, physical identity, complete first-record anchor, and a
-SHA-256 digest of every byte in the consumed prefix; every certifying locator-to-reader handoff
-also carries the expected owner and physical identity, so an in-place historical rewrite or path
+their exact `--rollout-path` when it is known, or accept root-only discovery ambiguity.
+An external page also requires its containing sessions root: pass `--sessions-root` to the
+observer/waiter or set `CODEX_IPC_SESSIONS_ROOT` for the inspector, harvester, and viewer.
+Use the complete sessions root, not the page's date directory: the successor scan spans dates.
+The wrapper passes the inspector's normalized `rollout.sessionsRoot` explicitly to its observer
+and printed `WAIT:`. A page outside the configured/default root cannot certify observation or
+completion; a page path alone does not establish a complete discovery scope. Missing
+page authority emits the fixed `ROLLOUT-PATH:` guidance, while page vetoes emit a fixed
+`ROLLOUT-PAGE:` line. Windows namespace spellings are normalized only at the CLI boundary; owner,
+canonical-path, physical-identity, and cursor checks remain unchanged. The read-only reply viewer
+accepts `--rollout-path` for a UUID-scoped `-c` view, or `--derive-rollout-path` to call the trusted
+inspector exactly once; the modes are mutually exclusive and are refused for filedrop or
+session-wide views. A primary reply remains visible under page uncertainty with a stale-body
+caution, but rollout fallback is refused. Cursor polling revalidates the canonical path, physical
+identity, complete first-record anchor, and a SHA-256 digest of every byte in the consumed prefix;
+every certifying locator-to-reader handoff also carries the expected owner and physical identity,
+so an in-place historical rewrite or path
 swap fails closed. Intermediate polls may use a metadata-only no-growth check when a complete
 cursor's canonical path, physical identity, and size are unchanged, but that check can only
 continue pending. Growth and change run the full certifying reader; so do
@@ -342,11 +464,31 @@ but never observed, correlated, or projected as child activity; the boundary rec
 boundaries are unavailable, and UUID timestamps are never ownership authority. At and after a
 valid boundary, later inherited `session_meta` records remain provenance only: admitted lineage IDs
 never rebind the pinned owner, and record-level `thread_id` fields must still name the child.
+
+Local path aliases are intentionally component-scoped:
+
+| Component | Existing option / supported alias | Precedence |
+|---|---|---|
+| Inspector | `--sessions-root` / `CODEX_IPC_SESSIONS_ROOT` | Flag, nonempty environment, existing home default |
+| Waiter | `--rollout-path` / `CODEX_IPC_ROLLOUT_PATH`; `--sessions-root` / `CODEX_IPC_SESSIONS_ROOT` | Flag, nonempty environment, existing default/discovery |
+| Observer | `--rollout-path` / `CODEX_IPC_ROLLOUT_PATH`; `--sessions-root` / `CODEX_IPC_SESSIONS_ROOT` | Flag, nonempty environment, existing default/discovery |
+| Harvester | `--rollout-path` / `CODEX_IPC_ROLLOUT_PATH`; existing `CODEX_IPC_SESSIONS_ROOT` | Rollout flag wins; retained aliases do not add authority |
+
+The reply viewer has no independent path environment option, although its harvester child inherits
+the process environment; prefer the viewer's explicit page flags. `CODEX_HOME` is not a supported
+alias, and no configured path establishes page or owner authority.
+
 A bounded example (30-minute budget, opt-in rollout fallback):
 `node scripts/codex_ipc_wait.mjs --thread <uuid> --dispatch <dispatchId> --reply-path <path>
 --accept-rollout-fallback --budget-ms 1800000 --interval-ms 1000`. A `done` token is
 **named-dispatch completion, never current thread idleness** — `terminalState` and a per-dispatch
 `done` both describe past turns.
+The dispatch marker remains bound to its own turn even when inserted into an already-open turn. An
+immediate unmarked continuation cannot replace that terminal or supply a missing body. If the
+dispatch's own `task_complete` or `turn_aborted` has no assistant output, `turn-error` may report a
+bounded fact; `turn-model-state` may report `empty`, `null`, or `invalid` from the latest matching
+preterminal `turn_context`. These diagnostics use stderr, add no seventh token, carry no raw model
+value, and do not change reply-file precedence, lifecycle, or certification.
 Only a genuinely absent reply is eligible for waiter rollout fallback.
 A present-but-invalid reply returns `reply-missing` without consulting rollout fallback.
 An absent reply with no certifiable rollout body exhausts the eligible sources.
@@ -380,8 +522,9 @@ message with the existing read-only dual-source `scripts/codex_ipc_replies.sh` v
 invocation stays file-primary and filedrop is not auto-recoverable. The wrapper dispatch never
 changes the target thread's model, reasoning, sandbox, or approval: it omits every version-2
 override field. A direct client `--model`/`--effort` override is a thread-settings change, not a
-per-turn override (see the new-session-mode note below and `docs/COMPATIBILITY.md`); `/ipc` never
-passes them.
+per-turn override (see the new-session-mode note below and `docs/COMPATIBILITY.md`); the client
+requires a nonempty trimmed value plus `--ack-thread-settings-change`, and `/ipc` never passes
+them.
 
 ## New-session mode
 
@@ -391,9 +534,9 @@ Prefer an explicit path or project name in the command. If absent, infer from th
 current conversation context. If it is genuinely ambiguous, ask one concise question before
 creating/opening the wrong context.
 
-To open a project in Codex Desktop, open the Codex Desktop app yourself and select (or create) the
-intended workspace/thread. v0.1.8 removed the CLI-backed `--app`/`--open`/`--exec` modes, so the
-wrapper no longer opens the app for you.
+To open a project in Codex Desktop, ask the operator to open the intended Desktop host and select
+(or create) the intended workspace/thread. v0.1.8 removed the CLI-backed
+`--app`/`--open`/`--exec` modes, so the wrapper does not open the app.
 
 After the Desktop project/session exists, obtain a concrete conversationId before using `--ipc`.
 Use the read-only locator to discover candidates from Codex Desktop's local thread index:
@@ -404,8 +547,12 @@ node "${CLAUDE_SKILL_DIR}/scripts/codex_ipc_thread_locator.mjs" --cwd <absolute-
 ```
 
 If the user created a clearly titled waiting thread, narrow with `--title-contains <text>` and
-`--require-single`. A locator result is only candidate discovery, not send authority. If exactly
-one intended candidate remains, run `codex_ipc_session_inspect.mjs` on that conversationId and then
+`--require-single`. A locator result is only candidate discovery, not send authority.
+Its `--since-*` filters compare current indexed timestamps. Reset/revert can rewrite those values
+and make an older thread match, so time-filter inclusion never proves new-thread provenance.
+`targetKindHint` marks exact `user` and `agent_created_thread` rows as `root`, explicit child rows as
+`non-root`, and null-source rows as `legacy-unknown`; it never applies the full classification. If exactly one
+intended candidate remains, run `codex_ipc_session_inspect.mjs` on that conversationId and then
 apply the existing-session send rule. If no candidate or multiple plausible candidates remain, fall
 back to the file-drop handoff and ask the user to select/create the Desktop thread and paste the
 pickup line or provide the session id.
@@ -418,15 +565,18 @@ version-2 `params.turnStart` payload the app does read `request.model` and `requ
 writes them back as the thread's stored model and reasoning effort. The wrapper and the write-proof
 harness pass neither, and the client omits both unless an operator explicitly supplies
 `--model`/`--effort` — which is a thread-settings change, not a per-turn override. Do not attempt
-to override these through the delivery route, the client flags, or any other mechanism — never
-mutate. Consistent with the advisory rule above, do NOT treat a stored `sandboxPolicy` or
+to override these through the delivery route. An operator-run direct client settings change
+requires `--ack-thread-settings-change`; values must be nonempty after trimming and persist as the
+stored thread settings. Consistent with the advisory rule above, do NOT treat a stored
+`sandboxPolicy` or
 `approvalMode` as a prediction that the reply write will fail: a stored `managed` sandbox is not a
 reason to pick a different thread. A blocked reply write is expected, not an error, and is
 certified as named-dispatch completion with `replySource=rollout-fallback` by
 `codex_ipc_wait --accept-rollout-fallback`; the waiter intentionally emits no body, so retrieve and
 render it with the read-only dual-source `scripts/codex_ipc_replies.sh` viewer. Reserve "choose
-another thread or ask the operator" for cases the inspector proves — missing, archived, or
-identity-mismatched targets — not for stored policy rows. Model/reasoning tier guidance in a task belongs to the thread's
+another thread or ask the operator" for cases the inspector proves — missing, archived, non-root,
+empty-model, identity-mismatched, or ambiguously classified targets — not for stored policy rows.
+Model/reasoning tier guidance in a task belongs to the thread's
 SUBAGENT deployment instructions, not to the thread itself.
 
 ## Cross-session context
@@ -465,15 +615,18 @@ stderr only; stdout and the exit code are unchanged, and neither is ever a refus
 - Inspect existing sessions before sending.
 - Use exactly one explicit UUID per IPC send.
 - Keep file-drop as default/fallback.
+- The dispatching agent never closes, restarts, launches, or signals a Desktop host, and never opens `codex://` itself. Host lifecycle belongs to the operator.
+- Agents never run `codex_ipc_client.mjs` with `--send` directly. The maintained wrapper and write-proof harness are its only permitted sending callers.
+- A `--model` or `--effort` override changes stored thread settings and requires the operator's explicit intent.
 - `/ipc` success is strictly GUI delivery into the renderer-owned Desktop thread. Never treat any
   non-GUI execution as an `/ipc` fallback or `/ipc` success. (The CLI-backed `--exec`/`--open`/`--app`
   modes were removed in v0.1.8; there is no headless execution path in this tool.)
-- Unowned threads are recovered by the wrapper's automatic `codex://threads/<conversationId>` load
-  with focus snapback (experimental, Windows-only) — never by asking the operator to click, and
-  never by navigating while Codex is the operator's foreground window **unless** the operator
-  explicitly authorized it (`--foreground-policy switch --ack-foreground-switch`, or the standing
-  approval env var, which is printed on every send). Default policy is `defer`;
-  `restore-if-known` is fail-closed until thread-level restoration is proven.
+- Unowned threads remain file-drop recoverable. Package-protocol activation is Windows-only,
+  default-off, and requires explicit `--autoload codex-uri` plus fresh host, package-update, protocol,
+  target, and foreground-policy gates. Alternate intended hosts are never protocol-activated.
+  Current real-machine package/handler evidence is insufficient, so activation refuses safely.
+  Default foreground policy is `defer`; `restore-if-known` is fail-closed until thread-level
+  restoration is proven.
 - A missing conversationId is missing target authority, not authorization to create a fresh Codex
   thread/session. Create/open new sessions only on an explicit new-session request, resolving the
   intended project/folder first.
@@ -505,7 +658,7 @@ stderr only; stdout and the exit code are unchanged, and neither is ever a refus
 ## Further reading
 
 - [references/architecture.md](references/architecture.md) — transport model, delivery result
-  taxonomy, auto-load behavior, reply viewer.
+  taxonomy, host policy and gated activation, reply viewer.
 - [references/security-model.md](references/security-model.md) — threat model and safety gates.
 - [references/troubleshooting.md](references/troubleshooting.md) — dependency and failure-mode
   triage.

@@ -22,12 +22,22 @@ const REQUIRED_FILES = [
   "scripts/codex_ipc_client.mjs",
   "scripts/codex_ipc_owner_probe.mjs",
   "scripts/codex_ipc_probe.mjs",
+  "scripts/codex_ipc_autoload.ps1",
+  "scripts/codex_ipc_host_policy.ps1",
   "scripts/codex_ipc_revalidate.mjs",
+  "scripts/codex_ipc_reply_harvest.mjs",
+  "scripts/codex_ipc_rollout_observe.mjs",
+  "scripts/codex_ipc_rollout_reader.mjs",
   "scripts/codex_ipc_session_inspect.mjs",
   "scripts/codex_ipc_snapshot.mjs",
   "scripts/codex_ipc_thread_locator.mjs",
+  "scripts/codex_ipc_wait.mjs",
   "scripts/codex_ipc_write_proof.mjs",
+  "examples/quickstart.md",
+  "references/architecture.md",
   "references/handoff-template.md",
+  "references/security-model.md",
+  "references/troubleshooting.md",
 ];
 
 function usage() {
@@ -106,10 +116,33 @@ function main() {
   ];
   const hasWaiterContract = (relPath) => waiterContractSentences.every((sentence) => contains(relPath, sentence));
   const handoffText = readText("scripts/handoff_to_codex.sh");
+  const unsafePickupPaths = [
+    'echo "RESULT: failed-closed -- reason=invalid-foreground-policy',
+    'echo "RESULT: gui-unowned -- reason=foreground-switch-unacknowledged',
+    'echo "RESULT: failed-closed -- reason=node-unavailable',
+    'echo "RESULT: failed-closed -- reason=${TARGET_REFUSAL_REASON}',
+  ].map((marker) => {
+    const start = handoffText.indexOf(marker);
+    const end = handoffText.indexOf("exit 1", start);
+    return start >= 0 && end > start ? handoffText.slice(start, end + 6) : "";
+  });
   const inspectedTargetClassifier =
     handoffText.match(
-      /(?:^|\n)[ \t]*classify_inspected_target\(\)[ \t]*\{([\s\S]*?)(?=\n[ \t]*observe_rollout\(\)[ \t]*\{)/,
+      /(?:^|\n)[ \t]*classify_inspected_target\(\)[ \t]*\{([\s\S]*?)(?=\n[ \t]*# Safe manual preparation)/,
     )?.[1] || "";
+  const manualPreparationPath =
+    handoffText.match(
+      /if \[\[ "\$DELIVERY" == "manual" \]\]; then\n[ \t]*echo "MANUAL: thread-bound envelope is ready for operator pickup\."[\s\S]*?\n[ \t]*exit 0\n[ \t]*fi/,
+    )?.[0] || "";
+  const manualPreparationStart = handoffText.indexOf(
+    'echo "MANUAL: thread-bound envelope is ready for operator pickup."',
+  );
+  const firstLiveOnlyDefinitions = [
+    handoffText.indexOf("host_policy_send() {"),
+    handoffText.indexOf("send_live() {"),
+    handoffText.indexOf("observe_rollout() {"),
+    handoffText.indexOf('AUTOLOAD_PS1="${SCRIPT_DIR}/codex_ipc_autoload.ps1"'),
+  ];
   const authoritativeSuccessClassifier =
     handoffText.match(
       /(?:^|\n)[ \t]*authoritative_success\(\)[ \t]*\{([\s\S]*?)(?=\n[ \t]*authoritative_no_client\(\)[ \t]*\{)/,
@@ -177,18 +210,19 @@ function main() {
         ok: contains("SKILL.md", "Do not infer a different target from title"),
       },
     ]),
-    check("REQ-004", "IPC path is fallback-backed by writing file-drop first.", [
+    check("REQ-004", "IPC publishes an envelope first; pickup additionally requires target eligibility and non-admission.", [
       {
         label: "IPC branch writes OUTBOUND before live delivery",
         file: "scripts/handoff_to_codex.sh",
         ok: contains("scripts/handoff_to_codex.sh", '| atomic_write "$OUTBOUND_MSYS"'),
       },
       {
-        label: "IPC branch has fallback function and file-drop instruction",
+        label: "IPC retains safe fallback instructions without equating publication with pickup eligibility",
         file: "scripts/handoff_to_codex.sh",
         ok:
           contains("scripts/handoff_to_codex.sh", "fallback()") &&
-          contains("scripts/handoff_to_codex.sh", "FALLBACK -- file-drop is ready"),
+          contains("scripts/handoff_to_codex.sh", "FALLBACK -- file-drop is ready") &&
+          contains("scripts/handoff_to_codex.sh", "Safe fallback requires an inspected eligible target AND proven non-admission."),
       },
     ]),
     check("REQ-005", "Claude session context is available but transcript paths are opt-in.", [
@@ -203,20 +237,32 @@ function main() {
         ok: contains("scripts/handoff_to_codex.sh", 'CODEX_IPC_INCLUDE_TRANSCRIPT:-0'),
       },
     ], "Transcript pointers expose full local session context; include them only when needed."),
-    check("REQ-006", "Existing-session /ipc has static preflight inspection guidance and the inspector file exists.", [
+    check("REQ-006", "Existing-session /ipc runs one shared read-only target inspection before its first live attempt.", [
       {
         label: "session inspector exists",
         file: "scripts/codex_ipc_session_inspect.mjs",
         ok: existsSync(skillPath("scripts/codex_ipc_session_inspect.mjs")),
       },
       {
-        label: "SKILL.md scopes inspect-before-send as agent preflight",
+        label: "wrapper invokes one inspector, classifies its tuple, and reaches the first live attempt afterward",
+        file: "scripts/handoff_to_codex.sh",
+        ok:
+          matchCount("scripts/handoff_to_codex.sh", /codex_ipc_session_inspect\.mjs/g) === 1 &&
+          contains(
+            "scripts/handoff_to_codex.sh",
+            /INSPECT_OUTPUT=\$\(node[\s\S]*?codex_ipc_session_inspect\.mjs[\s\S]*?INSPECT_FIELDS=\$\(classify_inspected_target\)[\s\S]*?IFS=\$'\\t' read -r INSPECT_CLASS INSPECT_PARENT INSPECT_WARNING[\s\S]*?case "\$INSPECT_CLASS" in[\s\S]*?if send_live; then/,
+          ) &&
+          contains("scripts/handoff_to_codex.sh", "is reused across live auto-load recovery"),
+      },
+      {
+        label: "SKILL.md documents the operator preview plus independent wrapper target gate",
         file: "SKILL.md",
         ok:
-          contains("SKILL.md", "Selecting `--ipc <uuid>` is itself the live-delivery acknowledgement") &&
-          contains("SKILL.md", "Inspect-before-send is the /ipc agent's own preflight step, not a wrapper gate."),
+          contains("SKILL.md", /live-delivery\s+acknowledgement/) &&
+          contains("SKILL.md", "wrapper independently runs that inspector exactly once") &&
+          contains("SKILL.md", "shared host policy still runs fresh immediately before every send or retry"),
       },
-    ], "Static doc/file-existence evidence only: this does not verify runtime ordering. Selecting `--ipc <uuid>` is itself the live-delivery acknowledgement; the wrapper supplies the client's `--send --ack-live-write --allow-any-thread` internally. Inspect-before-send is the /ipc agent's own preflight step, not a wrapper gate."),
+    ], "Static source-order and prose evidence only. The hermetic wrapper suite behaviorally checks one inspection before delivery and snapshot reuse across recovery; it does not contact a live Desktop."),
     check("REQ-007", "No-UUID /ipc has read-only candidate discovery before target selection.", [
       {
         label: "thread locator exists",
@@ -226,14 +272,20 @@ function main() {
       {
         label: "locator warns candidate is not write authority",
         file: "scripts/codex_ipc_thread_locator.mjs",
-        ok: contains("scripts/codex_ipc_thread_locator.mjs", "Candidate discovery is not write authority"),
+        ok:
+          contains("scripts/codex_ipc_thread_locator.mjs", "Candidate discovery is not write authority") &&
+          contains("scripts/codex_ipc_thread_locator.mjs", "targetKindHint") &&
+          ["non-root", "root", "legacy-unknown", "unknown"].every((kind) =>
+            contains("scripts/codex_ipc_thread_locator.mjs", `"${kind}"`),
+          ),
       },
       {
         label: "SKILL.md uses locator and requires follow-up inspection",
         file: "SKILL.md",
         ok:
           contains("SKILL.md", "codex_ipc_thread_locator.mjs") &&
-          contains("SKILL.md", "run `codex_ipc_session_inspect.mjs`"),
+          contains("SKILL.md", "run `codex_ipc_session_inspect.mjs`") &&
+          contains("SKILL.md", "it never applies the full classification"),
       },
     ]),
     check("REQ-008", "Post-update robustness has a validate-only revalidation surface.", [
@@ -341,9 +393,9 @@ function main() {
         ok: contains("SKILL.md", "write the file-drop envelope before any policy refusal"),
       },
     ]),
-    check("REQ-015", "Deep-linking requires positive target-inspection proof; ambiguity fails closed.", [
+    check("REQ-015", "Every maintained-wrapper live route requires positive root-target and stored-model proof; ambiguity fails closed.", [
       {
-        label: "wrapper classifier requires exact active DB proof and refuses ambiguous inspector output",
+        label: "wrapper classifier requires exact active DB, classification, and stored-model proof",
         file: "scripts/handoff_to_codex.sh",
         ok:
           inspectedTargetClassifier.length > 0 &&
@@ -357,19 +409,87 @@ function main() {
             /thread\.id\.toLowerCase\(\)\s*!==\s*target/,
             /thread\.archived\s*===\s*1/,
             /thread\.archived\s*!==\s*0/,
-            /process\.stdout\.write\("active"\)/,
+            /\["root", "non-root", "legacy-root-assumed", "ambiguous"\]\.includes\(classification\.kind\)/,
+            /Array\.isArray\(classification\.reasons\)/,
+            /Array\.isArray\(classification\.warnings\)/,
+            /classification\.kind\s*===\s*"ambiguous"/,
+            /classification\.kind\s*===\s*"non-root"/,
+            /typeof\s+thread\.model\s*!==\s*"string"\s*\|\|\s*thread\.model\.trim\(\)\s*===\s*""/,
+            /process\.stdout\.write\(\[state, parent, legacy, rolloutPath, sessionsRoot\]\.join\("\\t"\)\)/,
           ].every((anchor) => anchor.test(inspectedTargetClassifier)) &&
-          contains("scripts/handoff_to_codex.sh", "INSPECT_CLASS=$(classify_inspected_target)") &&
-          contains("scripts/handoff_to_codex.sh", "reason=target-inspection-ambiguous"),
+          contains("scripts/handoff_to_codex.sh", "INSPECT_FIELDS=$(classify_inspected_target)") &&
+          contains(
+            "scripts/handoff_to_codex.sh",
+            "IFS=$'\\t' read -r INSPECT_CLASS INSPECT_PARENT INSPECT_WARNING",
+          ) &&
+          contains("scripts/handoff_to_codex.sh", 'TARGET_REFUSAL_REASON="target-inspection-ambiguous"'),
       },
       {
-        label: "missing and archived targets refuse with distinct reasons",
+        label: "all four early or unsafe refusal sites retain the envelope without pickup or WAIT",
+        file: "scripts/handoff_to_codex.sh",
+        ok: unsafePickupPaths.every((block) => block.includes("Envelope retained;") &&
+          !/\bfallback\b|\bprint_wait_hint\b|FALLBACK|Open the thread|    read /.test(block)),
+      },
+      {
+        label: "inspector derives root status from every available child and parent indicator",
+        file: "scripts/codex_ipc_session_inspect.mjs",
+        ok:
+          contains(
+            "scripts/codex_ipc_session_inspect.mjs",
+            "function classifyTarget(dbThread, rollout, rolloutSelection)",
+          ) &&
+          contains(
+            "scripts/codex_ipc_session_inspect.mjs",
+            "classifyTarget(dbThread, rolloutSummary, rolloutSelection)",
+          ) &&
+          contains(
+            "scripts/codex_ipc_session_inspect.mjs",
+            'threadSource === "subagent" || threadSource === "guardian_review"',
+          ) &&
+          contains("scripts/codex_ipc_session_inspect.mjs", 'hasOwnProperty.call(source, "subagent")') &&
+          contains(
+            "scripts/codex_ipc_session_inspect.mjs",
+            'addParent("db.threads.source", rawParent.toLowerCase())',
+          ) &&
+          [
+            "source-parent-invalid",
+            "agent-metadata",
+            "spawn-edge",
+            "rollout-parent",
+            "rollout-selection-ambiguous",
+            "rollout-selection-unavailable",
+            "rollout-parse-invalid",
+            "rollout-owner-untrusted",
+            "root-child-conflict",
+            "parent-conflict",
+          ].every((reason) =>
+            contains("scripts/codex_ipc_session_inspect.mjs", `"${reason}"`)) &&
+          contains("scripts/codex_ipc_session_inspect.mjs", 'warnings.push("legacy-null-source")') &&
+          contains("scripts/codex_ipc_session_inspect.mjs", 'return finish("legacy-root-assumed")'),
+      },
+      {
+        label: "summary preserves classification, source, model, agent, and current-owner parent facts",
+        file: "scripts/codex_ipc_session_inspect.mjs",
+        ok:
+          contains("scripts/codex_ipc_session_inspect.mjs", "targetClassification: result.targetClassification") &&
+          contains("scripts/codex_ipc_session_inspect.mjs", "source: thread.source") &&
+          contains("scripts/codex_ipc_session_inspect.mjs", "model: thread.model") &&
+          contains("scripts/codex_ipc_session_inspect.mjs", "threadSource: thread.threadSource") &&
+          contains("scripts/codex_ipc_session_inspect.mjs", "agentRole: thread.agentRole") &&
+          contains("scripts/codex_ipc_session_inspect.mjs", "ownerSessionMeta: primary.ownerSessionMeta"),
+      },
+      {
+        label: "unsafe targets refuse with distinct pre-attempt reasons and parent or legacy diagnostics",
         file: "scripts/handoff_to_codex.sh",
         ok:
-          contains("scripts/handoff_to_codex.sh", "reason=target-not-found") &&
-          contains("scripts/handoff_to_codex.sh", "reason=target-archived"),
+          contains("scripts/handoff_to_codex.sh", 'TARGET_REFUSAL_REASON="target-not-found"') &&
+          contains("scripts/handoff_to_codex.sh", 'TARGET_REFUSAL_REASON="target-archived"') &&
+          contains("scripts/handoff_to_codex.sh", 'TARGET_REFUSAL_REASON="target-non-root"') &&
+          contains("scripts/handoff_to_codex.sh", 'TARGET_REFUSAL_REASON="target-model-empty"') &&
+          contains("scripts/handoff_to_codex.sh", "Target parent thread:") &&
+          contains("scripts/handoff_to_codex.sh", "TARGET-WARNING: legacy thread has no source classification"),
       },
-    ]),
+    ], "Static source evidence only. Hermetic inspector and wrapper suites prove classification parity, exact refusal tokens, one pre-send snapshot, zero downstream contact on refusal, and legacy-warning continuation."),
     check("REQ-016", "Results are parser-compatible: top-level category plus machine reason/confirmation tokens.", [
       {
         label: "successful sends require exact parsed target and one structurally valid follower request",
@@ -421,7 +541,8 @@ function main() {
       {
         label: "SKILL.md documents the taxonomy format",
         file: "SKILL.md",
-        ok: contains("SKILL.md", "-- reason=<token> -- confirmation=<token>"),
+        ok: contains("SKILL.md", "-- reason=<token> -- confirmation=<token>") &&
+          contains("SKILL.md", "`gui-unowned` and `confirmation=not-attempted` alone do not authorize pickup."),
       },
       {
         label: "unknown autoload exit codes fail closed instead of falling through",
@@ -609,13 +730,386 @@ function main() {
         ok: hasWaiterContract("references/troubleshooting.md"),
       },
       {
-        label: "the wrapper prints the runnable WAIT: hint only on accepted live --ipc success",
+        label: "the wrapper prints one shared runnable WAIT: hint for safe manual preparation and accepted live success",
         file: "scripts/handoff_to_codex.sh",
         ok:
           contains("scripts/handoff_to_codex.sh", "print_wait_hint") &&
           contains("scripts/handoff_to_codex.sh", "--accept-rollout-fallback --budget-ms 1800000 --interval-ms 1000"),
       },
     ], "Static easy-path/reference lock only: it proves the wait references and OQ-4 caveat bytes are present, not their runtime effect."),
+    check("REQ-020", "Every live attempt is bound to one intended running Desktop host; activation is separately opt-in and fail-closed.", [
+      {
+        label: "host-policy refusal preserves pickup after target eligibility is established",
+        file: "scripts/handoff_to_codex.sh",
+        ok: /report_host_policy_refusal\(\) \{\n[^\n]*\n[^\n]*confirmation=not-attempted[^\n]*\n\s*fallback\n\s*\}/.test(handoffText) &&
+          handoffText.indexOf('if [[ -n "$TARGET_REFUSAL_REASON" ]]') < handoffText.indexOf("report_host_policy_refusal()"),
+      },
+      {
+        label: "shared host policy defaults to autoload off and the package intended host",
+        file: "scripts/codex_ipc_host_policy.ps1",
+        ok:
+          contains("scripts/codex_ipc_host_policy.ps1", "$autoloadValue = 'off'") &&
+          contains("scripts/codex_ipc_host_policy.ps1", "-Value 'package' -Source 'default'") &&
+          contains("scripts/codex_ipc_host_policy.ps1", "host-policy.json") &&
+          contains("scripts/codex_ipc_host_policy.ps1", "GetEnvironmentVariable('USERPROFILE')") &&
+          contains("scripts/codex_ipc_host_policy.ps1", "GetEnvironmentVariable('HOME')") &&
+          contains("scripts/codex_ipc_host_policy.ps1", "IPC root must be nonempty"),
+      },
+      {
+        label: "host policy refuses incomplete, absent, mixed, or duplicate GUI identity evidence",
+        file: "scripts/codex_ipc_host_policy.ps1",
+        ok:
+          contains("scripts/codex_ipc_host_policy.ps1", "host-inventory-incomplete") &&
+          contains("scripts/codex_ipc_host_policy.ps1", "intended-host-not-running") &&
+          contains("scripts/codex_ipc_host_policy.ps1", "other-desktop-host-running") &&
+          contains("scripts/codex_ipc_host_policy.ps1", /eligible\s*=\s*\(\$Inventory\.complete\s+-and\s+\$intendedCount\s+-eq\s+1\s+-and\s+\$otherCount\s+-eq\s+0\)/),
+      },
+      {
+        label: "wrapper invokes the send gate inside every live attempt and never activates an alternate host",
+        file: "scripts/handoff_to_codex.sh",
+        ok:
+          contains("scripts/handoff_to_codex.sh", "host_policy_send()") &&
+          contains("scripts/handoff_to_codex.sh", /send_live\(\)[\s\S]{0,1200}?if ! host_policy_send; then[\s\S]{0,500}?codex_ipc_client\.mjs/) &&
+          contains("scripts/handoff_to_codex.sh", "-Purpose send") &&
+          contains("scripts/handoff_to_codex.sh", 'if [[ "$HOST_AUTOLOAD_EFFECTIVE" == "off" ]]') &&
+          contains("scripts/handoff_to_codex.sh", 'if [[ "$HOST_INTENDED_KIND_EFFECTIVE" != "package" ]]'),
+      },
+      {
+        label: "real activation requires fresh qualified package and effective-handler evidence",
+        file: "scripts/codex_ipc_host_policy.ps1",
+        ok:
+          contains("scripts/codex_ipc_host_policy.ps1", "no event-history-only path may return 'clear'") &&
+          contains("scripts/codex_ipc_host_policy.ps1", "effective-handler-unqualified") &&
+          contains("scripts/codex_ipc_host_policy.ps1", "protocol-registration-unproven") &&
+          contains("scripts/codex_ipc_host_policy.ps1", "package-update-unknown"),
+      },
+      {
+        label: "autoload helper runs a fresh activation gate before the sole protocol launch and exposes refusal exit 6",
+        file: "scripts/codex_ipc_autoload.ps1",
+        ok:
+          contains("scripts/codex_ipc_autoload.ps1", "Invoke-CodexIpcActivationGate -Phase 'pre-foreground'") &&
+          contains("scripts/codex_ipc_autoload.ps1", /Invoke-CodexIpcProtocolActivation[\s\S]*?Invoke-CodexIpcActivationGate -Phase 'pre-activation'[\s\S]*?Start-Process -FilePath "codex:\/\/threads\/\$ConversationId"/) &&
+          contains("scripts/codex_ipc_autoload.ps1", "exit 6") &&
+          contains("scripts/codex_ipc_autoload.ps1", "MOCK_FOREGROUND_PROCESS_BOUND") &&
+          contains("scripts/codex_ipc_autoload.ps1", "MOCK_FOREGROUND_PATH_BOUND") &&
+          contains("scripts/codex_ipc_autoload.ps1", "mock-inputs-require-dry-run") &&
+          contains("scripts/codex_ipc_autoload.ps1", "Test-CodexAlternateForeground") &&
+          contains("scripts/codex_ipc_autoload.ps1", "foreground-alternate-host"),
+      },
+      {
+        label: "wrapper pins the complete host and activation refusal vocabulary and the multi-cause no-client observation",
+        file: "scripts/handoff_to_codex.sh",
+        ok:
+          [
+            "host-policy-unavailable",
+            "host-policy-invalid",
+            "host-inventory-incomplete",
+            "intended-host-not-running",
+            "other-desktop-host-running",
+            "autoload-disabled",
+            "protocol-host-not-package",
+            "codex-foreground-deferred",
+            "foreground-unidentified",
+            "autoload-helper-unavailable",
+            "foreground-restore-unproven",
+            "foreground-switch-unacknowledged",
+            "autoload-policy-refused",
+            "autoload-unexpected-status",
+            "autoload-incomplete",
+          ].every((token) => handoffText.includes(token)) &&
+          handoffText.includes("Router answered no-client-found") &&
+          handoffText.includes("this token has several possible causes"),
+      },
+      {
+        label: "bundled operator contract documents defaults, precedence, alternate-host containment, and current activation refusal",
+        file: "SKILL.md",
+        ok:
+          contains("SKILL.md", "wrapper flag, environment") &&
+          contains("SKILL.md", "`${CODEX_IPC_ROOT}/host-policy.json`, then defaults") &&
+          contains("SKILL.md", "The defaults are `autoload=off` and") &&
+          contains("SKILL.md", "For standalone policy or helper use") &&
+          contains("SKILL.md", "foreground-alternate-host") &&
+          contains("SKILL.md", "Alternate intended hosts are never protocol-activated") &&
+          contains("SKILL.md", "currently refuses with `autoload-policy-refused`"),
+      },
+      {
+        label: "revalidation syntax-checks and executes the policy before any optional live read probe",
+        file: "scripts/codex_ipc_revalidate.mjs",
+        ok:
+          contains("scripts/codex_ipc_revalidate.mjs", "scripts/codex_ipc_host_policy.ps1") &&
+          contains("scripts/codex_ipc_revalidate.mjs", "host policy syntax validation failed; policy was not executed") &&
+          contains("scripts/codex_ipc_revalidate.mjs", "optional live IPC read probe suppressed") &&
+          contains("scripts/codex_ipc_revalidate.mjs", "guiHosts: guiHosts.map(projectHost)") &&
+          contains("scripts/codex_ipc_revalidate.mjs", "appServers: appServers.map(projectHost)"),
+      },
+    ], "Static source evidence only. Hermetic policy and wrapper suites exercise configuration precedence, host-cardinality refusal, alternate-host containment, activation evidence, and fresh retry gates; no live Desktop activation is performed."),
+    check("REQ-021", "Persistent client model or effort overrides require explicit acknowledgement and nonempty trimmed values.", [
+      {
+        label: "client parses the dedicated acknowledgement and rejects unacknowledged or empty overrides",
+        file: "scripts/codex_ipc_client.mjs",
+        ok:
+          contains("scripts/codex_ipc_client.mjs", 'case "--ack-thread-settings-change":') &&
+          contains("scripts/codex_ipc_client.mjs", "opts.ackThreadSettingsChange = true") &&
+          contains(
+            "scripts/codex_ipc_client.mjs",
+            'for (const [key, flag] of [["model", "--model"], ["effort", "--effort"]])',
+          ) &&
+          contains("scripts/codex_ipc_client.mjs", "opts[key] = opts[key].trim()") &&
+          contains("scripts/codex_ipc_client.mjs", "if (!opts[key])") &&
+          contains(
+            "scripts/codex_ipc_client.mjs",
+            "(opts.model !== null || opts.effort !== null) && !opts.ackThreadSettingsChange",
+          ),
+      },
+      {
+        label: "client usage states persistence and requires acknowledgement even for dry-run request generation",
+        file: "scripts/codex_ipc_client.mjs",
+        ok:
+          contains("scripts/codex_ipc_client.mjs", "rewrites the thread's stored model with it") &&
+          contains("scripts/codex_ipc_client.mjs", "rewrites the thread's stored reasoning effort with it") &&
+          contains("scripts/codex_ipc_client.mjs", "require --ack-thread-settings-change even in dry-run mode"),
+      },
+      {
+        label: "maintained wrapper and write-proof caller omit model and effort overrides",
+        file: "scripts/handoff_to_codex.sh",
+        ok:
+          matchCount("scripts/handoff_to_codex.sh", /--model|--effort/g) === 0 &&
+          matchCount("scripts/codex_ipc_write_proof.mjs", /--model|--effort/g) === 0 &&
+          contains("SKILL.md", "requires a nonempty trimmed value plus `--ack-thread-settings-change`"),
+      },
+    ], "Static client/caller evidence only. The hermetic router-contract suite exercises missing acknowledgements, whitespace values, acknowledged values, and acknowledgement-only omission without contacting the pipe."),
+    check("REQ-022", "Goal setup is explicit and agent-facing Desktop delivery guidance preserves operator authority.", [
+      {
+        label: "goal setup defaults off and the wrapper restores the exact request only behind --request-goal",
+        file: "scripts/handoff_to_codex.sh",
+        ok:
+          contains("scripts/handoff_to_codex.sh", "REQUEST_GOAL=0") &&
+          contains("scripts/handoff_to_codex.sh", "--request-goal)") &&
+          contains("scripts/handoff_to_codex.sh", 'if [[ "$REQUEST_GOAL" -eq 1 ]]') &&
+          contains(
+            "scripts/handoff_to_codex.sh",
+            "set your \\`/goal\\` to a concise summary of it",
+          ),
+      },
+      {
+        label: "SKILL.md assigns host lifecycle and direct sending to the operator boundary",
+        file: "SKILL.md",
+        ok:
+          contains(
+            "SKILL.md",
+            "The dispatching agent never closes, restarts, launches, or signals a Desktop host, and never opens `codex://` itself. Host lifecycle belongs to the operator.",
+          ) &&
+          contains(
+            "SKILL.md",
+            "Agents never run `codex_ipc_client.mjs` with `--send` directly. The maintained wrapper and write-proof harness are its only permitted sending callers.",
+          ) &&
+          contains(
+            "SKILL.md",
+            "A `--model` or `--effort` override changes stored thread settings and requires the operator's explicit intent.",
+          ),
+      },
+      {
+        label: "wrapper assigns manual pickup to the intended Desktop host without a codex:// instruction",
+        file: "scripts/handoff_to_codex.sh",
+        ok:
+          contains(
+            "scripts/handoff_to_codex.sh",
+            "Open the thread in your intended Desktop host's window, then paste:",
+          ) &&
+          !contains(
+            "scripts/handoff_to_codex.sh",
+            /\b(?:open|visit)\b[^\n]*codex:\/\/threads/i,
+          ),
+      },
+    ], "Static instruction checks only: they prove the required guidance bytes are present, not that an agent obeyed them. Hermetic wrapper and payload-parity suites prove default-off and explicit opt-in rendering without live IPC."),
+    check("REQ-023", "DB-designated rollout pages propagate end to end and direct successor pages fail closed without auto-hopping.", [
+      {
+        label: "wrapper passes the parsed DB-designated page and inspector discovery scope to observation and the waiter",
+        file: "scripts/handoff_to_codex.sh",
+        ok:
+          contains("scripts/handoff_to_codex.sh", 'selection?.authority === "db.rollout_path"') &&
+          contains("scripts/handoff_to_codex.sh", "value?.rollout?.primary?.parsedOk === true") &&
+          contains("scripts/handoff_to_codex.sh", 'observe_args+=(--rollout-path "$INSPECT_ROLLOUT_PATH")') &&
+          contains("scripts/handoff_to_codex.sh", 'wait_args+=(--rollout-path "$INSPECT_ROLLOUT_PATH")') &&
+          contains("scripts/handoff_to_codex.sh", 'const sessionsRoot = portablePath(value?.rollout?.sessionsRoot);') &&
+          contains("scripts/handoff_to_codex.sh", 'observe_args+=(--sessions-root "$INSPECT_SESSIONS_ROOT")') &&
+          contains("scripts/handoff_to_codex.sh", 'wait_args+=(--sessions-root "$INSPECT_SESSIONS_ROOT")'),
+      },
+      {
+        label: "reader owns the SQLite-free direct-successor veto and its fixed diagnostic codes",
+        file: "scripts/codex_ipc_rollout_reader.mjs",
+        ok:
+          contains("scripts/codex_ipc_rollout_reader.mjs", "export function assessRolloutPageSupersession") &&
+          contains("scripts/codex_ipc_rollout_reader.mjs", '"dispatch-history-abandoned"') &&
+          contains("scripts/codex_ipc_rollout_reader.mjs", '"rollout-page-superseded"') &&
+          contains("scripts/codex_ipc_rollout_reader.mjs", '"page-supersession-unproven"') &&
+          matchCount("scripts/codex_ipc_rollout_reader.mjs", /node:sqlite/g) === 0,
+      },
+      {
+        label: "observer, waiter, and harvester share the same SQLite-free page assessor",
+        file: "scripts/codex_ipc_rollout_observe.mjs",
+        ok:
+          contains("scripts/codex_ipc_rollout_observe.mjs", "assessRolloutPageSupersession") &&
+          contains("scripts/codex_ipc_wait.mjs", "assessRolloutPageSupersession") &&
+          contains("scripts/codex_ipc_reply_harvest.mjs", "assessRolloutPageSupersession") &&
+          matchCount("scripts/codex_ipc_rollout_observe.mjs", /node:sqlite/g) === 0 &&
+          matchCount("scripts/codex_ipc_wait.mjs", /node:sqlite/g) === 0 &&
+          matchCount("scripts/codex_ipc_reply_harvest.mjs", /node:sqlite/g) === 0,
+      },
+      {
+        label: "reply viewer exposes explicit or single-inspection page selection only for UUID scope",
+        file: "scripts/codex_ipc_replies.sh",
+        ok:
+          contains("scripts/codex_ipc_replies.sh", "--rollout-path and --derive-rollout-path are mutually exclusive") &&
+          contains("scripts/codex_ipc_replies.sh", "rollout page selection requires -c with a Codex conversation UUID") &&
+          contains("scripts/codex_ipc_replies.sh", 'node "$INSPECTOR" --thread "$CONV" --tail-events 1 --summary') &&
+          contains("scripts/codex_ipc_replies.sh", "const db = value?.dbThread;") &&
+          contains("scripts/codex_ipc_replies.sh", "const thread = db?.thread;") &&
+          contains("scripts/codex_ipc_replies.sh", "db?.exists === true") &&
+          contains("scripts/codex_ipc_replies.sh", "db?.readOnlyOpenOk === true") &&
+          contains("scripts/codex_ipc_replies.sh", "could not obtain a trusted database-designated page"),
+      },
+      {
+        label: "operator and architecture guidance preserve page binding, fixed diagnostics, and no auto-hop",
+        file: "SKILL.md",
+        ok:
+          contains("SKILL.md", "never auto-hops or stitches records onto a successor") &&
+          contains("SKILL.md", "`ROLLOUT-PAGE:` line") &&
+          contains("references/architecture.md", /never auto-hops or stitches\s+records/) &&
+          contains("references/architecture.md", "`--derive-rollout-path`") &&
+          contains("references/architecture.md", "`ROLLOUT-PAGE:` guidance"),
+      },
+    ], "Static source evidence only. Hermetic reader, observer, waiter, harvester, viewer, and wrapper suites exercise page propagation and supersession refusal without SQLite access, Desktop activation, or live IPC."),
+    check("REQ-024", "Thread-bound manual delivery preserves UUID/reply correlation and exits before every live effect.", [
+      {
+        label: "the parser defaults IPC delivery to live and accepts one explicit manual selector while rejecting live-only flag combinations",
+        file: "scripts/handoff_to_codex.sh",
+        ok:
+          contains("scripts/handoff_to_codex.sh", 'DELIVERY="live"') &&
+          contains("scripts/handoff_to_codex.sh", "--deliver live|manual") &&
+          contains("scripts/handoff_to_codex.sh", "ERROR: --deliver may be supplied only once.") &&
+          contains("scripts/handoff_to_codex.sh", "ERROR: --deliver manual cannot be combined with live-only host or foreground flags."),
+      },
+      {
+        label: "the safe manual branch prints correlated pickup, optional fixed page guidance, and WAIT without live result or live helpers",
+        file: "scripts/handoff_to_codex.sh",
+        ok:
+          manualPreparationPath.length > 0 &&
+          [
+            "read \\\"${OUTBOUND}\\\" and proceed",
+            "Codex's reply will be written to ${INBOUND}",
+            "ROLLOUT-PATH: Supply the inspector's database-designated page with --rollout-path <path>.",
+            "print_wait_hint",
+            "exit 0",
+          ].every((anchor) => manualPreparationPath.includes(anchor)) &&
+          !/RESULT:|host_policy_send|send_live|observe_rollout|powershell\.exe|codex_ipc_client|codex_ipc_autoload/.test(
+            manualPreparationPath,
+          ),
+      },
+      {
+        label: "the safe manual exit precedes host policy, client send, rollout observer, and activation helper definitions",
+        file: "scripts/handoff_to_codex.sh",
+        ok:
+          manualPreparationStart >= 0 &&
+          firstLiveOnlyDefinitions.every((index) => index > manualPreparationStart),
+      },
+      {
+        label: "unsafe manual targets retain a fixed refusal contract with no live result taxonomy",
+        file: "scripts/handoff_to_codex.sh",
+        ok:
+          contains("scripts/handoff_to_codex.sh", "ERROR: manual delivery refused -- reason=${TARGET_REFUSAL_REASON}") &&
+          contains("scripts/handoff_to_codex.sh", 'if [[ "$DELIVERY" == "manual" ]]; then'),
+      },
+      {
+        label: "bundled guidance preserves the public root, operator-owned relocation, fixed fallback anchor, and no-live boundary",
+        file: "references/troubleshooting.md",
+        ok:
+          contains("references/troubleshooting.md", "### Sandboxed thread rollout fallback") &&
+          contains("references/troubleshooting.md", "--ipc <uuid> --deliver manual") &&
+          contains("references/troubleshooting.md", "The public transport default remains `~/.claude/ipc`.") &&
+          contains("references/security-model.md", "exits after safe preparation, before host policy, PowerShell") &&
+          contains("references/security-model.md", "no live `RESULT:` line"),
+      },
+    ], "Static installed-skill evidence only. Repository release suites separately exercise manual refusal, live-effect tripwires, and sandboxed rollout fallback. Manual preparation makes no live IPC, Desktop-state, reply-writability, or runtime compatibility claim."),
+    check("REQ-025", "Correlated terminal diagnostics are privacy-bounded facts and do not alter the waiter or reply-source contract.", [
+      {
+        label: "reader caps only the terminal error message and retains model state without its raw value",
+        file: "scripts/codex_ipc_rollout_reader.mjs",
+        ok:
+          contains("scripts/codex_ipc_rollout_reader.mjs", "const TURN_ERROR_EXCERPT_BYTES = 512;") &&
+          contains("scripts/codex_ipc_rollout_reader.mjs", "? body.error.message") &&
+          contains("scripts/codex_ipc_rollout_reader.mjs", 'if (body.model === null) return { state: "null" };') &&
+          contains("scripts/codex_ipc_rollout_reader.mjs", 'if (typeof body.model !== "string") return { state: "invalid" };') &&
+          contains("scripts/codex_ipc_rollout_reader.mjs", 'return { state: body.model.trim().length === 0 ? "empty" : "present" };') &&
+          !contains("scripts/codex_ipc_rollout_reader.mjs", "codex_error_info"),
+      },
+      {
+        label: "facts are matching-turn, no-output/preterminal diagnostics with fixed codes",
+        file: "scripts/codex_ipc_rollout_reader.mjs",
+        ok:
+          contains("scripts/codex_ipc_rollout_reader.mjs", /if \(!assistantOutput\)[\s\S]*?diagnostic\("turn-error"/) &&
+          contains("scripts/codex_ipc_rollout_reader.mjs", /bucket\.appliedModelRecord[\s\S]*?state !== "present"[\s\S]*?diagnostic\("turn-model-state"/) &&
+          contains("scripts/codex_ipc_rollout_reader.mjs", /contexts[\s\S]*?item\.line < snapshot\.terminalLine[\s\S]*?\.at\(-1\)/),
+      },
+      {
+        label: "waiter keeps exactly six stdout tokens and viewer forwards only the two named facts",
+        file: "scripts/codex_ipc_wait.mjs",
+        ok:
+          contains("scripts/codex_ipc_wait.mjs", /WAIT_TOKENS = Object\.freeze\(\[\s*"done",\s*"aborted",\s*"superseded",\s*"reply-missing",\s*"pending",\s*"unavailable",\s*\]\)/) &&
+          contains("scripts/codex_ipc_wait.mjs", "WAIT_DIAGNOSTIC") &&
+          contains("scripts/codex_ipc_replies.sh", '\"(turn-error|turn-model-state)\"'),
+      },
+      {
+        label: "bundled guidance locks disclosure, lifecycle, and operator interpretation",
+        file: "references/architecture.md",
+        ok:
+          contains("references/architecture.md", "capped at 512 UTF-8 bytes") &&
+          contains("references/architecture.md", "do not change lifecycle, certification, reply precedence") &&
+          contains("references/security-model.md", "sibling error fields and raw model values are discarded") &&
+          contains("references/troubleshooting.md", "not proof of host ownership or permission to retry"),
+      },
+    ], "Static source and prose evidence only. Repository reader, waiter, harvester, and viewer suites provide the behavioral proof; live producer compatibility remains separately gated."),
+    check("REQ-026", "Alternate local state roots use narrow aliases with explicit precedence and never become authority.", [
+      {
+        label: "inspector and waiter resolve flags before nonempty environment aliases and defaults",
+        file: "scripts/codex_ipc_session_inspect.mjs",
+        ok:
+          contains("scripts/codex_ipc_session_inspect.mjs", "process.env.CODEX_IPC_SESSIONS_ROOT || defaultCodexPath(\"sessions\")") &&
+          contains("scripts/codex_ipc_session_inspect.mjs", 'case "--sessions-root":') &&
+          contains("scripts/codex_ipc_wait.mjs", "raw.rolloutPath || env.CODEX_IPC_ROLLOUT_PATH || null") &&
+          contains("scripts/codex_ipc_wait.mjs", "raw.sessionsRoot || env.CODEX_IPC_SESSIONS_ROOT ||") &&
+          contains("scripts/codex_ipc_wait.mjs", "same meaning as --sessions-root; flag wins"),
+      },
+      {
+        label: "observer accepts explicit discovery scope before its alias while harvester retains both aliases",
+        file: "scripts/codex_ipc_rollout_observe.mjs",
+        ok:
+          contains("scripts/codex_ipc_rollout_observe.mjs", "raw.rolloutPath || process.env.CODEX_IPC_ROLLOUT_PATH || null") &&
+          contains("scripts/codex_ipc_rollout_observe.mjs", "sessionsRoot: raw.sessionsRoot || process.env.CODEX_IPC_SESSIONS_ROOT || undefined") &&
+          contains("scripts/codex_ipc_rollout_observe.mjs", 'case "--sessions-root":') &&
+          contains("scripts/codex_ipc_reply_harvest.mjs", "rolloutPath: process.env.CODEX_IPC_ROLLOUT_PATH || null") &&
+          contains("scripts/codex_ipc_reply_harvest.mjs", "sessionsRoot: process.env.CODEX_IPC_SESSIONS_ROOT || undefined") &&
+          contains("scripts/codex_ipc_reply_harvest.mjs", "same validation as --rollout-path; flag wins"),
+      },
+      {
+        label: "bundled matrix excludes CODEX_HOME and states that paths do not grant authority",
+        file: "SKILL.md",
+        ok:
+          contains("SKILL.md", "Local path aliases are intentionally component-scoped") &&
+          contains("SKILL.md", "`CODEX_HOME` is not a supported") &&
+          contains("SKILL.md", "no configured path establishes page or owner authority") &&
+          contains("references/architecture.md", "Local path configuration is deliberately narrow"),
+      },
+      {
+        label: "operator guidance keeps locator timestamps and wrong-host symptoms non-authoritative",
+        file: "references/troubleshooting.md",
+        ok:
+          contains("references/troubleshooting.md", "reset/revert can make an older thread match") &&
+          contains("references/troubleshooting.md", "not proof of ownership") &&
+          contains("references/troubleshooting.md", "The operator closes the wrong host") &&
+          contains("references/troubleshooting.md", "Retry creates another rollout page"),
+      },
+    ], "Static installed-skill evidence only. Aliases are path inputs, not compatibility or authority claims; hermetic component tests prove precedence and validation."),
   ];
 
   const ok = Object.values(files).every((item) => item.ok) &&

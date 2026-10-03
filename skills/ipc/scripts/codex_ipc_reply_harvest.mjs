@@ -3,10 +3,15 @@ import fs from "node:fs";
 import path from "node:path";
 import { realpathSync } from "node:fs";
 import {
+  assessRolloutPageSupersession,
   createDispatchCorrelator,
   isCompleteReaderCursor,
   locateRollout,
+  normalizeRolloutCliPath,
   readRolloutFile,
+  ROLLOUT_PATH_GUIDANCE,
+  rolloutDiagnosticLines,
+  rolloutPageGuidance,
 } from "./codex_ipc_rollout_reader.mjs";
 
 const DEFAULT_MAX_BYTES = 4096;
@@ -109,6 +114,17 @@ function dispatchReuseDiagnostic(correlated) {
   };
 }
 
+function assessBoundPage(options, located, parsed, correlated) {
+  return assessRolloutPageSupersession({
+    threadId: String(options?.threadId || "").toLowerCase(),
+    rolloutPath: located.path,
+    sessionsRoot: options?.sessionsRoot,
+    expectedIdentityKey: located.candidates?.[0]?.identityKey,
+    expectedSize: parsed.cursor?.size,
+    dispatchMarkerByteOffset: correlated?.latestOccurrence?.markerByteOffset ?? null,
+  });
+}
+
 function assessRolloutSupersession(options) {
   const threadId = String(options?.threadId || "").toLowerCase();
   if (!UUID_RE.test(threadId)) {
@@ -121,6 +137,7 @@ function assessRolloutSupersession(options) {
     rolloutPath: options?.rolloutPath,
     sessionsRoot: options?.sessionsRoot,
   });
+  const pageGuidance = rolloutPageGuidance(located, options?.rolloutPath);
   if (located.status !== "found") {
     const benignNoCandidate =
       located.status === "unavailable" &&
@@ -130,8 +147,11 @@ function assessRolloutSupersession(options) {
       );
     return supersessionAssessment(
       "unavailable",
-      located.diagnostics || [],
-      Boolean(options?.rolloutPath) || located.status === "ambiguous" || !benignNoCandidate,
+      [...(located.diagnostics || []), ...pageGuidance],
+      pageGuidance.length > 0 ||
+        Boolean(options?.rolloutPath) ||
+        located.status === "ambiguous" ||
+        !benignNoCandidate,
     );
   }
   const correlator = createDispatchCorrelator(String(options?.dispatchId || ""));
@@ -142,7 +162,11 @@ function assessRolloutSupersession(options) {
     retainRecords: false,
     onRecord: correlator.push,
   });
-  const readDiagnostics = [...(located.diagnostics || []), ...(parsed.diagnostics || [])];
+  const readDiagnostics = [
+    ...(located.diagnostics || []),
+    ...pageGuidance,
+    ...(parsed.diagnostics || []),
+  ];
   if (!parsed.ok) {
     return supersessionAssessment("unavailable", readDiagnostics, true);
   }
@@ -154,12 +178,17 @@ function assessRolloutSupersession(options) {
   }
   const correlated = correlator.finish(parsed);
   const diagnostics = [...readDiagnostics, ...(correlated.diagnostics || [])];
+  const pageAssessment = assessBoundPage(options, located, parsed, correlated);
+  diagnostics.push(...(pageAssessment.diagnostics || []));
   if ((correlated.duplicateCount || 0) > 1) {
     return supersessionAssessment(
       "unavailable",
       [...diagnostics, dispatchReuseDiagnostic(correlated)],
       true,
     );
+  }
+  if (pageAssessment.status !== "current") {
+    return supersessionAssessment("unavailable", diagnostics, true);
   }
   const certifiableCompletion =
     correlated.status === "complete" &&
@@ -228,11 +257,12 @@ export function harvestDispatch(options) {
     rolloutPath: options?.rolloutPath,
     sessionsRoot: options?.sessionsRoot,
   });
+  const pageGuidance = rolloutPageGuidance(located, options?.rolloutPath);
   if (located.status === "ambiguous") {
-    return none("ambiguous", located.diagnostics);
+    return none("ambiguous", [...located.diagnostics, ...pageGuidance]);
   }
   if (located.status !== "found") {
-    return none("unavailable", located.diagnostics);
+    return none("unavailable", [...located.diagnostics, ...pageGuidance]);
   }
 
   const correlator = createDispatchCorrelator(String(options?.dispatchId || ""));
@@ -254,15 +284,32 @@ export function harvestDispatch(options) {
     ]);
   }
   const correlated = correlator.finish(parsed);
+  const pageAssessment = assessBoundPage(options, located, parsed, correlated);
+  const pageDiagnostics = pageAssessment.diagnostics || [];
   if ((correlated.duplicateCount || 0) > 1) {
     return {
       ...none("unavailable", [
         ...located.diagnostics,
+        ...pageGuidance,
         ...parsed.diagnostics,
         ...(correlated.diagnostics || []),
+        ...pageDiagnostics,
         dispatchReuseDiagnostic(correlated),
       ]),
       duplicateCount: correlated.duplicateCount,
+      boundaryMode: correlated.boundaryMode || null,
+    };
+  }
+  if (pageAssessment.status !== "current") {
+    return {
+      ...none("unavailable", [
+        ...located.diagnostics,
+        ...pageGuidance,
+        ...parsed.diagnostics,
+        ...(correlated.diagnostics || []),
+        ...pageDiagnostics,
+      ]),
+      duplicateCount: correlated.duplicateCount || 0,
       boundaryMode: correlated.boundaryMode || null,
     };
   }
@@ -324,7 +371,12 @@ export function harvestDispatch(options) {
 
 function usage() {
   return `Usage: node codex_ipc_reply_harvest.mjs --thread <uuid|filedrop> --dispatch <id>
-       [--reply-path <path>] [--rollout-path <path>] [--max-bytes <n>]`;
+       [--reply-path <path>] [--rollout-path <path>] [--max-bytes <n>]
+
+Environment:
+  CODEX_IPC_ROLLOUT_PATH   same validation as --rollout-path; flag wins
+  CODEX_IPC_SESSIONS_ROOT  complete sessions root for discovery and supersession checks,
+                         including with --rollout-path`;
 }
 
 function takeValue(argv, index, flag) {
@@ -373,6 +425,7 @@ function parseArgs(argv) {
   }
   if (!options.threadId || !options.dispatchId) throw new Error("--thread and --dispatch are required");
   if (!/^[A-Za-z0-9._-]+$/.test(options.dispatchId)) throw new Error("invalid --dispatch");
+  if (options.rolloutPath) options.rolloutPath = normalizeRolloutCliPath(options.rolloutPath);
   return options;
 }
 
@@ -388,6 +441,7 @@ function main(argv) {
     options = parseArgs(argv);
   } catch (error) {
     console.error(`ERROR: ${error.message}`);
+    if (error?.code === "IPC_ROLLOUT_PATH_INVALID") console.error(ROLLOUT_PATH_GUIDANCE);
     console.error(usage());
     process.exitCode = 1;
     return;
@@ -402,6 +456,7 @@ function main(argv) {
       `REPLY_SUPERSESSION_UNCERTAIN\t${result.replySupersessionStatus}\tselected primary may be stale; freshness and supersession could not be certified.`,
     );
   }
+  for (const line of rolloutDiagnosticLines(result.diagnostics)) console.error(line);
   emitDiagnostics(result.diagnostics);
   const fields = [
     result.source,

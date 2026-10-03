@@ -13,8 +13,9 @@
 # - Each declared conditional heading is ABSENT from the minimal render and PRESENT in the
 #   maximal one, so a heading that silently became unconditional (or stopped rendering at
 #   all) fails here instead of drifting into the example unnoticed.
-# - The payload title line matches the example's, and the render contains no unexpanded
-#   `${...}` (a broken heredoc would otherwise ship interpolation markers to Codex).
+# - The payload title line and fixed two-line task instruction match the example's, and the
+#   render contains no unexpanded `${...}` (a broken heredoc would otherwise ship interpolation
+#   markers to Codex).
 #
 # Comparison is on RENDERED text by construction: two headings interpolate ${MAIN_BRANCH},
 # so grepping the wrapper source for heading literals cannot decide parity.
@@ -24,8 +25,9 @@
 # the fixture is a throwaway git repo, so no real transport root, session state or repo is
 # read or written. Retention is pinned to keep-only (0) so no sweep can run.
 #
-# EXCLUDED: body text below the headings, heading ORDER, and the example's synthetic
-# placeholder ids/paths (deliberately fake; they cannot match a live render).
+# EXCLUDED: body text below the headings other than the fixed task instruction, heading ORDER,
+# and the example's synthetic placeholder ids/paths (deliberately fake; they cannot match a live
+# render).
 
 set -u
 
@@ -48,6 +50,7 @@ PASS=0
 FAIL=0
 ok(){ echo "  PASS: $1"; PASS=$((PASS+1)); }
 no(){ echo "  FAIL: $1"; FAIL=$((FAIL+1)); }
+fatal(){ echo "FATAL: $*" >&2; exit 1; }
 
 # A missing wrapper/example is a hard failure, never a skip: this suite exists precisely to
 # prove the pair stays in step, and a silent skip would restore the gap it closes.
@@ -67,8 +70,39 @@ CONDITIONAL_HEADINGS=$(printf '%s\n' \
     "## Uncommitted changes	UNCOMMITTED (git status --short is non-empty)" \
     "## Suggested reasoning effort	CODEX_REASONING_EFFORT")
 
-TMP="$(mktemp -d)"
+TMP="$(mktemp -d)" && [[ -n "$TMP" && -d "$TMP" ]] \
+    || { echo "FATAL: could not create payload-parity temporary directory" >&2; exit 1; }
 trap 'rm -rf "$TMP"' EXIT
+
+# Fixture Git operations must not inherit redirecting/tracing GIT_* variables from the caller.
+while IFS= read -r _git_var; do
+    [[ "${_git_var^^}" == GIT_* ]] && unset "$_git_var"
+done < <(compgen -e)
+for _git_var in $(compgen -e); do
+    [[ "${_git_var^^}" != GIT_* ]] || fatal "could not clear inherited Git variable $_git_var"
+done
+unset _git_var
+export GIT_OPTIONAL_LOCKS=0 GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
+export GIT_ATTR_NOSYSTEM=1 GIT_PAGER=cat GIT_NO_REPLACE_OBJECTS=1
+export GIT_NO_LAZY_FETCH=1 GIT_TERMINAL_PROMPT=0
+
+# These renders are file-drop only; child runtimes are unexpected and must be owned tripwires.
+STUB_BIN="$TMP/wrapper-bin"
+mkdir -p "$STUB_BIN" || fatal "could not create wrapper stub directory"
+for _stub in node powershell.exe codex; do
+    printf '%s\n' '#!/usr/bin/env bash' \
+        'printf "FATAL: unexpected wrapper child: %s\\n" "${0##*/}" >&2' \
+        'exit 97' > "$STUB_BIN/$_stub" \
+        || fatal "could not materialize $_stub tripwire"
+done
+chmod +x "$STUB_BIN"/* || fatal "could not make wrapper tripwires executable"
+for _stub in node powershell.exe codex; do
+    _resolved="$(PATH="$STUB_BIN:$PATH" command -v "$_stub" 2>/dev/null)" \
+        || fatal "$_stub tripwire does not resolve"
+    [[ "$_resolved" == "$STUB_BIN/$_stub" ]] \
+        || fatal "$_stub resolved outside the harness: $_resolved"
+done
+unset _stub _resolved
 
 TASK_TEXT="Review src/example.js for edge cases and add the missing null-input guard."
 
@@ -107,24 +141,27 @@ unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
 # section BODIES only and never adds, drops or renames a heading -- which is exactly the
 # property this suite is here to keep true.
 R_RC=0; R_OUT=""; R_FILE=""
-do_render() { # do_render <tag> <optional-env 0|1>
+do_render() { # do_render <tag> <optional-env 0|1> <request-goal 0|1>
     # Separate declarations: `local` expands ALL of its words before it assigns any of
     # them, so `local a=$1 b=$TMP/$a` would read an unbound `a` under `set -u`.
-    local tag="$1" opt="$2"
+    local tag="$1" opt="$2" request_goal="$3"
     local ipcroot="$TMP/ipc-$tag" fakehome="$TMP/home-$tag" found
+    local -a wrapper_args=()
+    [[ "$request_goal" -eq 1 ]] && wrapper_args+=(--request-goal)
+    wrapper_args+=("$TASK_TEXT")
     mkdir -p "$ipcroot" "$fakehome"
     if [[ "$opt" -eq 1 ]]; then
         R_OUT="$( cd "$FIX" && env HOME="$fakehome" CODEX_IPC_ROOT="$ipcroot" \
             CLAUDE_SESSION_ID="parity-fixture" CODEX_IPC_RETENTION_DAYS=0 \
             CODEX_IPC_INCLUDE_TRANSCRIPT=1 CODEX_REASONING_EFFORT=high \
-            CODEX_IPC_GIT_CONTEXT=full \
-            bash "$WRAPPER" "$TASK_TEXT" 2>&1 )"
+            CODEX_IPC_GIT_CONTEXT=full PATH="$STUB_BIN:$PATH" \
+            bash "$WRAPPER" "${wrapper_args[@]}" 2>&1 )"
     else
         R_OUT="$( cd "$FIX" && env -u CODEX_IPC_INCLUDE_TRANSCRIPT -u CODEX_REASONING_EFFORT \
             -u CLAUDE_TRANSCRIPT -u CLAUDE_CODE_SESSION_ID -u CODEX_IPC_GIT_CONTEXT \
             HOME="$fakehome" CODEX_IPC_ROOT="$ipcroot" \
-            CLAUDE_SESSION_ID="parity-fixture" CODEX_IPC_RETENTION_DAYS=0 \
-            bash "$WRAPPER" "$TASK_TEXT" 2>&1 )"
+            CLAUDE_SESSION_ID="parity-fixture" CODEX_IPC_RETENTION_DAYS=0 PATH="$STUB_BIN:$PATH" \
+            bash "$WRAPPER" "${wrapper_args[@]}" 2>&1 )"
     fi
     R_RC=$?
     found="$(find "$ipcroot" -type f -name '*.task.md' 2>/dev/null)"
@@ -150,7 +187,7 @@ else
 fi
 
 # ---- minimal render (clean tree, no optional env) ----------------------------------------
-do_render min 0
+do_render min 0 0
 if [[ "$R_RC" -eq 0 ]]; then ok "minimal file-drop render exited 0"; else
     no "minimal file-drop render exited $R_RC"; printf '%s\n' "$R_OUT" | sed 's/^/    /'
 fi
@@ -162,6 +199,18 @@ fi
 MIN_FILE="$R_FILE"
 [[ -n "$MIN_FILE" ]] && headings "$MIN_FILE" > "$TMP/h-min" || : > "$TMP/h-min"
 
+# ---- explicit goal-request render (same default environment) -----------------------------
+do_render goal 0 1
+if [[ "$R_RC" -eq 0 ]]; then ok "opt-in goal-request render exited 0"; else
+    no "opt-in goal-request render exited $R_RC"; printf '%s\n' "$R_OUT" | sed 's/^/    /'
+fi
+if [[ -n "$R_FILE" && -f "$R_FILE" ]]; then
+    ok "opt-in goal-request render published exactly one envelope"
+else
+    no "opt-in goal-request render did not publish exactly one *.task.md"
+fi
+GOAL_FILE="$R_FILE"
+
 # ---- maximal render (dirty tree + every optional env) ------------------------------------
 printf 'scratch\n' > "$FIX/uncommitted-scratch.txt"
 if [[ -n "$(cd "$FIX" && git status --short 2>/dev/null)" ]]; then
@@ -169,7 +218,7 @@ if [[ -n "$(cd "$FIX" && git status --short 2>/dev/null)" ]]; then
 else
     no "fixture worktree could not be made dirty (conditional heading untestable)"
 fi
-do_render max 1
+do_render max 1 0
 if [[ "$R_RC" -eq 0 ]]; then ok "maximal file-drop render exited 0"; else
     no "maximal file-drop render exited $R_RC"; printf '%s\n' "$R_OUT" | sed 's/^/    /'
 fi
@@ -221,7 +270,7 @@ while IFS=$'\t' read -r ch gate; do
     fi
 done < <(printf '%s\n' "$CONDITIONAL_HEADINGS")
 
-# 4. title-line parity and no unexpanded interpolation in the render.
+# 4. title-line and fixed task-instruction parity.
 EX_TITLE="$(head -1 "$EXAMPLE" | tr -d '\r')"
 MIN_TITLE=""; [[ -n "$MIN_FILE" ]] && MIN_TITLE="$(head -1 "$MIN_FILE" | tr -d '\r')"
 if [[ -n "$MIN_TITLE" && "$MIN_TITLE" == "$EX_TITLE" ]]; then
@@ -229,8 +278,40 @@ if [[ -n "$MIN_TITLE" && "$MIN_TITLE" == "$EX_TITLE" ]]; then
 else
     no "payload title drifted: render='$MIN_TITLE' example='$EX_TITLE'"
 fi
+
+instruction_block() {
+    awk '/^Read the \*\*Task\*\* below,/{ print; if (getline) print; exit }' "$1" 2>/dev/null | tr -d '\r'
+}
+EXPECTED_DEFAULT=$(printf '%s\n' \
+    'Read the **Task** below, then complete it' \
+    'in the associated workspace at:')
+EXPECTED_GOAL=$(printf '%s\n' \
+    'Read the **Task** below, set your `/goal` to a concise summary of it, then complete it' \
+    'in the associated workspace at:')
+MIN_INSTRUCTION=""; [[ -n "$MIN_FILE" ]] && MIN_INSTRUCTION="$(instruction_block "$MIN_FILE")"
+EX_INSTRUCTION="$(instruction_block "$EXAMPLE")"
+GOAL_INSTRUCTION=""; [[ -n "$GOAL_FILE" ]] && GOAL_INSTRUCTION="$(instruction_block "$GOAL_FILE")"
+if [[ "$MIN_INSTRUCTION" == "$EXPECTED_DEFAULT" && "$EX_INSTRUCTION" == "$EXPECTED_DEFAULT" ]]; then
+    ok "default task instruction is goal-free and byte-parallel with the example"
+else
+    no "default task instruction drifted from the goal-free example"
+fi
+if [[ "$GOAL_INSTRUCTION" == "$EXPECTED_GOAL" ]]; then
+    ok "--request-goal restores the exact opt-in goal instruction"
+else
+    no "--request-goal did not render the exact goal instruction"
+fi
+if [[ -n "$MIN_FILE" ]] \
+    && ! grep -aFq 'set your `/goal`' "$MIN_FILE" \
+    && ! grep -aFq 'set your `/goal`' "$EXAMPLE"; then
+    ok "default render and committed example contain no goal-setting request"
+else
+    no "a default payload surface still requests goal setup"
+fi
+
+# 5. no unexpanded interpolation in any render.
 LEFTOVER=""
-for f in "$MIN_FILE" "$MAX_FILE"; do
+for f in "$MIN_FILE" "$GOAL_FILE" "$MAX_FILE"; do
     [[ -n "$f" ]] || continue
     if grep -aq '\${' "$f"; then LEFTOVER="$LEFTOVER $f"; fi
 done
@@ -240,9 +321,9 @@ else
     no "unexpanded \${...} in render(s):$LEFTOVER"
 fi
 
-# 5. containment: nothing escaped the fixture transport root, and no reply was fabricated.
+# 6. containment: nothing escaped the fixture transport root, and no reply was fabricated.
 ESCAPED=0
-for f in "$MIN_FILE" "$MAX_FILE"; do
+for f in "$MIN_FILE" "$GOAL_FILE" "$MAX_FILE"; do
     [[ -n "$f" ]] || continue
     case "$f" in "$TMP"/*) ;; *) ESCAPED=1 ;; esac
 done

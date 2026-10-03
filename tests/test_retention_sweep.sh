@@ -13,8 +13,8 @@
 #   * CODEX_IPC_RETENTION_DAYS=0 disables the sweep entirely;
 #   * the script's retention doc text states the unreplied exemption.
 #
-# Hermetic: everything runs against a mktemp transport root; file-drop mode only,
-# so no node/codex/powershell stubs and no real transport root are involved.
+# Hermetic: everything runs against a mktemp transport root in file-drop mode. Owned
+# node/codex/powershell tripwires fail closed if that mode unexpectedly invokes a child.
 set -uo pipefail
 
 # Dual-layout probe: repo layout (tests/ beside skills/ipc/) and installed-skill layout
@@ -26,9 +26,43 @@ for _cand in "$TDIR/../skills/ipc/scripts/handoff_to_codex.sh" "$TDIR/../scripts
 done
 [[ -n "$SCRIPT" ]] || { echo "FATAL: handoff_to_codex.sh not found in repo or installed layout" >&2; exit 1; }
 
-TMP="$(mktemp -d)"
+TMP="$(mktemp -d)" && [[ -n "$TMP" && -d "$TMP" ]] \
+    || { echo "FATAL: could not create retention temporary directory" >&2; exit 1; }
 trap 'rm -rf "$TMP"' EXIT
-NOREPO="$TMP/norepo"; mkdir -p "$NOREPO"
+fatal(){ echo "FATAL: $*" >&2; exit 1; }
+
+# Wrapper-side Git probes must not inherit routing/tracing variables. GIT_TRACE* may name
+# an arbitrary output path, so clear every ambient GIT_* variable before fixture execution.
+while IFS= read -r _git_var; do
+  [[ "${_git_var^^}" == GIT_* ]] && unset "$_git_var"
+done < <(compgen -e)
+for _git_var in $(compgen -e); do
+  [[ "${_git_var^^}" != GIT_* ]] || fatal "could not clear inherited Git variable $_git_var"
+done
+unset _git_var
+export GIT_OPTIONAL_LOCKS=0 GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
+export GIT_ATTR_NOSYSTEM=1 GIT_PAGER=cat GIT_NO_REPLACE_OBJECTS=1
+export GIT_NO_LAZY_FETCH=1 GIT_TERMINAL_PROMPT=0
+
+NOREPO="$TMP/norepo"; mkdir -p "$NOREPO" || fatal "could not create non-repository fixture"
+
+# This suite uses file-drop only. Any child runtime is unexpected and must hit a tripwire.
+STUB_BIN="$TMP/wrapper-bin"
+mkdir -p "$STUB_BIN" || fatal "could not create wrapper stub directory"
+for _stub in node powershell.exe codex; do
+  printf '%s\n' '#!/usr/bin/env bash' \
+    'printf "FATAL: unexpected wrapper child: %s\\n" "${0##*/}" >&2' \
+    'exit 97' > "$STUB_BIN/$_stub" \
+    || fatal "could not materialize $_stub tripwire"
+done
+chmod +x "$STUB_BIN"/* || fatal "could not make wrapper tripwires executable"
+for _stub in node powershell.exe codex; do
+  _resolved="$(PATH="$STUB_BIN:$PATH" command -v "$_stub" 2>/dev/null)" \
+    || fatal "$_stub tripwire does not resolve"
+  [[ "$_resolved" == "$STUB_BIN/$_stub" ]] \
+    || fatal "$_stub resolved outside the harness: $_resolved"
+done
+unset _stub _resolved
 
 PASS=0; FAIL=0
 ok(){ echo "  PASS: $1"; PASS=$((PASS+1)); }
@@ -62,7 +96,7 @@ run_dispatch(){ # run_dispatch <root> [env VAR=VAL ...] -> OUT/RC; a plain file-
   # exercise the DEFAULT actually gets the default, not the runner's ambient value.
   # A caller that wants a specific retention passes it explicitly in "$@" and `env`
   # applies it after this -u, so the explicit value still wins.
-  OUT="$( cd "$NOREPO" && env -u CODEX_IPC_RETENTION_DAYS "$@" CODEX_IPC_ROOT="$root" CLAUDE_CODE_SESSION_ID="sweeper" bash "$SCRIPT" "sweep trigger task" 2>&1 )"; RC=$?
+  OUT="$( cd "$NOREPO" && env -u CODEX_IPC_RETENTION_DAYS "$@" PATH="$STUB_BIN:$PATH" CODEX_IPC_ROOT="$root" CLAUDE_CODE_SESSION_ID="sweeper" bash "$SCRIPT" "sweep trigger task" 2>&1 )"; RC=$?
 }
 
 echo "== 1. survival matrix under an explicit 7-day sweep =="

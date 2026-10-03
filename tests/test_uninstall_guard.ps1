@@ -44,6 +44,13 @@ $script:fail = 0
 function ok($m) { Write-Output "  PASS: $m"; $script:pass++ }
 function no($m) { Write-Output "  FAIL: $m"; $script:fail++ }
 
+$uncProbeMode = [string]$env:IPC_TEST_UNC_PROBES
+if ([string]::IsNullOrEmpty($uncProbeMode)) { $uncProbeMode = '0' }
+if ($uncProbeMode -notin @('0', '1')) {
+    throw 'IPC_TEST_UNC_PROBES must be 0 or 1'
+}
+$uncProbesEnabled = $uncProbeMode -eq '1'
+
 # Every invocation carries -DryRun. A regression that defeats the guard cannot delete here;
 # it produces a plan at exit 0, which is exactly what these assertions catch.
 function Invoke-Guard($script, $argList) {
@@ -91,14 +98,20 @@ $uncBack = $null
 if ($srcSkill -match '^([A-Za-z]):\\(.*)$') {
     $uncBack = "\\localhost\$($Matches[1])`$\$($Matches[2])"
 }
-if ($uncBack -and (Test-Path -LiteralPath $uncBack)) {
-    $uncFwd  = $uncBack.Replace('\', '/')
-    $uncIp   = $uncBack.Replace('\\localhost\', '\\127.0.0.1\')
-    Refuses $uninstall @('-DryRun','-Target',$uncBack) 'backslash UNC'
-    Refuses $uninstall @('-DryRun','-Target',$uncFwd)  'FORWARD-SLASH UNC'
-    Refuses $uninstall @('-DryRun','-Target',$uncIp)   'UNC via 127.0.0.1'
+$uncReachable = $false
+if ($uncProbesEnabled) {
+    $uncReachable = $uncBack -and (Test-Path -LiteralPath $uncBack)
+    if ($uncReachable) {
+        $uncFwd  = $uncBack.Replace('\', '/')
+        $uncIp   = $uncBack.Replace('\\localhost\', '\\127.0.0.1\')
+        Refuses $uninstall @('-DryRun','-Target',$uncBack) 'backslash UNC'
+        Refuses $uninstall @('-DryRun','-Target',$uncFwd)  'FORWARD-SLASH UNC'
+        Refuses $uninstall @('-DryRun','-Target',$uncIp)   'UNC via 127.0.0.1'
+    } else {
+        Write-Output "  (SKIP: admin-share UNC not reachable for $srcSkill; UNC arms not asserted here)"
+    }
 } else {
-    Write-Output "  (SKIP: admin-share UNC not reachable for $srcSkill; UNC arms not asserted here)"
+    Write-Output '  (SKIP: UNC probes disabled; set IPC_TEST_UNC_PROBES=1 to opt in)'
 }
 
 Write-Output "== 3. trailing dot / space (Windows strips them; string compare does not) =="
@@ -109,7 +122,7 @@ Write-Output "== 4. install.ps1 -Force refuses the same set =="
 Refuses $install @('-DryRun','-Force','-Target',$srcSkill)                            'install: canonical source'
 Refuses $install @('-DryRun','-Force','-Target',"$srcSkill.")                         'install: trailing dot on leaf'
 Refuses $install @('-DryRun','-Force','-Target',"$src.\skills\ipc")                   'install: trailing dot on ancestor'
-if ($uncBack -and (Test-Path -LiteralPath $uncBack)) {
+if ($uncReachable) {
     Refuses $install @('-DryRun','-Force','-Target',$uncBack.Replace('\','/')) 'install: forward-slash UNC'
 }
 

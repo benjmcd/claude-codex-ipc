@@ -17,7 +17,7 @@ pipe; no queueing guarantees, no multi-user security model).
 |---|---|---|
 | Desktop-independent file transport | File-backed dispatch/reply and the file-primary viewer | Run the hermetic repository gates; these surfaces do not depend on private Desktop schema or live routing. |
 | Read-only private-schema-dependent | Inspector, locator, snapshot, and rollout-derived fallback | Re-run validate-only checks after a Desktop update because private schema and rollout layout may drift. |
-| Experimental live Desktop | Named-pipe delivery, `codex://` autoload, focus handling, and write proof | Assume drift until validate-only revalidation; run live proof only with separate explicit authorization. |
+| Experimental live Desktop | Named-pipe delivery, gated `codex://` activation, focus handling, and write proof | Assume drift until validate-only revalidation; activation is separately opt-in and fail-closed; run live proof only with separate explicit authorization. |
 
 Historical proof is point-in-time evidence, not current certification. Live Desktop IPC was
 observed on 2026-07-08 with the write-proof harness, `defer` and `switch`+ack paths, and the reply
@@ -60,18 +60,29 @@ The repository-relative Quickstart block below runs from the repository root.
 ```bash
 # 1. File-drop (stable): paste the printed pickup line into your Codex session
 skills/ipc/scripts/handoff_to_codex.sh "review src/parser.js for edge cases"
+# Goal setup is off by default; add --request-goal before the task only on explicit operator intent.
 
-# 2. Live Desktop delivery (experimental): explicit UUID only — inspect first, then send
+# 2. Thread-bound manual delivery: same UUID/reply correlation, no live contact.
+skills/ipc/scripts/handoff_to_codex.sh --ipc <conversation-id> --deliver manual -- "review the parser"
+
+# 3. Live Desktop delivery (experimental): explicit UUID only — preview, then send.
+#    The wrapper repeats one read-only root/model inspection and a fresh host gate before contact;
+#    Desktop activation stays off by default.
 node skills/ipc/scripts/codex_ipc_session_inspect.mjs --thread <conversation-id> --tail-events 20 --summary
 skills/ipc/scripts/handoff_to_codex.sh --ipc <conversation-id> "run the failing test and fix it"
 
-# 3. Replies (read-only, newest first)
+# 4. Replies (read-only, newest first)
 skills/ipc/scripts/codex_ipc_replies.sh
 
-# 4. Wait for a NAMED dispatch to complete (bounded; opt-in rollout fallback)
+# 5. Wait for a NAMED dispatch to complete (bounded; opt-in rollout fallback)
 node skills/ipc/scripts/codex_ipc_wait.mjs --thread <conversation-id> --dispatch <dispatchId> \
   --reply-path <printed .reply.md path> --accept-rollout-fallback --budget-ms 1800000 --interval-ms 1000
 ```
+
+For a goal-driven target, keep `--request-goal` off and use
+`--ipc <uuid> --deliver manual`; then have the operator paste its pickup line into the intended
+thread. A closed turn is not a precondition. Expect `pending` until the named dispatch has its own
+completion evidence; never call `turn/interrupt` or resend merely to manufacture an idle gap.
 
 `codex_ipc_wait` prints exactly one of six tokens on stdout — `done`, `aborted`, `superseded`,
 `reply-missing`, `pending`, `unavailable`. `done` certifies that the **named dispatch's own turn**
@@ -79,6 +90,8 @@ completed; it is never proof that the thread is idle now or that the returned su
 satisfies the task. Retrieve the selected reply body and inspect it against the task's
 done-criteria. The producer completes and checks the full result before a separate, single
 reply-write attempt.
+Same-turn terminal failures and unusable applied-model states may appear only as named diagnostics
+on stderr. They add no waiter token and do not change reply-file precedence or certification.
 Only an error returned by that write supports a permission/sandbox-denial claim; a calculation or
 parse failure does not. If the write is actually denied, the final agent message retains the full
 substantive result for rollout fallback.
@@ -88,13 +101,15 @@ An absent reply with no certifiable rollout body exhausts the eligible sources.
 Inspect diagnostics/thread rather than re-harvesting,
 auto-resending, or hand-rolling a poll. On `reply-missing`/`aborted`:
 resuming the goal in a fresh, unmarked turn will NOT re-certify the original dispatch id; machine re-certification requires a NEW dispatch with a new marker.
-After an accepted live `--ipc` send the wrapper prints a ready-to-run `WAIT:` line before its final
-`RESULT:` line. Flagless (no `--accept-rollout-fallback`) is the legacy file-primary contract.
+Manual preparation prints pickup plus a ready-to-run `WAIT:` line and no live `RESULT:`. After an
+accepted live `--ipc` send the wrapper prints the same WAIT contract before its final `RESULT:`
+line. Flagless (no `--accept-rollout-fallback`) is the legacy file-primary contract.
 
-The wrapper always writes the file-drop **envelope** before any live attempt. The **pickup line** is
-printed only when the failure is proven pre-send; after an ambiguous post-attempt result
-(`confirmation=unknown`) the envelope is preserved but pickup is suppressed, because the turn may
-already have been admitted and resending would duplicate it. Live results are machine-parseable:
+The wrapper always writes the thread-bound **envelope** before manual preparation or any live
+attempt. Manual mode prints pickup without attempting a send. On the live route, a fallback
+**pickup line** is printed only when the failure is proven pre-send. After an ambiguous post-attempt
+result (`confirmation=unknown`) the envelope is preserved but pickup is suppressed, because the
+turn may already have been admitted and resending would duplicate it. Live results are machine-parseable:
 `RESULT: gui-delivered|gui-unowned|failed-closed -- reason=<token> -- confirmation=<token>`.
 After an accepted live send, confirmation is `rollout-hit` (the exact dispatch task basename was
 observed in a rollout user message), `rollout-pending` (at least one authoritative candidate was
@@ -110,7 +125,9 @@ Foreground-policy grammar and full operational rules: [skills/ipc/SKILL.md](skil
 
 ## Primary wrapper variables
 
-Component-specific options are documented by each tool's --help and [bundled references in the skill guide](skills/ipc/SKILL.md).
+Component-specific options are documented by each tool's --help and bundled references.
+The [skill guide](skills/ipc/SKILL.md) records the narrow path aliases. An explicit flag wins over
+a nonempty alias, which wins over the existing component default.
 
 | Variable | Default | Effect |
 |---|---|---|
@@ -119,6 +136,8 @@ Component-specific options are documented by each tool's --help and [bundled ref
 | `CODEX_IPC_INCLUDE_TRANSCRIPT` | unset | `1` includes the Claude transcript path (default: omitted) |
 | `CODEX_IPC_GIT_CONTEXT` | `bounded` | `bounded` caps the payload's git-context sections (commits 4096 B, diffstat 4096 B, uncommitted 8192 B) at a line boundary with a truncation notice; `full` restores the pre-0.1.11 unbounded sections. Unrecognized values resolve to `bounded` with a stderr note |
 | `CODEX_IPC_AUTHORIZED_TEST_THREAD` | unset | Operator-owned test thread UUID exempt from `--allow-any-thread` |
+| `CODEX_IPC_AUTOLOAD` | `off` | `off` or explicit package-protocol request `codex-uri`; wrapper flag overrides |
+| `CODEX_IPC_INTENDED_HOST` | `package` | `package` or one absolute alternate GUI executable path; wrapper flag overrides |
 | `CODEX_IPC_FOREGROUND_POLICY` | `defer` | `--ipc` foreground policy: `defer`\|`switch`\|`restore-if-known` |
 | `CODEX_IPC_FOREGROUND_SWITCH_STANDING_APPROVAL` | unset | `1` = standing `switch` ack (printed every send; prefer the per-send flag) |
 | `CODEX_IPC_POLL_DEADLINE_S` / `_INTERVAL_S` | `30` / `2` | Auto-load retry poll (test knobs) |
@@ -131,19 +150,28 @@ Component-specific options are documented by each tool's --help and [bundled ref
 | Feature | Windows | Linux/macOS | Stability |
 |---|---|---|---|
 | File-drop handoff | ✅ | ✅ | Stable |
+| Thread-bound manual handoff | ✅ | ✅ (Node with `node:sqlite`) | Stable, no live contact |
 | Reply viewer | ✅ | ✅ (bash ≥ 4 + GNU coreutils; Node optional for rollout fallback) | Stable |
 | Inspector / locator / snapshot | ✅ | ✅ (Node with `node:sqlite`, ≥ 22.5) | Stable, read-only |
-| Desktop pipe IPC + `codex://` autoload | ✅ | ❌ | **Experimental**, touches live Desktop |
+| Desktop pipe IPC + gated `codex://` activation | ✅ | ❌ | **Experimental**; send gate always applies, activation defaults off |
 
 Dependencies and fallbacks per feature: [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md).
 
 ## Safety
 
 Explicit target UUID for every live send — no heuristic targeting, ever. Dry-run by default;
-live writes need `--send --ack-live-write` (+`--allow-any-thread`) — except the
-`handoff_to_codex.sh --ipc <uuid>` wrapper, where selecting the explicit UUID is itself the
-acknowledgement and the wrapper supplies those client flags internally (see SECURITY.md
-"Completeness note"); no authorized thread id ships.
+live writes need `--send --ack-live-write` (+`--allow-any-thread`) — except the live
+`handoff_to_codex.sh --ipc <uuid>` route, where selecting the explicit UUID is itself the
+acknowledgement and the wrapper supplies those client flags internally. `--deliver manual` makes no
+live attempt (see SECURITY.md "Completeness note"); no authorized thread id ships.
+The wrapper rechecks a complete, single-intended-host inventory before every send or retry.
+Host settings resolve per field as flag > environment > `${CODEX_IPC_ROOT}/host-policy.json` >
+defaults (`autoload=off`, intended host `package`); every present layer must be valid. Alternate
+hosts can be targeted but are never protocol-activated. The current real-machine readers do not
+qualify package-update clearance or the effective protocol handler, so an unowned-thread
+`codex-uri` activation request fails closed; hermetic mocks do not grant live authority.
+Validate-only revalidation lists the detected GUI/app-server paths and classifications without
+command lines; this inventory is host-safety evidence, not thread-ownership proof.
 All SQLite access `readOnly:true`; no config/account mutation; no HTTP listener; transcript
 disclosure opt-in. Threat model: [SECURITY.md](SECURITY.md). Failure triage:
 [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
@@ -187,12 +215,14 @@ CI adds syntax checks and public-safety scans on ubuntu + windows:
 ## Limitations
 
 Live route is Windows-only and version-fragile by nature. An explicit version-2 client model/effort
-override can rewrite and persist a target thread's stored settings; the wrapper and write-proof
-harness preserve those settings by omitting the override fields. Envelope files trust the local
+override can rewrite and persist a target thread's stored settings, so it requires
+`--ack-thread-settings-change` and a nonempty trimmed value; the wrapper and write-proof harness
+preserve those settings by omitting the override fields. Envelope files trust the local
 machine (any same-user process can read and modify them).
 
 ## Status
 
 v0.1.14 · [MIT](LICENSE.md) · [benjmcd/claude-codex-ipc](https://github.com/benjmcd/claude-codex-ipc).
-Re-run `codex_ipc_revalidate.mjs` after any Codex Desktop update. The live route and its bounded
-rollout observation remain experimental; `restore-if-known` remains fail-closed/unvalidated.
+Re-run `codex_ipc_revalidate.mjs` after any Codex Desktop update. Revalidation does not waive the
+activation gates. The live route and its bounded rollout observation remain experimental;
+`restore-if-known` remains fail-closed/unvalidated.

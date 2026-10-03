@@ -73,6 +73,13 @@ node skills/ipc/scripts/codex_ipc_contract_audit.mjs
 bash tests/gen_release_manifest.sh check-all --no-roots
 ```
 
+Set `IPC_GATE_LOG_DIR` to a new directory under an existing private parent to retain
+complete combined child logs and failed enumeration samples after the runner exits.
+Existing destinations are refused. Successful enumeration scratch may be reused;
+failed samples retain raw endpoint reads, stage statuses and classifier input/output.
+The process-ownership meta-gate accepts the same setting for its retained case evidence,
+kept separate from temporary fixture cleanup. Leave it unset for normal runner cleanup.
+
 On Windows PowerShell, use this pinned, fail-closed Git Bash procedure:
 
 ```powershell

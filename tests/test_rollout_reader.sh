@@ -16,7 +16,8 @@ for candidate in \
 done
 [[ -n "$MODULE" ]] || { echo "FAIL: codex_ipc_rollout_reader.mjs not found" >&2; exit 1; }
 
-TMP="$(mktemp -d)"
+TMP="$(mktemp -d)" && [[ -n "$TMP" && -d "$TMP" ]] \
+    || { echo "FATAL: could not create rollout-reader temporary directory" >&2; exit 1; }
 trap 'rm -rf "$TMP"' EXIT
 
 MODULE="$MODULE" FIXTURES="$DIR/fixtures/rollout" TMPDIR_TEST="$TMP" node --input-type=module <<'NODE'
@@ -31,12 +32,14 @@ const proofApi = await import(
 );
 const {
   DEFAULT_MAX_RECORD_BYTES,
+  assessRolloutPageSupersession,
   correlateDispatch,
   createTurnBoundaryAccumulator,
   inspectRolloutMarker,
   inspectRolloutNoGrowth,
   isCompleteReaderCursor,
   locateRollout,
+  normalizeRolloutCliPath,
   normalizeRolloutRecord,
   parseRolloutBasename,
   pollRolloutForMarker,
@@ -111,10 +114,319 @@ test("module exports bounded built-in-only reader API", () => {
   assert.equal(typeof isCompleteReaderCursor, "function");
   assert.equal(typeof inspectRolloutNoGrowth, "function");
   assert.equal(typeof locateRollout, "function");
+  assert.equal(typeof normalizeRolloutCliPath, "function");
+  assert.equal(typeof assessRolloutPageSupersession, "function");
   assert.equal(typeof parseRolloutBasename, "function");
   assert.equal(typeof correlateDispatch, "function");
   assert.equal(typeof recordThreadIdentity, "function");
   assert.ok(DEFAULT_MAX_RECORD_BYTES > 20 * 1024 * 1024);
+});
+
+test("CLI rollout-path normalization recognizes native and Git-Bash-mangled Windows namespaces", () => {
+  assert.equal(
+    normalizeRolloutCliPath(String.raw`\\?\C:\Users\fixture\page.jsonl`, "win32"),
+    String.raw`C:\Users\fixture\page.jsonl`,
+  );
+  assert.equal(
+    normalizeRolloutCliPath(String.raw`C:\?\C:\Users\fixture\page.jsonl`, "win32"),
+    String.raw`C:\Users\fixture\page.jsonl`,
+  );
+  assert.equal(
+    normalizeRolloutCliPath(String.raw`C:/?/C:/Users/fixture/page.jsonl`, "win32"),
+    "C:/Users/fixture/page.jsonl",
+  );
+  assert.equal(
+    normalizeRolloutCliPath(String.raw`\\?\UNC\server\share\page.jsonl`, "win32"),
+    String.raw`\\server\share\page.jsonl`,
+  );
+  assert.equal(
+    normalizeRolloutCliPath(String.raw`\\?\C:\Users\fixture\page.jsonl`, "linux"),
+    String.raw`\\?\C:\Users\fixture\page.jsonl`,
+  );
+  assert.throws(
+    () => normalizeRolloutCliPath(String.raw`\\?\relative\page.jsonl`, "win32"),
+    (error) => error?.code === "IPC_ROLLOUT_PATH_INVALID",
+  );
+});
+
+test("page successor assessment distinguishes preserved, abandoned, and unproven history", () => {
+  const threadId = "11111111-1111-4111-8111-111111111111";
+  const predecessorPage = "22222222-2222-4222-8222-222222222222";
+  const successorPage = "33333333-3333-4333-8333-333333333333";
+  const ancestorPage = "00000000-0000-4000-8000-00000000c0de";
+  const turnId = "00000000-0000-4000-8000-000000000000";
+  const dispatchId = "7100000000-7-abcdef0123456789";
+  const root = path.join(tmp, "page-successor");
+  const predecessorDir = path.join(root, "2026", "09", "28");
+  const successorDir = path.join(root, "2026", "09", "30");
+  fs.mkdirSync(predecessorDir, { recursive: true });
+  fs.mkdirSync(successorDir, { recursive: true });
+  const predecessorPath = path.join(
+    predecessorDir,
+    `rollout-predecessor-${threadId}_${predecessorPage}.jsonl`,
+  );
+  const successorPath = path.join(
+    successorDir,
+    `rollout-successor-${threadId}_${successorPage}.jsonl`,
+  );
+  const predecessorRecords = [
+    {
+      type: "session_meta",
+      payload: {
+        id: threadId,
+        session_id: threadId,
+        history_mode: "paginated",
+        history_base: { thread_id: ancestorPage, end_byte_offset: 0 },
+      },
+    },
+    { type: "event_msg", payload: { type: "task_started", turn_id: turnId } },
+    {
+      type: "event_msg",
+      payload: {
+        type: "user_message",
+        turn_id: turnId,
+        message: `read C:/handoff/${dispatchId}.task.md and proceed`,
+      },
+    },
+    {
+      type: "event_msg",
+      payload: { type: "agent_message", turn_id: turnId, phase: "final_answer", message: "SAFE" },
+    },
+    {
+      type: "event_msg",
+      payload: { type: "task_complete", turn_id: turnId, last_agent_message: "SAFE" },
+    },
+  ];
+  const predecessorLines = predecessorRecords.map((record) => JSON.stringify(record));
+  const markerOffset = predecessorLines
+    .slice(0, 2)
+    .reduce((size, line) => size + Buffer.byteLength(line) + 1, 0);
+  const markerEndOffset = markerOffset + Buffer.byteLength(predecessorLines[2]) + 1;
+  fs.writeFileSync(predecessorPath, `${predecessorLines.join("\n")}\n`);
+
+  const located = locateRollout({ threadId, rolloutPath: predecessorPath });
+  assert.equal(located.status, "found");
+  const base = {
+    threadId,
+    rolloutPath: predecessorPath,
+    sessionsRoot: root,
+    expectedIdentityKey: located.candidates[0].identityKey,
+    dispatchMarkerByteOffset: markerOffset,
+  };
+  assert.equal(assessRolloutPageSupersession(base).status, "current");
+
+  const writeSuccessor = (endByteOffset, newline = true) => {
+    const first = JSON.stringify({
+      type: "session_meta",
+      payload: {
+        id: threadId,
+        session_id: threadId,
+        history_mode: "paginated",
+        history_base: { thread_id: predecessorPage, end_byte_offset: endByteOffset },
+      },
+    });
+    fs.writeFileSync(successorPath, `${first}${newline ? "\n" : ""}`);
+  };
+
+  writeSuccessor(markerEndOffset);
+  const superseded = assessRolloutPageSupersession(base);
+  assert.equal(superseded.status, "superseded");
+  assert.ok(superseded.diagnostics.some((item) => item.code === "rollout-page-superseded"));
+
+  writeSuccessor(markerOffset);
+  const abandoned = assessRolloutPageSupersession(base);
+  assert.equal(abandoned.status, "abandoned");
+  assert.ok(abandoned.diagnostics.some((item) => item.code === "dispatch-history-abandoned"));
+
+  const wrongRoot = path.join(tmp, "other-scope");
+  fs.mkdirSync(wrongRoot);
+  const rootFile = path.join(tmp, "root-file");
+  fs.writeFileSync(rootFile, "not a directory");
+  for (const sessionsRoot of [undefined, wrongRoot, path.join(tmp, "missing-scope"), rootFile]) {
+    const result = assessRolloutPageSupersession({ ...base, sessionsRoot });
+    assert.equal(result.status, "unproven", String(sessionsRoot));
+    assert.ok(result.diagnostics.some((item) => item.code === "page-supersession-unproven"));
+  }
+
+  const originalReaddir = fs.readdirSync;
+  fs.readdirSync = (directory, ...args) => {
+    if (path.resolve(directory) === path.resolve(successorDir)) {
+      throw Object.assign(new Error("isolated unreadable date directory"), { code: "EACCES" });
+    }
+    return originalReaddir(directory, ...args);
+  };
+  try {
+    const result = assessRolloutPageSupersession(base);
+    assert.equal(result.status, "unproven");
+    assert.equal(result.diagnostics[0]?.reason, "candidate-set-unresolved");
+  } finally {
+    fs.readdirSync = originalReaddir;
+  }
+
+  if (process.platform === "win32") {
+    const extendedRoot = path.toNamespacedPath(root);
+    const extendedPage = path.toNamespacedPath(predecessorPath);
+    assert.equal(assessRolloutPageSupersession({
+      ...base, sessionsRoot: extendedRoot, rolloutPath: extendedPage,
+    }).status, "abandoned");
+  }
+  const aliasRoot = path.join(tmp, "root-alias");
+  fs.symlinkSync(root, aliasRoot, process.platform === "win32" ? "junction" : "dir");
+  assert.equal(assessRolloutPageSupersession({ ...base, sessionsRoot: aliasRoot }).status, "abandoned");
+  const apparentRoot = path.join(tmp, "apparent-scope");
+  fs.mkdirSync(apparentRoot);
+  const outsideAlias = path.join(apparentRoot, "outside-page");
+  fs.symlinkSync(predecessorDir, outsideAlias, process.platform === "win32" ? "junction" : "dir");
+  const escaped = assessRolloutPageSupersession({
+    ...base,
+    sessionsRoot: apparentRoot,
+    rolloutPath: path.join(outsideAlias, path.basename(predecessorPath)),
+  });
+  assert.equal(escaped.status, "unproven");
+  assert.ok(escaped.diagnostics.some((item) => item.code === "page-supersession-unproven"));
+
+  writeSuccessor(markerOffset + 1);
+  const midRecord = assessRolloutPageSupersession(base);
+  assert.equal(midRecord.status, "unproven");
+  assert.ok(midRecord.diagnostics.some((item) => item.code === "page-supersession-unproven"));
+
+  const predecessorSize = fs.statSync(predecessorPath).size;
+  for (const [label, cutoff] of [
+    ["negative", -1],
+    ["fractional", markerOffset + 0.5],
+    ["unsafe", Number.MAX_SAFE_INTEGER + 1],
+    ["past-eof", predecessorSize + 1],
+  ]) {
+    writeSuccessor(cutoff);
+    const invalid = assessRolloutPageSupersession(base);
+    assert.equal(invalid.status, "unproven", label);
+    assert.equal(invalid.diagnostics[0]?.reason, "history-cutoff-invalid", label);
+  }
+
+  writeSuccessor(0);
+  const zeroCutoff = assessRolloutPageSupersession(base);
+  assert.equal(zeroCutoff.status, "abandoned");
+  assert.ok(zeroCutoff.diagnostics.some((item) => item.code === "dispatch-history-abandoned"));
+
+  writeSuccessor(predecessorSize);
+  const eofCutoff = assessRolloutPageSupersession(base);
+  assert.equal(eofCutoff.status, "superseded");
+  assert.ok(eofCutoff.diagnostics.some((item) => item.code === "rollout-page-superseded"));
+
+  fs.writeFileSync(successorPath, `${JSON.stringify({
+    type: "session_meta",
+    payload: {
+      id: threadId,
+      session_id: threadId,
+      history_mode: "paginated",
+      history_base: { thread_id: predecessorPage },
+    },
+  })}\n`);
+  const missingCutoff = assessRolloutPageSupersession(base);
+  assert.equal(missingCutoff.status, "unproven");
+  assert.equal(missingCutoff.diagnostics[0]?.reason, "history-cutoff-invalid");
+
+  writeSuccessor(markerEndOffset, false);
+  const incomplete = assessRolloutPageSupersession(base);
+  assert.equal(incomplete.status, "unproven");
+  assert.ok(incomplete.diagnostics.some((item) => item.code === "page-supersession-unproven"));
+
+  writeSuccessor(markerEndOffset);
+  const secondSuccessorPath = path.join(
+    successorDir,
+    `rollout-successor-${threadId}_${ancestorPage}.jsonl`,
+  );
+  fs.writeFileSync(secondSuccessorPath, `${JSON.stringify({
+    type: "session_meta",
+    payload: {
+      id: threadId,
+      session_id: threadId,
+      history_mode: "paginated",
+      history_base: { thread_id: predecessorPage, end_byte_offset: markerEndOffset },
+    },
+  })}\n`);
+  const ambiguous = assessRolloutPageSupersession(base);
+  assert.equal(ambiguous.status, "unproven");
+  assert.equal(ambiguous.diagnostics[0]?.reason, "successor-ambiguous");
+});
+
+test("nested directory links leave page discovery unresolved while regular file links retain authority checks", () => {
+  const threadId = "11111111-1111-4111-8111-111111111111";
+  const pageId = "22222222-2222-4222-8222-222222222222";
+  const root = path.join(tmp, "nested-link");
+  const outside = path.join(tmp, "linked-pages");
+  fs.mkdirSync(root);
+  fs.mkdirSync(outside);
+  const bound = path.join(root, path.basename(basicPath));
+  fs.copyFileSync(basicPath, bound);
+  const successor = path.join(outside, `rollout-successor-${threadId}_${pageId}.jsonl`);
+  fs.writeFileSync(successor, `${JSON.stringify({
+    type: "session_meta",
+    payload: {
+      id: threadId,
+      session_id: threadId,
+      history_mode: "paginated",
+      history_base: { thread_id: threadId, end_byte_offset: 0 },
+    },
+  })}\n`);
+  const base = { threadId, sessionsRoot: root, rolloutPath: bound, dispatchMarkerByteOffset: 0 };
+  assert.equal(assessRolloutPageSupersession(base).status, "current");
+
+  const nested = path.join(root, "future");
+  fs.symlinkSync(outside, nested, process.platform === "win32" ? "junction" : "dir");
+  const assessment = assessRolloutPageSupersession(base);
+  assert.equal(assessment.status, "unproven");
+  assert.equal(assessment.diagnostics[0]?.code, "page-supersession-unproven");
+  assert.equal(assessment.diagnostics[0]?.reason, "candidate-set-unresolved");
+  const located = locateRollout({ threadId, sessionsRoot: root });
+  assert.equal(located.status, "ambiguous");
+  assert.equal(located.reason, "candidate-set-unresolved");
+  assert.ok(located.diagnostics.some((item) => item.code === "directory-link-excluded" && item.path === nested));
+
+  const fileRoot = path.join(tmp, "file-link");
+  fs.mkdirSync(fileRoot);
+  const fileBound = path.join(fileRoot, path.basename(bound));
+  fs.copyFileSync(bound, fileBound);
+  const fileLink = path.join(fileRoot, path.basename(successor));
+  fs.symlinkSync(successor, fileLink, "file");
+  assert.equal(locateRollout({ threadId, rolloutPath: fileLink }).status, "found");
+  const fileAssessment = assessRolloutPageSupersession({
+    ...base, sessionsRoot: fileRoot, rolloutPath: fileBound,
+  });
+  assert.equal(fileAssessment.status, "abandoned");
+  assert.ok(fileAssessment.diagnostics.some((item) => item.code === "dispatch-history-abandoned"));
+});
+
+test("missing or unreadable link target types cannot certify a complete candidate search", () => {
+  const threadId = "11111111-1111-4111-8111-111111111111";
+  for (const kind of ["missing", "unreadable"]) {
+    const root = path.join(tmp, `${kind}-link`);
+    const outside = path.join(tmp, `${kind}-target`);
+    fs.mkdirSync(root);
+    if (kind === "unreadable") fs.mkdirSync(outside);
+    const bound = path.join(root, path.basename(basicPath));
+    fs.copyFileSync(basicPath, bound);
+    const nested = path.join(root, "future");
+    fs.symlinkSync(outside, nested, process.platform === "win32" ? "junction" : "dir");
+    const originalStat = fs.statSync;
+    fs.statSync = (target, ...args) => {
+      if (kind === "unreadable" && path.resolve(target) === path.resolve(nested)) {
+        throw Object.assign(new Error("isolated link target unavailable"), { code: "EACCES" });
+      }
+      return originalStat(target, ...args);
+    };
+    try {
+      const assessment = assessRolloutPageSupersession({ threadId, sessionsRoot: root, rolloutPath: bound });
+      assert.equal(assessment.status, "unproven", kind);
+      assert.equal(assessment.diagnostics[0]?.reason, "candidate-set-unresolved", kind);
+      const located = locateRollout({ threadId, sessionsRoot: root });
+      assert.equal(located.status, "ambiguous", kind);
+      assert.equal(located.reason, "candidate-set-unresolved", kind);
+      assert.ok(located.diagnostics.some((item) => item.code === "link-target-unresolved" && item.path === nested), kind);
+    } finally {
+      fs.statSync = originalStat;
+    }
+  }
 });
 
 test("record ownership ignores nested business data outside event item carriers", () => {
@@ -4705,6 +5017,257 @@ test("repair RED: a final before the dispatch marker cannot certify that dispatc
   assert.equal(result.text, null);
   assert.equal(result.lifecycle.status, "complete");
   assert.equal(result.lifecycle.certifiable, false);
+});
+
+test("goal continuation: marker inside an already-open turn keeps its own boundary", () => {
+  const dispatch = "8265100000-2-abcdef0123456789";
+  const turn = WRAPPER_TURN;
+  const records = [
+    { type: "session_meta", payload: { id: WRAPPER_THREAD } },
+    ev("task_started", { turn_id: turn }),
+    ev("user_message", { turn_id: turn, message: "ordinary prior request" }),
+    ev("agent_message", { turn_id: turn, phase: "commentary", message: "working" }),
+    ev("user_message", {
+      turn_id: turn,
+      message: `read C:/x/${dispatch}.task.md and proceed`,
+    }),
+    ev("agent_message", { turn_id: turn, phase: "final_answer", message: "OWN" }),
+    ev("task_complete", { turn_id: turn, last_agent_message: "OWN" }),
+  ];
+  const parsed = writeAndRead("goal-open-turn", records);
+  const result = correlateDispatch(parsed, dispatch);
+  assert.equal(result.status, "complete");
+  assert.equal(result.text, "OWN");
+  assert.equal(result.turnId, turn);
+  assert.equal(result.boundaryMode, "turn-id");
+  assert.equal(result.duplicateCount, 1);
+  assert.equal(result.finalMessageCount, 1);
+  assert.equal(result.lifecycle.status, "complete");
+  assert.equal(result.lifecycle.certifiable, true);
+  assert.deepEqual(result.lifecycle.diagnostics, []);
+  assert.equal(result.latestOccurrence.markerLine, 5);
+  assert.equal(result.latestOccurrence.terminalLine, 7);
+  assert.equal(result.latestOccurrence.turnId, turn);
+  assert.equal(result.freshness.status, "complete");
+  assert.equal(result.freshness.settled, true);
+  assert.equal(result.freshness.boundaryLine, 7);
+  const snapshots = snapshotsOf(parsed);
+  assert.equal(snapshots.length, 1);
+  assert.equal(snapshots[0].activity, "closed");
+  assert.equal(snapshots[0].superseded, false);
+});
+
+test("goal continuation: an immediate unmarked turn cannot replace the dispatch terminal", () => {
+  const dispatch = "8265200000-2-abcdef0123456789";
+  const other = "33333333-3333-4333-8333-333333333333";
+  const prefix = [
+    { type: "session_meta", payload: { id: WRAPPER_THREAD } },
+    ev("task_started", { turn_id: WRAPPER_TURN }),
+    ev("user_message", {
+      turn_id: WRAPPER_TURN,
+      message: `read C:/x/${dispatch}.task.md and proceed`,
+    }),
+    ev("agent_message", { turn_id: WRAPPER_TURN, phase: "final_answer", message: "OWN" }),
+    ev("task_complete", { turn_id: WRAPPER_TURN, last_agent_message: "OWN" }),
+    ev("task_started", { turn_id: other }),
+  ];
+  const suffixes = [
+    ["open", []],
+    ["closed", [
+      ev("agent_message", { turn_id: other, phase: "final_answer", message: "OTHER" }),
+      ev("task_complete", { turn_id: other, last_agent_message: "OTHER" }),
+    ]],
+  ];
+  for (const [name, suffix] of suffixes) {
+    const parsed = writeAndRead(`goal-continuation-${name}`, [...prefix, ...suffix]);
+    const result = correlateDispatch(parsed, dispatch);
+    assert.equal(result.status, "complete", name);
+    assert.equal(result.text, "OWN", name);
+    assert.equal(result.turnId, WRAPPER_TURN, name);
+    assert.equal(result.duplicateCount, 1, name);
+    assert.equal(result.finalMessageCount, 1, name);
+    assert.equal(result.latestOccurrence.markerLine, 3, name);
+    assert.equal(result.latestOccurrence.terminalLine, 5, name);
+    assert.equal(result.lifecycle.certifiable, true, name);
+    assert.equal(result.freshness.boundaryLine, 5, name);
+    assert.deepEqual(result.diagnostics, [], name);
+    const snapshots = snapshotsOf(parsed);
+    assert.equal(snapshots.length, 2, name);
+    assert.equal(snapshots[0].activity, "closed", name);
+    assert.equal(snapshots[0].superseded, false, name);
+    assert.equal(snapshots[1].activity, name, name);
+  }
+});
+
+test("goal continuation: a missing own body cannot borrow the next turn body", () => {
+  const dispatch = "8265300000-2-abcdef0123456789";
+  const other = "33333333-3333-4333-8333-333333333333";
+  const records = [
+    { type: "session_meta", payload: { id: WRAPPER_THREAD } },
+    ev("task_started", { turn_id: WRAPPER_TURN }),
+    ev("user_message", {
+      turn_id: WRAPPER_TURN,
+      message: `read C:/x/${dispatch}.task.md and proceed`,
+    }),
+    ev("task_complete", { turn_id: WRAPPER_TURN, last_agent_message: null }),
+    ev("task_started", { turn_id: other }),
+    ev("agent_message", { turn_id: other, phase: "final_answer", message: "OTHER" }),
+    ev("task_complete", { turn_id: other, last_agent_message: "OTHER" }),
+  ];
+  const result = correlateDispatch(writeAndRead("goal-missing-own-body", records), dispatch);
+  assert.equal(result.status, "none");
+  assert.equal(result.reason, "unavailable");
+  assert.equal(result.text, null);
+  assert.equal(result.turnId, WRAPPER_TURN);
+  assert.equal(result.finalMessageCount, 0);
+  assert.equal(result.duplicateCount, 1);
+  assert.equal(result.lifecycle.status, "complete");
+  assert.equal(result.lifecycle.certifiable, false);
+  assert.equal(result.latestOccurrence.turnId, WRAPPER_TURN);
+  assert.equal(result.latestOccurrence.terminalLine, 4);
+  assert.equal(result.latestOccurrence.harvestStatus, "none");
+  assert.equal(result.latestOccurrence.settled, false);
+  assert.equal(result.freshness.status, "unavailable");
+  assert.equal(result.freshness.settled, false);
+  assert.equal(result.freshness.boundaryLine, 4);
+  assert.deepEqual(result.diagnostics, []);
+});
+
+test("C7: same-turn error and empty model are bounded named diagnostics", () => {
+  const dispatch = "8265400000-2-abcdef0123456789";
+  const errorMessage = `${"A".repeat(508)}💥PRIVATE-TAIL`;
+  const records = [
+    { type: "session_meta", payload: { id: WRAPPER_THREAD } },
+    ev("task_started", { turn_id: WRAPPER_TURN }),
+    { type: "turn_context", payload: { turn_id: WRAPPER_TURN, model: " \t" } },
+    ev("user_message", {
+      turn_id: WRAPPER_TURN,
+      message: `read C:/x/${dispatch}.task.md and proceed`,
+    }),
+    ev("task_complete", {
+      turn_id: WRAPPER_TURN,
+      last_agent_message: null,
+      error: {
+        message: errorMessage,
+        codex_error_info: "PRIVATE-CODEX-ERROR-INFO",
+        internal: "PRIVATE-INTERNAL",
+      },
+    }),
+  ];
+  const result = correlateDispatch(writeAndRead("c7-error-empty-model", records), dispatch);
+  assert.equal(result.status, "none");
+  assert.equal(result.lifecycle.status, "complete");
+  assert.equal(result.lifecycle.certifiable, false);
+  const error = result.diagnostics.find((item) => item.code === "turn-error");
+  assert.ok(error);
+  assert.equal(error.turnId, WRAPPER_TURN);
+  assert.equal(error.assistantOutput, false);
+  assert.equal(error.turnError.kind, "task_complete");
+  assert.equal(error.turnError.excerpt, `${"A".repeat(508)}💥`);
+  assert.equal(Buffer.byteLength(error.turnError.excerpt, "utf8"), 512);
+  assert.equal(error.turnError.excerptBytes, 512);
+  assert.equal(error.turnError.sourceBytes, Buffer.byteLength(errorMessage, "utf8"));
+  assert.equal(error.turnError.truncated, true);
+  assert.ok(!JSON.stringify(error).includes("PRIVATE-TAIL"));
+  assert.ok(!JSON.stringify(error).includes("PRIVATE-CODEX-ERROR-INFO"));
+  assert.ok(!JSON.stringify(error).includes("PRIVATE-INTERNAL"));
+  const model = result.diagnostics.find((item) => item.code === "turn-model-state");
+  assert.ok(model);
+  assert.equal(model.turnId, WRAPPER_TURN);
+  assert.deepEqual(model.appliedModel, { state: "empty" });
+  assert.ok(!Object.hasOwn(model.appliedModel, "value"));
+
+  const straddledMessage = `${"B".repeat(510)}💥PRIVATE-TAIL`;
+  const straddled = correlateDispatch(writeAndRead("c7-error-invalid-model", [
+    { type: "session_meta", payload: { id: WRAPPER_THREAD } },
+    ev("task_started", { turn_id: WRAPPER_TURN }),
+    { type: "turn_context", payload: { turn_id: WRAPPER_TURN, model: { private: true } } },
+    ev("user_message", {
+      turn_id: WRAPPER_TURN,
+      message: `read C:/x/${dispatch}.task.md and proceed`,
+    }),
+    ev("task_complete", {
+      turn_id: WRAPPER_TURN,
+      last_agent_message: null,
+      error: { message: straddledMessage },
+    }),
+  ]), dispatch);
+  const straddledError = straddled.diagnostics.find((item) => item.code === "turn-error");
+  assert.equal(straddledError.turnError.excerpt, "B".repeat(510));
+  assert.equal(straddledError.turnError.excerptBytes, 510);
+  assert.equal(straddledError.turnError.truncated, true);
+  assert.ok(!JSON.stringify(straddled.diagnostics).includes("PRIVATE-TAIL"));
+  const invalidModel = straddled.diagnostics.find((item) => item.code === "turn-model-state");
+  assert.deepEqual(invalidModel.appliedModel, { state: "invalid" });
+  assert.ok(!JSON.stringify(invalidModel).includes("private"));
+});
+
+test("C7: abort is named while unrelated and nonempty model facts stay isolated", () => {
+  const dispatch = "8265500000-2-abcdef0123456789";
+  const other = "33333333-3333-4333-8333-333333333333";
+  const records = [
+    { type: "session_meta", payload: { id: WRAPPER_THREAD } },
+    ev("task_started", { turn_id: other }),
+    { type: "turn_context", payload: { turn_id: other, model: "" } },
+    ev("task_complete", {
+      turn_id: other,
+      last_agent_message: null,
+      error: { message: "UNRELATED-PRIVATE-ERROR" },
+    }),
+    ev("task_started", { turn_id: WRAPPER_TURN }),
+    { type: "event_msg", payload: { type: "thread_settings_applied", model: "" } },
+    { type: "turn_context", payload: { turn_id: WRAPPER_TURN, model: "configured" } },
+    ev("user_message", {
+      turn_id: WRAPPER_TURN,
+      message: `read C:/x/${dispatch}.task.md and proceed`,
+    }),
+    ev("turn_aborted", { turn_id: WRAPPER_TURN }),
+  ];
+  const result = correlateDispatch(writeAndRead("c7-abort-isolation", records), dispatch);
+  assert.equal(result.lifecycle.status, "aborted");
+  const errors = result.diagnostics.filter((item) => item.code === "turn-error");
+  assert.equal(errors.length, 1);
+  assert.equal(errors[0].turnId, WRAPPER_TURN);
+  assert.equal(errors[0].assistantOutput, false);
+  assert.deepEqual(errors[0].turnError, {
+    kind: "turn_aborted",
+    excerpt: null,
+    excerptBytes: 0,
+    sourceBytes: 0,
+    truncated: false,
+  });
+  assert.ok(!result.diagnostics.some((item) => item.code === "turn-model-state"));
+  assert.ok(!JSON.stringify(result.diagnostics).includes("UNRELATED-PRIVATE-ERROR"));
+});
+
+test("C7: task_complete error with assistant output preserves normal certification", () => {
+  const dispatch = "8265600000-2-abcdef0123456789";
+  const records = [
+    { type: "session_meta", payload: { id: WRAPPER_THREAD } },
+    ev("task_started", { turn_id: WRAPPER_TURN }),
+    { type: "turn_context", payload: { turn_id: WRAPPER_TURN, model: null } },
+    ev("user_message", {
+      turn_id: WRAPPER_TURN,
+      message: `read C:/x/${dispatch}.task.md and proceed`,
+    }),
+    ev("agent_message", {
+      turn_id: WRAPPER_TURN,
+      phase: "final_answer",
+      message: "OWN",
+    }),
+    ev("task_complete", {
+      turn_id: WRAPPER_TURN,
+      last_agent_message: "OWN",
+      error: { message: "must not replace assistant output" },
+    }),
+  ];
+  const result = correlateDispatch(writeAndRead("c7-output-preserved", records), dispatch);
+  assert.equal(result.status, "complete");
+  assert.equal(result.text, "OWN");
+  assert.equal(result.lifecycle.certifiable, true);
+  assert.ok(!result.diagnostics.some((item) => item.code === "turn-error"));
+  const model = result.diagnostics.find((item) => item.code === "turn-model-state");
+  assert.deepEqual(model.appliedModel, { state: "null" });
 });
 
 test("repair RED: a wrapped agent body without final_answer phase cannot certify", () => {

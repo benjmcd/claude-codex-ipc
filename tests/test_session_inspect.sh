@@ -6,6 +6,7 @@ set -uo pipefail
 TDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INSPECT=""
 SNAPSHOT=""
+LOCATOR=""
 for candidate in \
   "$TDIR/../skills/ipc/scripts/codex_ipc_session_inspect.mjs" \
   "$TDIR/../scripts/codex_ipc_session_inspect.mjs"; do
@@ -18,6 +19,12 @@ for candidate in \
   [[ -f "$candidate" ]] && SNAPSHOT="$candidate" && break
 done
 [[ -n "$SNAPSHOT" ]] || { echo "FATAL: codex_ipc_snapshot.mjs not found" >&2; exit 1; }
+for candidate in \
+  "$TDIR/../skills/ipc/scripts/codex_ipc_thread_locator.mjs" \
+  "$TDIR/../scripts/codex_ipc_thread_locator.mjs"; do
+  [[ -f "$candidate" ]] && LOCATOR="$candidate" && break
+done
+[[ -n "$LOCATOR" ]] || { echo "FATAL: codex_ipc_thread_locator.mjs not found" >&2; exit 1; }
 
 if ! command -v node >/dev/null 2>&1; then
   echo "SKIP: node is unavailable; session-inspector suite not applicable"
@@ -29,7 +36,8 @@ if ! "$NODE_BIN" -e 'await import("node:sqlite")' >/dev/null 2>&1; then
   exit 0
 fi
 
-TMP="$(mktemp -d)"
+TMP="$(mktemp -d)" && [[ -n "$TMP" && -d "$TMP" ]] \
+    || { echo "FATAL: could not create inspector temporary directory" >&2; exit 1; }
 trap 'rm -rf "$TMP"' EXIT
 THREAD="11111111-1111-4111-8111-111111111111"
 PAGE="00000000-0000-4000-8000-00000000c0de"
@@ -43,6 +51,20 @@ ERR=""
 
 ok(){ echo "  PASS: $1"; PASS=$((PASS+1)); }
 no(){ echo "  FAIL: $1"; FAIL=$((FAIL+1)); }
+fatal(){ echo "FATAL: $*" >&2; exit 1; }
+
+# The historical-comparison leg reads blobs from REPO_ROOT. Clear inherited Git routing and
+# trace variables so that read cannot be redirected or emit trace files outside this fixture.
+while IFS= read -r _git_var; do
+  [[ "${_git_var^^}" == GIT_* ]] && unset "$_git_var"
+done < <(compgen -e)
+for _git_var in $(compgen -e); do
+  [[ "${_git_var^^}" != GIT_* ]] || fatal "could not clear inherited Git variable $_git_var"
+done
+unset _git_var
+export GIT_OPTIONAL_LOCKS=0 GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
+export GIT_ATTR_NOSYSTEM=1 GIT_PAGER=cat GIT_NO_REPLACE_OBJECTS=1
+export GIT_NO_LAZY_FETCH=1 GIT_TERMINAL_PROMPT=0
 
 DB_BUILDER="$TMP/build-db.mjs"
 cat > "$DB_BUILDER" <<'EOF'
@@ -414,6 +436,75 @@ assert_case complete-terminal "task_complete retains existing fields and gains t
 echo "== 2b. inspector canonicalizes case-insensitive UUID input before authority lookup =="
 run_inspect "$CASE/state.sqlite" "$CASE/sessions" "${THREAD^^}"
 assert_case canonical-thread "uppercase target retains the exact lowercase DB row and rollout authority"
+
+echo "== 2b1. E1 sessions-root environment alias preserves explicit-flag precedence =="
+E1_CASE="$TMP/e1-sessions"; mkdir -p "$E1_CASE/env" "$E1_CASE/flag"
+E1_ENV_PAGE="$E1_CASE/env/rollout-env-$THREAD.jsonl"
+E1_FLAG_PAGE="$E1_CASE/flag/rollout-flag-$THREAD.jsonl"
+write_user_complete "$E1_ENV_PAGE"
+write_user_abort "$E1_FLAG_PAGE"
+make_db "$E1_CASE/state.sqlite"
+E1_OUT="$(env CODEX_IPC_SESSIONS_ROOT="$E1_CASE/env" "$NODE_BIN" "$INSPECT" \
+  --db "$E1_CASE/state.sqlite" --thread "$THREAD" --tail-events 20 2>/dev/null)"; E1_RC=$?
+if [[ $E1_RC -eq 0 ]] && printf '%s' "$E1_OUT" | "$NODE_BIN" -e '
+const fs = require("node:fs");
+const value = JSON.parse(fs.readFileSync(0, "utf8"));
+process.exit(value.rollout?.primary?.path &&
+  fs.realpathSync.native(value.rollout.primary.path) === fs.realpathSync.native(process.argv[1]) &&
+  fs.realpathSync.native(value.rollout.sessionsRoot) === fs.realpathSync.native(process.argv[2]) ? 0 : 1);
+' "$E1_ENV_PAGE" "$E1_CASE/env" >/dev/null 2>&1; then
+  ok "inspector accepts CODEX_IPC_SESSIONS_ROOT as the existing sessions-root option"
+else
+  no "inspector ignored CODEX_IPC_SESSIONS_ROOT (rc=$E1_RC)"
+fi
+E1_OUT="$(env CODEX_IPC_SESSIONS_ROOT="$E1_CASE/env" "$NODE_BIN" "$INSPECT" \
+  --db "$E1_CASE/state.sqlite" --sessions-root "$E1_CASE/flag" \
+  --thread "$THREAD" --tail-events 20 2>/dev/null)"; E1_RC=$?
+if [[ $E1_RC -eq 0 ]] && printf '%s' "$E1_OUT" | "$NODE_BIN" -e '
+const fs = require("node:fs");
+const value = JSON.parse(fs.readFileSync(0, "utf8"));
+process.exit(value.rollout?.primary?.path &&
+  fs.realpathSync.native(value.rollout.primary.path) === fs.realpathSync.native(process.argv[1]) &&
+  fs.realpathSync.native(value.rollout.sessionsRoot) === fs.realpathSync.native(process.argv[2]) ? 0 : 1);
+' "$E1_FLAG_PAGE" "$E1_CASE/flag" >/dev/null 2>&1; then
+  ok "explicit inspector sessions-root overrides a conflicting environment alias"
+else
+  no "explicit inspector sessions-root did not win (rc=$E1_RC)"
+fi
+
+E1_HOME="$E1_CASE/home"; E1_DEFAULT="$E1_HOME/.codex/sessions"
+mkdir -p "$E1_DEFAULT"
+E1_DEFAULT_PAGE="$E1_DEFAULT/rollout-default-$THREAD.jsonl"
+write_user_complete "$E1_DEFAULT_PAGE"
+E1_HOME_NATIVE="$(cygpath -m "$E1_HOME" 2>/dev/null || printf '%s' "$E1_HOME")"
+E1_DEFAULT_NATIVE="$(cygpath -m "$E1_DEFAULT_PAGE" 2>/dev/null || printf '%s' "$E1_DEFAULT_PAGE")"
+E1_OUT="$(env -u CODEX_IPC_SESSIONS_ROOT USERPROFILE="$E1_HOME_NATIVE" HOME="$E1_HOME_NATIVE" \
+  "$NODE_BIN" "$INSPECT" --db "$E1_CASE/state.sqlite" --thread "$THREAD" \
+  --tail-events 20 2>/dev/null)"; E1_RC=$?
+if [[ $E1_RC -eq 0 ]] && printf '%s' "$E1_OUT" | "$NODE_BIN" -e '
+const fs = require("node:fs");
+const path = require("node:path");
+const value = JSON.parse(fs.readFileSync(0, "utf8"));
+process.exit(path.resolve(value.rollout?.primary?.path || "") === path.resolve(process.argv[1]) ? 0 : 1);
+' "$E1_DEFAULT_NATIVE" >/dev/null 2>&1; then
+  ok "unset sessions-root alias preserves the existing home default"
+else
+  no "unset sessions-root alias changed the inspector default (rc=$E1_RC)"
+fi
+
+E1_OUT="$(env CODEX_IPC_SESSIONS_ROOT="$E1_CASE/env" "$NODE_BIN" "$INSPECT" \
+  --db "$E1_CASE/state.sqlite" --sessions-root "$E1_CASE/flag" \
+  --thread "$THREAD" --summary 2>/dev/null)"; E1_RC=$?
+if [[ $E1_RC -eq 0 ]] && printf '%s' "$E1_OUT" | "$NODE_BIN" -e '
+const fs = require("node:fs");
+const value = JSON.parse(fs.readFileSync(0, "utf8"));
+process.exit(fs.realpathSync.native(value.rollout.sessionsRoot) ===
+  fs.realpathSync.native(process.argv[1]) ? 0 : 1);
+' "$E1_CASE/flag" >/dev/null 2>&1; then
+  ok "inspector summary carries the same resolved discovery scope as full output"
+else
+  no "inspector summary lost the resolved discovery scope (rc=$E1_RC)"
+fi
 
 echo "== 2c. snapshot canonicalizes target/other/allowlist UUIDs and binds compare identity =="
 SNAP_CASE="$TMP/snapshot-case"; mkdir -p "$SNAP_CASE"
@@ -970,7 +1061,7 @@ if (mode === "after-snapshot-error" && count > 1) {
 }
 const threadId = process.env.WP_THREAD;
 const otherTurnId = process.env.WP_OTHER_TURN;
-console.log(JSON.stringify({
+const snapshot = {
   ok: true,
   generatedAt: "2026-08-30T00:00:00.000Z",
   targetThreadId:
@@ -1012,7 +1103,18 @@ console.log(JSON.stringify({
     },
     marker: { dbBinaryCount: 0, textSha256: "c".repeat(64) },
   },
-}));
+};
+if (mode === "large-hash-map") {
+  for (let index = 0; index < 10000; index += 1) {
+    const id = `33333333-3333-4333-8333-${index.toString(16).padStart(12, "0")}`;
+    snapshot.db.threads.threadRowHashById[id] = "d".repeat(64);
+  }
+}
+const output = JSON.stringify(snapshot);
+if (mode === "large-hash-map" && Buffer.byteLength(output) <= 1048576) {
+  throw new Error("large snapshot fixture must exceed the default spawnSync buffer");
+}
+console.log(output);
 EOF
 
   cat > "$scripts/codex_ipc_client.mjs" <<'EOF'
@@ -1029,6 +1131,7 @@ const rolloutPath = process.env.WP_ROLLOUT;
 let result;
 if ([
   "nested",
+  "large-hash-map",
   "duplicate-follower",
   "extra-target-follower",
   "after-snapshot-error",
@@ -1054,6 +1157,7 @@ else if (mode === "duplicate") {
 
 if ([
   "nested",
+  "large-hash-map",
   "one-level",
   "turn-id",
   "duplicate",
@@ -1258,6 +1362,18 @@ if [[ -n "$WRITE_PROOF" ]]; then
     ok "paginated DB path plus nested result.result.turn.id drive one strict same-turn proof"
   else
     no "nested send response was not strictly turn-bound (rc=$WPRC, sends=$(cat "$WP_LIVE_SEND_COUNT" 2>/dev/null))"
+    wp_live_debug
+  fi
+
+  echo "== 21b2. write-proof captures complete snapshots larger than the default subprocess buffer =="
+  wp_live_run "$TMP/wp-live-large-hash-map" large-hash-map
+  if [[ $WPRC -eq 0 ]] \
+    && wp_sent_once \
+    && [[ "$(cat "$WP_LIVE_SNAPSHOT_COUNT" 2>/dev/null)" == "2" ]] \
+    && wp_field 'v.ok===true && v.before.threadHashMapsPresent===true && v.after.threadHashMapsPresent===true && v.send.occurrence==="confirmed" && v.send.followerRequestCount===1 && v.send.matchingFollowerRequestCount===1 && v.send.verificationStatus==="turn-bound" && v.compare.ok===true && v.compare.db.threadHashIdentitiesValid===true && v.compare.db.targetThreadChanged===true && v.compare.db.unexpectedNonTargetChangedIds.length===0 && v.compare.db.addedIds.length===0 && v.compare.db.removedIds.length===0 && v.postSendFailures.length===0'; then
+    ok "large before and after snapshots retain the complete hash maps around one fake send"
+  else
+    no "large snapshot capture or strict comparison failed (rc=$WPRC, sends=$(cat "$WP_LIVE_SEND_COUNT" 2>/dev/null))"
     wp_live_debug
   fi
 
@@ -1634,6 +1750,313 @@ make_db "$CASE/state.sqlite"
 run_inspect "$CASE/state.sqlite" "$CASE/sessions"
 assert_case unresolved-candidate-set "inspector root discovery cannot silently reinterpret target-named drift as another legacy root"
 
+# ---- A2 target classification: root-only delivery, legacy allowance, and parent evidence ----
+CLASSIFY_DB_BUILDER="$TMP/build-classify-db.mjs"
+cat > "$CLASSIFY_DB_BUILDER" <<'EOF'
+import { DatabaseSync } from "node:sqlite";
+import fs from "node:fs";
+
+const [dbPath, threadId, rolloutPath, scenario, parentId,
+  sourceColumn = "__keep__", declaredSource = "__keep__"] = process.argv.slice(2);
+const row = {
+  source: JSON.stringify("vscode"),
+  threadSource: "user",
+  model: "synthetic-model",
+  agentNickname: null,
+  agentRole: null,
+  agentPath: null,
+};
+switch (scenario) {
+  case "root": break;
+  case "bare-user": row.source = "vscode"; break;
+  case "quoted-created": row.threadSource = "agent_created_thread"; break;
+  case "forked": row.threadSource = "agent_forked_thread"; break;
+  case "unknown-thread": row.threadSource = "unknown"; break;
+  case "subagent": row.threadSource = "subagent"; break;
+  case "guardian": row.threadSource = "guardian_review"; break;
+  case "source-child":
+    row.threadSource = null;
+    row.source = JSON.stringify({ subagent: { thread_spawn: {
+      parent_thread_id: parentId, depth: 1, agent_path: "worker",
+      agent_nickname: "worker", agent_role: null,
+    } } });
+    break;
+  case "source-parent-invalid":
+    row.threadSource = null;
+    row.source = JSON.stringify({ subagent: { thread_spawn: {
+      parent_thread_id: "not-a-uuid", depth: 1,
+    } } });
+    break;
+  case "source-parent-conflict":
+    row.threadSource = null;
+    row.source = JSON.stringify({ subagent: { thread_spawn: {
+      parent_thread_id: parentId, depth: 1,
+    } } });
+    break;
+  case "source-guardian":
+    row.threadSource = null;
+    row.source = JSON.stringify({ subagent: { other: "guardian" } });
+    break;
+  case "legacy": row.threadSource = null; row.source = null; break;
+  case "agent-role": row.threadSource = null; row.source = null; row.agentRole = "worker"; break;
+  case "agent-nickname": row.threadSource = null; row.source = null; row.agentNickname = "worker"; break;
+  case "agent-path": row.threadSource = null; row.source = null; row.agentPath = "worker"; break;
+  case "edge": row.threadSource = null; row.source = null; break;
+  case "rollout-parent": row.threadSource = null; row.source = null; break;
+  case "root-child-conflict": row.agentRole = "worker"; break;
+  case "malformed-source": row.threadSource = null; row.source = "{not-json"; break;
+  case "parent-conflict": row.threadSource = null; row.source = null; break;
+  case "edge-unreadable": break;
+  case "edge-invalid": break;
+  case "db-untrusted": break;
+  default: throw new Error(`unknown scenario: ${scenario}`);
+}
+if (sourceColumn !== "__keep__") row.source = sourceColumn;
+if (declaredSource !== "__keep__") row.threadSource = declaredSource === "null" ? null : declaredSource;
+fs.rmSync(dbPath, { force: true });
+const db = new DatabaseSync(dbPath);
+try {
+  db.exec(
+    "create table threads (id text primary key, rollout_path text, cwd text, updated_at text, " +
+      "updated_at_ms integer, archived integer, model text, source text, thread_source text, " +
+      "agent_nickname text, agent_role text, agent_path text, sandbox_policy text, approval_mode text)",
+  );
+  db.prepare("insert into threads values (?,?,?,?,?,?,?,?,?,?,?,?,?,?)").run(
+    threadId, rolloutPath, "C:/fixture/project", "2026-10-01T00:00:00Z", 1790812800000, 0, row.model,
+    row.source, row.threadSource, row.agentNickname, row.agentRole, row.agentPath,
+    '{"type":"disabled"}', "never",
+  );
+  if (scenario === "edge" || scenario === "parent-conflict" || scenario === "edge-invalid") {
+    db.exec("create table thread_spawn_edges (parent_thread_id text, child_thread_id text, status text)");
+    db.prepare("insert into thread_spawn_edges values (?,?,?)").run(
+      scenario === "edge-invalid" ? "not-a-uuid" : parentId, threadId, "completed",
+    );
+  }
+  if (scenario === "edge-unreadable") db.exec("create table thread_spawn_edges (status text)");
+  if (scenario === "db-untrusted") db.exec("drop table threads");
+} finally {
+  db.close();
+}
+EOF
+
+CLASSIFY_ASSERT="$TMP/assert-classification.mjs"
+cat > "$CLASSIFY_ASSERT" <<'EOF'
+import fs from "node:fs";
+import assert from "node:assert/strict";
+const [fullPath, summaryPath, expectedKind, expectedSource, expectedParent, expectedReason] = process.argv.slice(2);
+const full = JSON.parse(fs.readFileSync(fullPath, "utf8"));
+const summary = JSON.parse(fs.readFileSync(summaryPath, "utf8"));
+assert.deepEqual(summary.targetClassification, full.targetClassification,
+  "summary classification differs from full output");
+assert.equal(summary.dbThread.thread.threadSource, full.dbThread.thread.threadSource,
+  "summary threadSource differs from full output");
+assert.equal(full.targetClassification.kind, expectedKind, "classification kind mismatch");
+assert.ok(full.targetClassification.reasons.includes(expectedReason),
+  `missing reason ${expectedReason}`);
+if (expectedReason === "db-thread-untrusted") {
+  assert.equal(full.dbThread.readOnlyOpenOk, false, "untrusted DB gained authority");
+  process.exit(0);
+}
+assert.equal(full.dbThread.thread.threadSource, expectedSource === "null" ? null : expectedSource,
+  "threadSource mismatch");
+assert.equal(full.dbThread.thread.model, "synthetic-model", "stored model changed");
+assert.equal(full.targetClassification.parentThreadId,
+  expectedParent === "null" ? null : expectedParent, "parent mismatch");
+if (["cli", "vscode", "exec", "mcp"].includes(full.dbThread.thread.source)) {
+  assert.deepEqual(full.dbThread.thread.sandboxPolicy, { type: "disabled" },
+    "source parsing changed the generic policy parser");
+}
+if (expectedKind === "legacy-root-assumed") {
+  assert.ok(full.targetClassification.warnings.includes("legacy-null-source"),
+    "legacy classification warning missing");
+}
+EOF
+
+assert_classification(){ # scenario kind thread-source parent reason [rollout-parent source-column declared-source]
+  local scenario="$1" kind="$2" source="$3" parent="$4" reason="$5" rollout_parent="${6:-}"
+  local source_column="${7-__keep__}" declared_source="${8-__keep__}"
+  local case_dir="$TMP/classify-$scenario" rollout="$TMP/classify-$scenario/rollout-$scenario-$THREAD.jsonl"
+  mkdir -p "$case_dir/sessions"
+  rollout="$case_dir/sessions/rollout-$scenario-$THREAD.jsonl"
+  if [[ -n "$rollout_parent" ]]; then
+    printf '%s\n' "{\"type\":\"session_meta\",\"payload\":{\"id\":\"$THREAD\",\"parent_thread_id\":\"$rollout_parent\"}}" > "$rollout"
+  else
+    printf '%s\n' "{\"type\":\"session_meta\",\"payload\":{\"id\":\"$THREAD\"}}" > "$rollout"
+  fi
+  "$NODE_BIN" "$CLASSIFY_DB_BUILDER" "$case_dir/state.sqlite" "$THREAD" "$rollout" "$scenario" \
+    "$OTHER_THREAD" "$source_column" "$declared_source" >/dev/null 2>&1 || { no "classification fixture failed: $scenario"; return; }
+  "$NODE_BIN" "$INSPECT" --db "$case_dir/state.sqlite" --sessions-root "$case_dir/sessions" \
+    --thread "$THREAD" > "$case_dir/full.json" 2>"$case_dir/full.err"; local full_rc=$?
+  "$NODE_BIN" "$INSPECT" --db "$case_dir/state.sqlite" --sessions-root "$case_dir/sessions" \
+    --thread "$THREAD" --summary > "$case_dir/summary.json" 2>"$case_dir/summary.err"; local summary_rc=$?
+  if [[ $full_rc -eq 0 && $summary_rc -eq 0 ]] && \
+      "$NODE_BIN" "$CLASSIFY_ASSERT" "$case_dir/full.json" "$case_dir/summary.json" \
+        "$kind" "$source" "$parent" "$reason" 2>"$case_dir/assert.err"; then
+    ok "$scenario ($source, source=$source_column) -> $kind with identical full/summary facts"
+  else
+    no "$scenario classification mismatch (full=$full_rc summary=$summary_rc)"
+    sed -n '1,5p' "$case_dir/assert.err" 2>/dev/null
+  fi
+}
+
+echo "== 23t. A2 target classification is fail-closed and provenance-preserving =="
+assert_classification root root user null thread-source-root
+assert_classification bare-user root user null thread-source-root
+assert_classification quoted-created root agent_created_thread null thread-source-root
+assert_classification subagent non-root subagent null thread-source-child
+assert_classification guardian non-root guardian_review null thread-source-child
+assert_classification source-child non-root null "$OTHER_THREAD" source-subagent
+assert_classification source-guardian non-root null null source-subagent
+assert_classification source-parent-invalid ambiguous null null source-parent-invalid
+assert_classification source-parent-conflict ambiguous null null parent-conflict "$HISTORY_BASE"
+assert_classification legacy legacy-root-assumed null null legacy-indicators-absent
+assert_classification agent-role non-root null null agent-metadata
+assert_classification agent-nickname non-root null null agent-metadata
+assert_classification agent-path non-root null null agent-metadata
+assert_classification edge non-root null "$OTHER_THREAD" spawn-edge
+assert_classification rollout-parent non-root null "$OTHER_THREAD" rollout-parent "$OTHER_THREAD"
+assert_classification root-child-conflict ambiguous user null root-child-conflict
+assert_classification malformed-source ambiguous null null source-malformed
+assert_classification parent-conflict ambiguous null null parent-conflict "$HISTORY_BASE"
+
+echo "== 23t1. native source encodings and exact root declarations stay bounded =="
+for declaration in user agent_created_thread; do
+  for native_source in cli vscode exec mcp; do
+    for encoded_source in "$native_source" "\"$native_source\""; do
+      assert_classification root root "$declaration" null thread-source-root "" "$encoded_source" "$declaration"
+    done
+  done
+  assert_classification source-child ambiguous "$declaration" "$OTHER_THREAD" root-child-conflict "" __keep__ "$declaration"
+  assert_classification source-guardian ambiguous "$declaration" null root-child-conflict "" __keep__ "$declaration"
+  for internal_source in guardian_review memory_consolidation; do
+    assert_classification root ambiguous "$declaration" null root-child-conflict "" \
+      "{\"internal\":\"$internal_source\"}" "$declaration"
+  done
+  for metadata in agent-role agent-nickname agent-path; do
+    assert_classification "$metadata" ambiguous "$declaration" null root-child-conflict "" vscode "$declaration"
+  done
+  assert_classification edge ambiguous "$declaration" "$OTHER_THREAD" root-child-conflict "" vscode "$declaration"
+  assert_classification rollout-parent ambiguous "$declaration" "$OTHER_THREAD" root-child-conflict "$OTHER_THREAD" vscode "$declaration"
+  assert_classification source-parent-invalid ambiguous "$declaration" null source-parent-invalid "" __keep__ "$declaration"
+  assert_classification parent-conflict ambiguous "$declaration" null parent-conflict "$HISTORY_BASE" vscode "$declaration"
+  assert_classification rollout-parent ambiguous "$declaration" null rollout-parent-invalid not-a-uuid vscode "$declaration"
+  assert_classification edge-unreadable ambiguous "$declaration" null spawn-edge-unreadable "" vscode "$declaration"
+  assert_classification edge-invalid ambiguous "$declaration" null spawn-edge-invalid "" vscode "$declaration"
+  assert_classification db-untrusted ambiguous "$declaration" null db-thread-untrusted "" vscode "$declaration"
+done
+for internal_source in guardian_review memory_consolidation; do
+  assert_classification root non-root null null source-internal "" \
+    "{\"internal\":\"$internal_source\"}" null
+done
+for declaration in user agent_created_thread null; do
+  for unknown_source in unknown internal subagent guardian_review '"unknown"' '"internal"' '""' '{}' '{"feature":"unknown"}' '{"vscode":null}'; do
+    reason=source-unknown
+    [[ "$unknown_source" == [\"\{]* ]] || reason=source-malformed
+    assert_classification root ambiguous "$declaration" null "$reason" "" "$unknown_source" "$declaration"
+  done
+  for malformed_source in '{not-json' '"vscode' null; do
+    assert_classification root ambiguous "$declaration" null source-malformed "" "$malformed_source" "$declaration"
+  done
+  for invalid_source in '[]' 'false' '42'; do
+    assert_classification root ambiguous "$declaration" null source-invalid "" "$invalid_source" "$declaration"
+  done
+done
+for unknown_declaration in agent_forked_thread unknown; do
+  assert_classification root ambiguous "$unknown_declaration" null thread-source-unknown "" vscode "$unknown_declaration"
+done
+assert_classification root legacy-root-assumed null null legacy-indicators-absent "" '' null
+
+ROLLOUT_EVIDENCE_ASSERT="$TMP/assert-rollout-evidence.mjs"
+cat > "$ROLLOUT_EVIDENCE_ASSERT" <<'EOF'
+import fs from "node:fs";
+import assert from "node:assert/strict";
+const [fullPath, summaryPath, expectedKind, expectedReason] = process.argv.slice(2);
+const full = JSON.parse(fs.readFileSync(fullPath, "utf8"));
+const summary = JSON.parse(fs.readFileSync(summaryPath, "utf8"));
+assert.deepEqual(summary.targetClassification, full.targetClassification,
+  "summary classification differs from full output");
+assert.equal(full.targetClassification.kind, expectedKind, "classification kind mismatch");
+assert.ok(full.targetClassification.reasons.includes(expectedReason),
+  `missing reason ${expectedReason}`);
+EOF
+
+assert_legacy_rollout_evidence(){ # scenario kind reason
+  local scenario="$1" kind="$2" reason="$3"
+  local case_dir="$TMP/legacy-rollout-$scenario" rollout_path=""
+  mkdir -p "$case_dir/sessions"
+  case "$scenario" in
+    no-candidate)
+      rollout_path=""
+      ;;
+    missing-designated)
+      rollout_path="$case_dir/sessions/rollout-missing-$THREAD.jsonl"
+      ;;
+    malformed)
+      rollout_path="$case_dir/sessions/rollout-malformed-$THREAD.jsonl"
+      printf '%s\n' \
+        "{\"type\":\"session_meta\",\"payload\":{\"id\":\"$THREAD\"}}" \
+        '{not-json' > "$rollout_path"
+      ;;
+    multiple)
+      rollout_path=""
+      for name in one two; do
+        printf '%s\n' "{\"type\":\"session_meta\",\"payload\":{\"id\":\"$THREAD\"}}" \
+          > "$case_dir/sessions/rollout-$name-$THREAD.jsonl"
+      done
+      ;;
+    owner-conflict)
+      rollout_path="$case_dir/sessions/rollout-owner-conflict-$THREAD.jsonl"
+      write_rebound_owner_before_turn "$rollout_path"
+      ;;
+    *)
+      no "unknown legacy rollout evidence scenario: $scenario"
+      return
+      ;;
+  esac
+  "$NODE_BIN" "$CLASSIFY_DB_BUILDER" "$case_dir/state.sqlite" "$THREAD" "$rollout_path" \
+    legacy "$OTHER_THREAD" >/dev/null 2>&1
+  "$NODE_BIN" "$INSPECT" --db "$case_dir/state.sqlite" --sessions-root "$case_dir/sessions" \
+    --thread "$THREAD" > "$case_dir/full.json" 2>"$case_dir/full.err"; local full_rc=$?
+  "$NODE_BIN" "$INSPECT" --db "$case_dir/state.sqlite" --sessions-root "$case_dir/sessions" \
+    --thread "$THREAD" --summary > "$case_dir/summary.json" 2>"$case_dir/summary.err"; local summary_rc=$?
+  if [[ $full_rc -eq 0 && $summary_rc -eq 0 ]] && \
+      "$NODE_BIN" "$ROLLOUT_EVIDENCE_ASSERT" "$case_dir/full.json" "$case_dir/summary.json" \
+        "$kind" "$reason" 2>"$case_dir/assert.err"; then
+    ok "legacy $scenario rollout evidence -> $kind"
+  else
+    no "legacy $scenario rollout evidence mismatch (full=$full_rc summary=$summary_rc)"
+    sed -n '1,5p' "$case_dir/assert.err" 2>/dev/null
+  fi
+}
+
+echo "== 23u. A2 legacy classification distinguishes absence from failed rollout evidence =="
+assert_legacy_rollout_evidence no-candidate legacy-root-assumed legacy-indicators-absent
+assert_legacy_rollout_evidence missing-designated ambiguous rollout-selection-unavailable
+assert_legacy_rollout_evidence malformed ambiguous rollout-parse-invalid
+assert_legacy_rollout_evidence multiple ambiguous rollout-selection-ambiguous
+assert_legacy_rollout_evidence owner-conflict ambiguous rollout-owner-untrusted
+
+echo "== 23v. A2 locator marks explicit non-root and legacy candidates =="
+for spec in root:root quoted-created:root subagent:non-root guardian:non-root legacy:legacy-unknown forked:unknown unknown-thread:unknown; do
+  scenario="${spec%%:*}"; expected="${spec##*:}"
+  mkdir -p "$TMP/classify-$scenario"
+  "$NODE_BIN" "$CLASSIFY_DB_BUILDER" "$TMP/classify-$scenario/state.sqlite" "$THREAD" "" \
+    "$scenario" "$OTHER_THREAD" >/dev/null 2>&1 || { no "locator fixture failed: $scenario"; continue; }
+  locator_out="$TMP/classify-$scenario/locator.json"
+  if "$NODE_BIN" "$LOCATOR" --db "$TMP/classify-$scenario/state.sqlite" \
+      --cwd C:/fixture/project --limit 1 > "$locator_out" 2>/dev/null \
+    && "$NODE_BIN" -e '
+const fs = require("node:fs");
+const value = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+process.exit(value?.candidates?.length === 1 &&
+  value.candidates[0].targetKindHint === process.argv[2] ? 0 : 1);
+' "$locator_out" "$expected"; then
+    ok "locator marks $scenario as $expected"
+  else
+    no "locator did not mark $scenario as $expected"
+  fi
+done
+
 # ============================================================================================
 # O3: the `--summary` preflight projection (AC1-AC7).
 #
@@ -1646,6 +2069,7 @@ assert_case unresolved-candidate-set "inspector root discovery cannot silently r
 # ============================================================================================
 
 REPO_ROOT="$(cd "$TDIR/.." && pwd)"
+export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0="$REPO_ROOT"
 
 # The commit immediately BEFORE --summary landed. AC1 diffs the SHIPPED DEFAULT output against
 # this ref's inspector byte for byte as an explicit compatibility guard for downstream consumers
@@ -1768,11 +2192,30 @@ write_user_complete "$O3/malformed/sessions/b/rollout-other-$THREAD.jsonl"
 make_db_full "$O3/malformed/state.sqlite" "$O3/malformed/sessions/a/rollout-bad-$THREAD.jsonl"
 
 echo "== 24. O3/AC1: the DEFAULT emit is byte-identical to ${PRE_O3_REF:0:7} at every in-bundle window =="
-# THE ONE DECLARED NORMALIZATION is generatedAt, which is `new Date().toISOString()` and differs
-# per run by construction. Nothing else is normalized: same fixture, same files, same run, so
-# paths, sizes and mtimes are identical between the two invocations. An undeclared normalization
-# list makes a byte-identity claim vacuous, so this list is exactly one entry long.
-o3_norm(){ sed -E 's/"generatedAt": "[^"]*"/"generatedAt": "NORMALIZED"/' "$1" > "$2"; }
+# generatedAt differs per run by construction. A2 also adds a declared, tested projection without
+# changing any historical value: targetClassification; incomingSpawnEdges; the source/provider/
+# agent fields; and ownerSessionMeta. The current side removes exactly those enumerated additions
+# before comparison. No pre-existing field is normalized or removed.
+O3_NORMALIZER="$TMP/o3-normalize.mjs"
+cat > "$O3_NORMALIZER" <<'EOF'
+import fs from "node:fs";
+const [mode, input, output] = process.argv.slice(2);
+const value = JSON.parse(fs.readFileSync(input, "utf8"));
+value.generatedAt = "NORMALIZED";
+if (mode === "current") {
+  // F1 adds the resolved discovery scope; compare every historical field unchanged.
+  delete value.rollout?.sessionsRoot;
+  delete value.targetClassification;
+  delete value.dbThread?.incomingSpawnEdges;
+  for (const key of ["source", "modelProvider", "agentNickname", "agentRole", "agentPath"]) {
+    delete value.dbThread?.thread?.[key];
+  }
+  delete value.rollout?.primary?.ownerSessionMeta;
+} else if (mode !== "historical") {
+  throw new Error(`unknown normalization mode: ${mode}`);
+}
+fs.writeFileSync(output, JSON.stringify(value, null, 2) + "\n");
+EOF
 PRE_O3_DIR="$TMP/pre-o3"; mkdir -p "$PRE_O3_DIR"
 PRE_O3=""
 if git -C "$REPO_ROOT" cat-file -e "${PRE_O3_REF}:skills/ipc/scripts/codex_ipc_session_inspect.mjs" 2>/dev/null \
@@ -1789,7 +2232,8 @@ if [[ -n "$PRE_O3" ]]; then
     for window in 1 5 20; do
       run_o3 "$TMP/ac1-old" "$PRE_O3" "$O3/$fixture/state.sqlite" "$O3/$fixture/sessions" --tail-events "$window"
       run_o3 "$TMP/ac1-new" "$INSPECT"  "$O3/$fixture/state.sqlite" "$O3/$fixture/sessions" --tail-events "$window"
-      o3_norm "$TMP/ac1-old" "$TMP/ac1-old.n"; o3_norm "$TMP/ac1-new" "$TMP/ac1-new.n"
+      "$NODE_BIN" "$O3_NORMALIZER" historical "$TMP/ac1-old" "$TMP/ac1-old.n"
+      "$NODE_BIN" "$O3_NORMALIZER" current "$TMP/ac1-new" "$TMP/ac1-new.n"
       AC1_PAIRS=$((AC1_PAIRS+1))
       if ! cmp -s "$TMP/ac1-old.n" "$TMP/ac1-new.n"; then
         AC1_DIFFS=$((AC1_DIFFS+1))
@@ -1799,7 +2243,7 @@ if [[ -n "$PRE_O3" ]]; then
     done
   done
   if [[ "$AC1_DIFFS" -eq 0 ]]; then
-    ok "default output is byte-identical across $AC1_PAIRS (fixture x window) pairs, modulo generatedAt only"
+    ok "default output preserves every pre-A2 value across $AC1_PAIRS (fixture x window) pairs after generatedAt and enumerated A2 additions are projected away"
   else
     no "$AC1_DIFFS of $AC1_PAIRS default-output pairs drifted from ${PRE_O3_REF:0:7}"
   fi
@@ -1826,6 +2270,7 @@ SKILL_MANDATED_SUMMARY_FIELDS=(
   "dbThread.thread.title"                       # "the target title"
   "dbThread.thread.cwd"                         # "cwd/project"
   "dbThread.thread.model"                       # "model"
+  "dbThread.thread.threadSource"                # root/non-root classification input
   "dbThread.thread.reasoningEffort"             # "reasoning effort"
   "dbThread.thread.archived"                    # "archived flag"
   "dbThread.thread.rolloutPath"                 # "and rollout path"
@@ -1835,6 +2280,11 @@ SKILL_MANDATED_SUMMARY_FIELDS=(
   "dbThread.thread.exists"                      # "missing ... targets" is only decidable from exists
   "dbThread.thread.id"                          # identity-mismatch check
   "threadId"                                    # the one-UUID rule
+  "targetClassification.kind"                   # root/non-root/legacy/ambiguous decision
+  "targetClassification.parentThreadId"         # parent when DB or first rollout record supplies one
+  "targetClassification.reasons"                # fail-closed evidence tokens
+  "targetClassification.warnings"               # legacy-root-assumed warning
+  "rollout.primary.ownerSessionMeta"             # first current-owner metadata parent fact
   "activitySignals.lastUserMessageLine"         # "the latest user/agent/task-complete signals"
   "activitySignals.lastAgentMessageLine"        # (same clause)
   "activitySignals.lastTaskCompleteLine"        # (same clause)

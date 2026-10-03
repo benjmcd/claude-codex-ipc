@@ -264,11 +264,19 @@ function summarizeThread(row) {
     normalizedCwd,
     projectName: projectNameFromCwd(cwd),
     title: row.title || "",
-    model: row.model || null,
+    model: row.model ?? null,
     reasoningEffort: row.reasoning_effort || null,
     tokensUsed: row.tokens_used ?? null,
     archived: Boolean(row.archived),
-    threadSource: row.thread_source || null,
+    threadSource: row.thread_source ?? null,
+    targetKindHint:
+      row.thread_source === "subagent" || row.thread_source === "guardian_review"
+        ? "non-root"
+        : row.thread_source === "user" || row.thread_source === "agent_created_thread"
+          ? "root"
+          : row.thread_source === null || row.thread_source === undefined
+            ? "legacy-unknown"
+            : "unknown",
     preview: truncate(row.preview || "", 300),
     firstUserMessage: truncate(row.first_user_message || "", 300),
     rolloutPath: row.rollout_path || null,
@@ -392,6 +400,7 @@ function truncate(text, maxChars) {
 function baseWarnings() {
   return [
     "Read-only evidence only: no IPC connection, no prompt send, and no SQLite write were attempted.",
+    "targetKindHint marks explicit subagent/guardian rows but does not replace the pre-send inspector.",
     "Locator candidates are not write authority; inspect the selected conversationId before --ipc.",
     "If more than one candidate remains, do not choose by recency alone for a write.",
   ];

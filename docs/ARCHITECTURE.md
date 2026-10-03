@@ -11,7 +11,7 @@ claude-codex-ipc/
   .claude-plugin/plugin.json     plugin manifest (plugin name: codex-ipc)
   skills/ipc/                    CANONICAL skill source (skill name: ipc)
     SKILL.md                     operational contract (manual-trigger only)
-    scripts/                     the toolkit (bash wrapper + Node tools + PS1 autoload helper)
+    scripts/                     the toolkit (bash wrapper + Node tools + PS1 host policy/activation)
     references/                  bundled deep docs (architecture, security model, troubleshooting,
                                  handoff template)
     examples/                    synthetic payload example + quickstart commands
@@ -48,6 +48,11 @@ no cache, reconstructed reply file, transport-root write, lock, or retention sid
 Within the exactly correlated turn, final bodies are deduplicated by exact text. Multiple distinct
 explicit `final_answer` bodies certify only when a nonempty `task_complete.last_agent_message`
 exactly matches one body; missing, empty, or nonmatching terminal evidence remains unavailable.
+The dispatch marker keeps the turn boundary it was observed inside. A later unmarked continuation
+cannot replace that turn's terminal or supply a missing final body. When the dispatch's own
+terminal has no assistant output, the reader may attach privacy-bounded `turn-error` and
+`turn-model-state` facts. Those facts neither certify a body nor change lifecycle or source
+selection.
 
 Completion and freshness are separate projections. Historical completion remains evidence that an
 exact dispatch occurrence completed; `latestOccurrence` reports the newest exact marker occurrence,
@@ -69,10 +74,19 @@ is not another exact occurrence, and discloses that uncertainty rather than eras
 
 1. **File-drop (default, stable):** operator pastes one printed pickup line into their Codex
    session. Zero dependencies beyond bash; zero effect on other sessions.
-2. **`--ipc` live injection (optional, EXPERIMENTAL, Windows):** after writing the file-drop, the
-   wrapper injects the pickup line into the renderer-owned Desktop thread over the app's private
-   named-pipe router; unowned threads are auto-loaded via the app's own `codex://threads/<id>`
-   deep link with focus snapback. Result taxonomy: `gui-delivered | gui-unowned | failed-closed`.
+2. **Thread-bound manual (`--ipc <uuid> --deliver manual`):** writes the ordinary envelope under
+   the UUID channel, performs the shared target inspection, and prints pickup plus a fully bound
+   `WAIT:` command. It exits before host policy, PowerShell, client, observer, or opener code and
+   prints no live `RESULT:`. A trusted inspector page is propagated; absent page authority emits
+   fixed `ROLLOUT-PATH:` guidance. The default root stays `~/.claude/ipc`; an explicit shared
+   `CODEX_IPC_ROOT` is an operator configuration choice for a target-writable location.
+3. **`--ipc` live injection (optional, EXPERIMENTAL, Windows):** after writing the envelope, the
+   wrapper checks a read-only host inventory and injects the pickup line into the renderer-owned
+   Desktop thread over the app's private named-pipe router. The host check runs freshly before the
+   initial send and every retry. Activation of an unowned package thread is a separate, default-off
+   `--autoload codex-uri` request with package/update/protocol and foreground gates; alternate
+   intended hosts are never protocol-activated. Result taxonomy:
+   `gui-delivered | gui-unowned | failed-closed`.
    An accepted send then receives one bounded confirmation token: `rollout-hit`,
    `rollout-pending`, or `rollout-unavailable`. A hit proves only that the exact dispatch pickup
    reached a rollout user message; pending means an authoritative candidate was readable/parseable
@@ -80,6 +94,9 @@ is not another exact occurrence, and discloses that uncertainty rather than eras
    result. None proves completion or reply-file success, and no observation outcome causes an
    automatic resend. The observation budget includes rollout integrity hashing and revalidation;
    expiry cannot emit a hit from an uncertified partial read.
+   The current real-machine readers intentionally leave package-update clearance and the effective
+   protocol handler unqualified, so real activation refuses until qualified sources replace those
+   unknowns. Hermetic mocks exercise the positive decision without granting live authority.
    Built on private internals — revalidate after every Codex Desktop update. That includes
    host-identity drift: since 2026-07-09 the Codex Desktop GUI runs as `ChatGPT.exe` under the
    unchanged `OpenAI.Codex` package family, so foreground/GUI identification is positive
@@ -88,31 +105,46 @@ is not another exact occurrence, and discloses that uncertainty rather than eras
    (The CLI-backed `--exec`/`--app`/`--open` modes were removed in v0.1.8; there is no headless
    execution path.)
 
-The wrapper authorizes auto-load from parsed structure, not text matches. `no-client-found` must be
-the exact failed response for the requested target with exactly one matching follower request; the
-pre-navigation inspector must then prove a successful read-only DB open and one exact active row for
-that same target. Rollout-only, missing, archived, malformed, or ambiguous state cannot authorize a
-deep link. Initial renderer-owned success and post-autoload retry success both require parsed
+Host configuration applies only to live delivery and resolves per field as wrapper flag,
+environment, `${CODEX_IPC_ROOT}/host-policy.json`,
+then defaults (`autoload=off`, intended host `package`). Every present layer is validated even when
+overridden. After publishing the thread-bound envelope, the wrapper runs one read-only target
+inspection. Manual delivery returns after preparation; live delivery reuses that snapshot across
+guarded recovery before its first host gate or pipe contact. The inspection requires a trusted
+exact active DB row, a `root` or warned `legacy-root-assumed` classification, and a nonempty stored
+model. Explicit child evidence is non-root; a null legacy source is assumed root only when every
+available child indicator is absent. Missing, archived, non-root, empty-model, malformed,
+contradictory, or ambiguous state refuses before host policy or pipe contact. Manual delivery emits
+its fixed refusal and no actionable pickup; live delivery reports `confirmation=not-attempted`.
+
+The wrapper considers activation only from parsed structure, not text matches. `no-client-found`
+must be the exact failed response for the requested target with exactly one matching follower
+request; the existing pre-send snapshot remains target authority. Initial renderer-owned success
+and post-autoload retry success both require parsed
 `ok: true`, the exact `targetThreadId`, `response.resultType: "success"`, and exactly one follower
 occurrence whose `name`, `method`, and `conversationId` all match. Client exit 0 with missing or
 conflicting structure is post-attempt ambiguous: it is not classified as delivered and is never
 automatically retried. Inspection is necessary before considering a manual retry, but negative
 bounded/recent-tail evidence cannot prove non-admission. Retry requires either an exact
 full-history outcome proving non-admission or an explicit owner decision acknowledging the
-unresolved duplicate-send risk. The
-unowned-branch recheck is defense in depth: the renderer-owned fast path relies on the mandatory
-separate agent preflight and does not add another wrapper inspection before its initial attempt.
-The resulting preflight-to-send state-change window remains disclosed. Exact target binding
+unresolved duplicate-send risk. The same target snapshot gates the renderer-owned and unowned
+paths; only the host inventory repeats immediately before each send or retry. Exact target binding
 prevents heuristic retargeting, and ambiguous outcomes are not retried.
 
 ## Inspection surfaces (read-only)
 
-- `codex_ipc_session_inspect.mjs` — thread row + rollout tail + mid-turn heuristics.
+- `codex_ipc_session_inspect.mjs` — thread row, fail-closed root classification and parent facts,
+  stored settings, database-selected rollout, full-stream turn activity, and bounded display tail.
 - `codex_ipc_thread_locator.mjs` — candidate discovery for new-session mode (never send
-  authority).
+  authority); its root/non-root/legacy hints do not replace inspection. Its `--since-*` filters
+  use the current indexed timestamps, which can be rewritten by thread reset/revert, so a match is
+  not proof that a thread was newly created.
 - `codex_ipc_snapshot.mjs` — config/DB hashing for before/after isolation evidence.
-- `codex_ipc_revalidate.mjs` — post-update validate-only checks (pipe connect only with
-  `--allow-live-ipc-read`, sending `initialize` only).
+- `codex_ipc_revalidate.mjs` — post-update validate-only checks. It parses and runs the shared host
+  policy before the optional pipe read; a host refusal suppresses `--allow-live-ipc-read` rather
+  than contacting the pipe. Its report lists each detected GUI host and app-server executable and
+  classification without command lines. A permitted live read sends `initialize` only; inventory
+  does not prove thread ownership.
 - `codex_ipc_contract_audit.mjs` — static requirement matrix over the bundled skill files.
 
 ## Authorized write proof
@@ -164,13 +196,33 @@ understood as a candidate for that root (including when a trailing second UUID m
 parser attribute the name to another root), or an unreadable subtree. A recognized paginated
 basename is exempt when only its page ID equals the target and its root is another session. Other
 unresolved diagnostics are never discarded to select the valid file. Polling remains bound to that
-page, and cross-page N-to-N+1 rollover is not yet certified or supported. The standalone observer,
-waiter, and harvester do not query the DB for that path; callers should pass
-their exact `--rollout-path` when known, or accept root-discovery ambiguity. Between full reads, a
+page and never auto-hops or stitches records. A SQLite-free veto recursively scans the configured
+sessions root for one direct paginated successor whose complete first record names the bound page
+ID in `history_base.thread_id` and gives a safe record-boundary `end_byte_offset` no larger than the
+bound page. A marker at or beyond that cutoff is `dispatch-history-abandoned`; an earlier marker is
+`rollout-page-superseded`; malformed, incomplete, or multiple claims are
+`page-supersession-unproven`. Each state vetoes positive pickup, completion, and rollout-fallback
+results while leaving the reader on the original page. The standalone observer, waiter, and
+harvester do not query the DB for that path; callers should pass their exact `--rollout-path` when
+known, or accept root-discovery ambiguity. The maintained wrapper propagates its one trusted
+inspector page to observation and the printed waiter. The reply viewer accepts an
+explicit page for a UUID-scoped `-c` view or can derive it once with `--derive-rollout-path`;
+session-wide and filedrop views cannot select a page. Missing authority prints fixed
+`ROLLOUT-PATH:` guidance, page vetoes print fixed `ROLLOUT-PAGE:` guidance, and a primary reply
+stays visible with a stale-body caution while fallback remains unavailable. Between full reads, a
 complete cursor may enable a metadata-only no-growth check of canonical path, physical
 identity, and size. That check is pending-only and cannot prove pickup or completion. Growth and
 change run the full certifying reader, as do final or budget-edge attempts that begin before the
 deadline; a deadline that elapses during sleep returns unverified without a post-deadline read.
+
+Path configuration is deliberately component-scoped. Inspector accepts
+`CODEX_IPC_SESSIONS_ROOT`; waiter accepts `CODEX_IPC_ROLLOUT_PATH` and
+`CODEX_IPC_SESSIONS_ROOT`; observer accepts `CODEX_IPC_ROLLOUT_PATH` and
+`--sessions-root` / `CODEX_IPC_SESSIONS_ROOT`; harvester retains both aliases. Where a corresponding
+flag exists, precedence is explicit flag, then nonempty environment, then the existing default or
+discovery behavior. The viewer has no independent environment option, although its harvester child
+inherits the process environment; use viewer flags for an auditable selection. `CODEX_HOME` is not
+a supported path alias. A configured path is input, never page or owner authority.
 
 ## Design invariants
 

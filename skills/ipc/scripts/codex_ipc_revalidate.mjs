@@ -27,6 +27,7 @@ const REQUIRED_SCRIPT_FILES = [
   "scripts/codex_ipc_write_proof.mjs",
   "scripts/handoff_to_codex.sh",
   "scripts/codex_ipc_autoload.ps1",
+  "scripts/codex_ipc_host_policy.ps1",
 ];
 
 function usage() {
@@ -43,7 +44,9 @@ Options:
 Safety:
   No prompt injection, no follower-start-turn, no config writes, no SQLite writes,
   and no artifact generation. Without --allow-live-ipc-read, the script only
-  checks files, syntax, local state, CLI/Desktop version hints, and pipe presence.`;
+  checks files, syntax, local state, CLI/Desktop version hints, and pipe presence.
+  It validates ${"${CODEX_IPC_ROOT}"}/host-policy.json and the current running-host
+  inventory before any optional initialize-only probe; a refusal suppresses that probe.`;
 }
 
 function parseArgs(argv) {
@@ -161,24 +164,29 @@ function checkNodeSyntax(relPath) {
 
 function checkGitBashSyntax(relPath) {
   const scriptPath = skillPath(relPath);
-  // Prefer bash from PATH (Linux/macOS/Git Bash), then common Windows Git installs.
-  const onPath = runCommand("bash", ["-n", scriptPath], { maxChars: 1000 });
-  if (!onPath.error) {
-    return onPath;
-  }
   const candidates = [
     "C:\\Program Files\\Git\\bin\\bash.exe",
     "C:\\Program Files\\Git\\usr\\bin\\bash.exe",
   ];
-  const bashPath = candidates.find((candidate) => existsSync(candidate));
-  if (!bashPath) {
-    return {
-      ok: false,
-      skipped: true,
-      reason: "bash was not found on PATH or at the expected Windows Git install paths.",
-    };
+
+  // Windows can resolve an unusable WSL app-execution alias as `bash`. Prefer the
+  // repository's known Git Bash installations there. Fall through only when a
+  // candidate cannot start; a real `bash -n` failure remains authoritative.
+  if (process.platform === "win32") {
+    for (const candidate of candidates) {
+      if (!existsSync(candidate)) continue;
+      const result = runCommand(candidate, ["-n", scriptPath], { maxChars: 1000 });
+      if (!result.error) return result;
+    }
   }
-  return runCommand(bashPath, ["-n", scriptPath], { maxChars: 1000 });
+
+  const onPath = runCommand("bash", ["-n", scriptPath], { maxChars: 1000 });
+  if (!onPath.error) return onPath;
+  return {
+    ok: false,
+    skipped: true,
+    reason: "bash was not found on PATH or at the expected Windows Git install paths.",
+  };
 }
 
 function checkPowerShellSyntax(relPath) {
@@ -191,12 +199,19 @@ function checkPowerShellSyntax(relPath) {
   }
   const ps = [
     "$errors = $null;",
-    `$null = [System.Management.Automation.PSParser]::Tokenize((Get-Content -Raw '${scriptPath.replace(/'/g, "''")}'), [ref]$errors);`,
+    `$null = [System.Management.Automation.PSParser]::Tokenize((Get-Content -LiteralPath '${scriptPath.replace(/'/g, "''")}' -Raw -Encoding UTF8), [ref]$errors);`,
     "if ($errors) { Write-Output 'PARSE-ERRORS'; $errors | ForEach-Object { Write-Output $_.Message }; exit 1 }",
     "Write-Output 'PARSE-OK'",
   ].join(" ");
   const result = runCommand("powershell.exe", ["-NoProfile", "-Command", ps], { maxChars: 2000 });
   if (result.error) {
+    if (process.platform === "win32") {
+      return {
+        ...result,
+        ok: false,
+        reason: "powershell.exe failed to start on Windows; syntax was not validated.",
+      };
+    }
     return {
       ok: true,
       skipped: true,
@@ -271,6 +286,151 @@ function checkDesktopVersionHint() {
     };
   }
   return result;
+}
+
+function checkHostPolicy() {
+  const policyPath = skillPath("scripts/codex_ipc_host_policy.ps1");
+  const ipcRoot = process.env.CODEX_IPC_ROOT || defaultUserPath(".claude", "ipc");
+  if (!existsSync(policyPath)) {
+    return { ok: false, exists: false, reason: "shared host policy script is missing" };
+  }
+  if (!ipcRoot) {
+    return { ok: false, reason: "IPC root cannot be resolved without HOME or USERPROFILE" };
+  }
+
+  const args = [
+    "-NoProfile",
+    "-ExecutionPolicy",
+    "Bypass",
+    "-File",
+    policyPath,
+    "-Purpose",
+    "send",
+    "-IpcRoot",
+    ipcRoot,
+  ];
+  const result = spawnSync("powershell.exe", args, {
+    cwd: process.cwd(),
+    encoding: "utf8",
+    timeout: 15000,
+    windowsHide: true,
+  });
+  const stdout = String(result.stdout || "");
+  const base = {
+    command: "powershell.exe -NoProfile -ExecutionPolicy Bypass -File <host-policy> -Purpose send -IpcRoot <resolved>",
+    status: result.status,
+    signal: result.signal,
+    stdoutBytes: Buffer.byteLength(stdout, "utf8"),
+    stderr: truncate(result.stderr || "", 2000),
+    error: result.error ? result.error.message : null,
+  };
+
+  if (result.error) {
+    if (process.platform !== "win32") {
+      return {
+        ...base,
+        ok: true,
+        skipped: true,
+        reason: "powershell.exe is unavailable on this non-Windows host; Desktop host policy is not applicable.",
+      };
+    }
+    return { ...base, ok: false, reason: "host policy process could not start" };
+  }
+  if (result.status !== 0) {
+    return { ...base, ok: false, reason: "host policy process refused or failed" };
+  }
+
+  let report;
+  try {
+    report = JSON.parse(stdout);
+  } catch {
+    return { ...base, ok: false, reason: "host policy output is empty or malformed JSON" };
+  }
+  const sources = new Set(["default", "descriptor", "environment", "flag"]);
+  const autoload = report?.configuration?.autoload;
+  const intendedHost = report?.configuration?.intendedHost;
+  const inventory = report?.inventory;
+  const guiHosts = inventory?.guiHosts;
+  const appServers = inventory?.appServers;
+  const sendReasons = report?.sendReasons;
+  const hostClassifications = new Set(["package", "alternate", "other", "unknown"]);
+  const hostEntryValid = (host) =>
+    host !== null &&
+    typeof host === "object" &&
+    Number.isSafeInteger(host.pid) &&
+    Number.isSafeInteger(host.parentPid) &&
+    typeof host.name === "string" &&
+    (host.executable === null || typeof host.executable === "string") &&
+    hostClassifications.has(host.classification) &&
+    typeof host.matchesIntended === "boolean";
+  const reportShapeValid =
+    report?.schemaVersion === 1 &&
+    report?.ok === true &&
+    report?.purpose === "send" &&
+    report?.configuration?.valid === true &&
+    ["off", "codex-uri"].includes(autoload?.value) &&
+    sources.has(autoload?.source) &&
+    ["package", "alternate"].includes(intendedHost?.kind) &&
+    sources.has(intendedHost?.source) &&
+    typeof inventory?.complete === "boolean" &&
+    Array.isArray(guiHosts) &&
+    Array.isArray(appServers) &&
+    guiHosts.every(hostEntryValid) &&
+    appServers.every(hostEntryValid) &&
+    typeof report?.sendEligible === "boolean" &&
+    Array.isArray(sendReasons) &&
+    sendReasons.every((reason) =>
+      [
+        "host-inventory-incomplete",
+        "intended-host-not-running",
+        "other-desktop-host-running",
+      ].includes(reason));
+  if (!reportShapeValid) {
+    return { ...base, ok: false, reason: "host policy report shape is invalid" };
+  }
+
+  const intendedCount = guiHosts.filter((host) => host?.matchesIntended === true).length;
+  const otherCount = guiHosts.filter((host) => host?.matchesIntended !== true).length;
+  const eligibleConsistent =
+    report.sendEligible === true &&
+    inventory.complete === true &&
+    intendedCount === 1 &&
+    otherCount === 0 &&
+    sendReasons.length === 0;
+  const refusalConsistent = report.sendEligible === false && sendReasons.length > 0;
+  if (!eligibleConsistent && !refusalConsistent) {
+    return { ...base, ok: false, reason: "host policy report is internally inconsistent" };
+  }
+  const projectHost = (host) => ({
+    pid: host.pid,
+    parentPid: host.parentPid,
+    name: host.name,
+    executable: host.executable,
+    classification: host.classification,
+    matchesIntended: host.matchesIntended,
+  });
+
+  return {
+    ...base,
+    ok: eligibleConsistent,
+    reason: eligibleConsistent ? null : "host policy refused send eligibility",
+    sendEligible: report.sendEligible,
+    sendReasons: [...sendReasons],
+    configuration: {
+      autoload: { value: autoload.value, source: autoload.source },
+      intendedHost: { kind: intendedHost.kind, source: intendedHost.source },
+      descriptorStatus: report?.configuration?.descriptor?.status ?? null,
+    },
+    inventory: {
+      complete: inventory.complete,
+      coverage: typeof inventory.coverage === "string" ? inventory.coverage : null,
+      guiHostCount: guiHosts.length,
+      appServerCount: appServers.length,
+      guiHosts: guiHosts.map(projectHost),
+      appServers: appServers.map(projectHost),
+      errorCount: Array.isArray(inventory.errors) ? inventory.errors.length : null,
+    },
+  };
 }
 
 function checkCodexPipePresence() {
@@ -399,6 +559,21 @@ async function main() {
       .filter((filePath) => filePath.endsWith(".mjs"))
       .map((filePath) => [filePath, checkNodeSyntax(filePath)]),
   );
+  const hostPolicyPowerShellSyntax = checkPowerShellSyntax("scripts/codex_ipc_host_policy.ps1");
+  const hostPolicy = hostPolicyPowerShellSyntax.ok === true
+    ? checkHostPolicy()
+    : {
+        ok: false,
+        skipped: true,
+        reason: "host policy syntax validation failed; policy was not executed",
+      };
+  const liveIpcReadProbe = hostPolicy.ok === true
+    ? runLiveIpcReadProbe(opts)
+    : {
+        ok: true,
+        skipped: true,
+        reason: "host policy did not authorize this runtime; optional live IPC read probe suppressed",
+      };
   const checks = {
     requiredFiles: {
       ok: Object.values(fileChecks).every((check) => check.ok),
@@ -410,13 +585,15 @@ async function main() {
     },
     handoffShellSyntax: checkGitBashSyntax("scripts/handoff_to_codex.sh"),
     autoloadPowerShellSyntax: checkPowerShellSyntax("scripts/codex_ipc_autoload.ps1"),
+    hostPolicyPowerShellSyntax,
     nodeSqlite: checkNodeSqlite(),
     codexCliVersion: checkCodexCliVersion(),
     desktopVersionHint: checkDesktopVersionHint(),
+    hostPolicy,
     codexStateFiles: checkCodexStateFiles(),
     codexPipePresence: checkCodexPipePresence(),
     sessionInspect: runSessionInspect(opts.threadId),
-    liveIpcReadProbe: runLiveIpcReadProbe(opts),
+    liveIpcReadProbe,
   };
 
   const summary = summarizeChecks(checks);

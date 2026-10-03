@@ -74,16 +74,22 @@ jobs:
           done < <(git ls-files -z -- '*.mjs')
           [ "$count" -gt 0 ] || { echo "no tracked .mjs files" >&2; exit 2; }
 
-      - name: PowerShell parse check (autoload helper)
-        # Parser-only (PSParser::Tokenize) — no execution. Windows leg only: the helper
-        # is Windows-only and ubuntu runners have no powershell.exe. Full revalidate is
+      - name: PowerShell parse check (host helpers)
+        # Parser-only (PSParser::Tokenize) — no execution. Windows leg only: the helpers
+        # are Windows-only and ubuntu runners have no powershell.exe. Full revalidate is
         # NOT run on CI: its Codex-state/desktop checks legitimately fail on runners.
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $errors = $null
-          $null = [System.Management.Automation.PSParser]::Tokenize((Get-Content -Raw -Encoding UTF8 'skills/ipc/scripts/codex_ipc_autoload.ps1'), [ref]$errors)
-          if ($errors) { $errors | ForEach-Object { Write-Error $_.Message }; exit 1 }
+          $files = @(
+            'skills/ipc/scripts/codex_ipc_autoload.ps1',
+            'skills/ipc/scripts/codex_ipc_host_policy.ps1'
+          )
+          foreach ($file in $files) {
+            $errors = $null
+            $null = [System.Management.Automation.PSParser]::Tokenize((Get-Content -Raw -Encoding UTF8 $file), [ref]$errors)
+            if ($errors) { $errors | ForEach-Object { Write-Error "$file`: $($_.Message)" }; exit 1 }
+          }
           Write-Output "PowerShell parse: clean"
 
       - name: Hermetic transport tests

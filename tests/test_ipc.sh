@@ -15,14 +15,35 @@ for _cand in "$TDIR/../skills/ipc/scripts/handoff_to_codex.sh" "$TDIR/../scripts
     [[ -f "$_cand" ]] && SCRIPT="$_cand" && break
 done
 [[ -n "$SCRIPT" ]] || { echo "FATAL: handoff_to_codex.sh not found in repo or installed layout" >&2; exit 1; }
-TMP="$(mktemp -d)"
+TMP="$(mktemp -d)" && [[ -n "$TMP" && -d "$TMP" ]] \
+    || { echo "FATAL: could not create IPC temporary directory" >&2; exit 1; }
 trap 'rm -rf "$TMP"' EXIT
-IPCROOT="$TMP/ipcroot"; mkdir -p "$IPCROOT"
-BIN="$TMP/bin"; mkdir -p "$BIN"
-REPO="$TMP/repo"; mkdir -p "$REPO"; ( cd "$REPO" && git init -q && git config user.email t@t && git config user.name t )
-NOREPO="$TMP/norepo"; mkdir -p "$NOREPO"
+fatal(){ echo "FATAL: $*" >&2; exit 1; }
+
+# Fixture Git operations must not inherit redirecting/tracing GIT_* variables from the caller.
+while IFS= read -r _git_var; do
+  [[ "${_git_var^^}" == GIT_* ]] && unset "$_git_var"
+done < <(compgen -e)
+for _git_var in $(compgen -e); do
+  [[ "${_git_var^^}" != GIT_* ]] || fatal "could not clear inherited Git variable $_git_var"
+done
+unset _git_var
+export GIT_OPTIONAL_LOCKS=0 GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
+export GIT_ATTR_NOSYSTEM=1 GIT_PAGER=cat GIT_NO_REPLACE_OBJECTS=1
+export GIT_NO_LAZY_FETCH=1 GIT_TERMINAL_PROMPT=0
+
+IPCROOT="$TMP/ipcroot"; mkdir -p "$IPCROOT" || fatal "could not create IPC fixture root"
+BIN="$TMP/bin"; mkdir -p "$BIN" || fatal "could not create IPC stub directory"
+REPO="$TMP/repo"; mkdir -p "$REPO" || fatal "could not create IPC fixture repository"
+( cd "$REPO" && git init -q && git config user.email t@t && git config user.name t ) \
+  || fatal "could not initialize IPC fixture repository"
+NOREPO="$TMP/norepo"; mkdir -p "$NOREPO" || fatal "could not create non-repository fixture"
 UUID="00000000-0000-4000-8000-000000000000"
-REAL_NODE="$(command -v node)"
+REAL_NODE="$(command -v node 2>/dev/null)" || fatal "node is required"
+[[ -n "$REAL_NODE" ]] || fatal "node resolved empty"
+# Capture the real Windows executable before PATH stubs are installed. Only the
+# exact helper branch below may use it, with every mock and -DryRun supplied.
+REAL_PS="$(command -v powershell.exe 2>/dev/null || true)"
 
 # --- stubs on PATH (node records argv; codex/powershell are no-ops) ---
 cat > "$BIN/node" <<EOF
@@ -37,19 +58,47 @@ if [[ "\${1##*/}" == "codex_ipc_client.mjs" ]]; then
   done
   printf '{"ok":true,"targetThreadId":"%s","sentRequests":[{"name":"thread-follower-start-turn","json":{"method":"thread-follower-start-turn","params":{"conversationId":"%s"}}}],"response":{"resultType":"success"}}\n' "\$target" "\$target"
   exit 0
+elif [[ "\${1##*/}" == "codex_ipc_session_inspect.mjs" ]]; then
+  target=""
+  previous=""
+  for argument in "\$@"; do
+    if [[ "\$previous" == "--thread" ]]; then target="\$argument"; break; fi
+    previous="\$argument"
+  done
+  printf '{"ok":true,"dbThread":{"exists":true,"readOnlyOpenOk":true,"thread":{"exists":true,"id":"%s","archived":0,"model":"synthetic-model","threadSource":"user"}},"targetClassification":{"kind":"root","parentThreadId":null,"reasons":["thread-source-root"],"warnings":[]}}\n' "\$target"
+  exit 0
 fi
 exec "$REAL_NODE" "\$@"
 EOF
+[[ $? -eq 0 ]] || fatal "could not materialize node stub"
 cat > "$BIN/codex" <<EOF
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "$TMP/codexargs.log"
 exit 0
 EOF
+[[ $? -eq 0 ]] || fatal "could not materialize codex tripwire"
 cat > "$BIN/powershell.exe" <<'EOF'
 #!/usr/bin/env bash
-exit 0
+case "$*" in
+  *codex_ipc_host_policy.ps1*)
+    echo '{"schemaVersion":1,"ok":true,"purpose":"send","configuration":{"valid":true,"autoload":{"value":"off","source":"default"},"intendedHost":{"kind":"package","executable":null,"source":"default"}},"inventory":{"complete":true,"guiHosts":[{"matchesIntended":true}],"appServers":[]},"sendEligible":true,"sendReasons":[],"activationEligible":false,"activationReasons":["autoload-disabled"]}'
+    exit 0;;
+  *) exit 0;;
+esac
 EOF
-chmod +x "$BIN"/*
+[[ $? -eq 0 ]] || fatal "could not materialize PowerShell stub"
+chmod +x "$BIN"/* || fatal "could not make IPC stubs executable"
+
+assert_stub_resolution(){ # assert_stub_resolution <bin-dir>
+  local bin="$1" tool resolved
+  for tool in node powershell.exe codex; do
+    resolved="$(PATH="$bin:$PATH" command -v "$tool" 2>/dev/null)" \
+      || fatal "$tool stub does not resolve from $bin"
+    [[ "$resolved" == "$bin/$tool" ]] \
+      || fatal "$tool resolved outside the harness: $resolved"
+  done
+}
+assert_stub_resolution "$BIN"
 
 PASS=0; FAIL=0
 ok(){ echo "  PASS: $1"; PASS=$((PASS+1)); }
@@ -222,7 +271,7 @@ echo "== 11d. an EXECUTED wrapper ignores an inherited _TEST_SOURCE_ONLY (no sil
 # of an executed dispatch must NOT silently exit 0 without publishing.
 SS="$TMP/sourceseam/filedrop"; mkdir -p "$(dirname "$SS")"
 _TEST_SOURCE_ONLY=1 CODEX_IPC_ROOT="$TMP/sourceseam" CLAUDE_CODE_SESSION_ID="seam" \
-    bash "$SCRIPT" "seam-executed task" >/dev/null 2>&1
+    PATH="$BIN:$PATH" bash "$SCRIPT" "seam-executed task" >/dev/null 2>&1
 seam_rc=$?
 seam_made=$(find "$TMP/sourceseam" -name '*.task.md' 2>/dev/null | wc -l)
 [[ "$seam_rc" -eq 0 && "$seam_made" -eq 1 ]] \
@@ -268,15 +317,17 @@ printf '%s' "$OUTQ" | grep -q 'read "' && ok "pickup line double-quotes the path
 # name with a first-send-fail mode; powershell.exe records args and exits with a
 # configured code. Timing knobs keep negative poll cases under ~3s.
 # ============================================================================
-FGDIR="$TMP/fg"; BIN2="$TMP/bin2"; mkdir -p "$FGDIR" "$BIN2"
+FGDIR="$TMP/fg"; BIN2="$TMP/bin2"
+mkdir -p "$FGDIR" "$BIN2" || fatal "could not create foreground-policy stub roots"
 UUIDF="33333333-3333-4333-8333-333333333333"
-REAL_NODE="$(command -v node)"
+REAL_NODE="$(command -v node 2>/dev/null)" || fatal "node is required for foreground-policy fixtures"
+[[ -n "$REAL_NODE" ]] || fatal "node resolved empty for foreground-policy fixtures"
 
 cat > "$BIN2/node" <<EOF
 #!/usr/bin/env bash
 FG="$FGDIR"
 no_client(){
-  echo '{"ok":false,"targetThreadId":"$UUIDF","sentRequests":[{"name":"thread-follower-start-turn","json":{"method":"thread-follower-start-turn","params":{"conversationId":"$UUIDF"}}}],"response":{"resultType":"error","error":"no-client-found"}}'
+  echo '{"ok":false,"targetThreadId":"$UUIDF","sentRequests":[{"name":"thread-follower-start-turn","json":{"method":"thread-follower-start-turn","params":{"conversationId":"$UUIDF"}}}],"response":{"resultType":"error","error":"no-client-found"}}' | tee "\$FG/no-client.json"
 }
 client_success(){
   echo '{"ok":true,"targetThreadId":"$UUIDF","sentRequests":[{"name":"thread-follower-start-turn","json":{"method":"thread-follower-start-turn","params":{"conversationId":"$UUIDF"}}}],"response":{"resultType":"success"}}'
@@ -296,6 +347,8 @@ deep_error(){
 case "\$*" in
   *codex_ipc_client.mjs*)
     printf '%s\n' "\$*" >> "\$FG/nodeargs.log"
+    printf '%s\0' "\$@" > "\$FG/client.args"
+    printf '%s\n' client >> "\$FG/eventlog"
     n=\$(cat "\$FG/send_count" 2>/dev/null || echo 0); n=\$((n+1)); echo "\$n" > "\$FG/send_count"
     mode=\$(cat "\$FG/client_mode" 2>/dev/null || echo always-ok)
     case "\$mode" in
@@ -322,17 +375,29 @@ case "\$*" in
         else echo '{"ok":true}'; exit 0; fi;;
     esac;;
   *codex_ipc_session_inspect.mjs*)
+    printf '%s\n' inspect >> "\$FG/eventlog"
+    n=\$(cat "\$FG/inspect_count" 2>/dev/null || echo 0); n=\$((n+1)); echo "\$n" > "\$FG/inspect_count"
     mode=\$(cat "\$FG/inspect_mode" 2>/dev/null || echo ok)
     case "\$mode" in
-      ok)         echo '{"ok":true,"dbThread":{"exists":true,"readOnlyOpenOk":true,"thread":{"exists":true,"id":"$UUIDF","archived":0}}}'; exit 0;;
-      okarchived) echo '{"ok":true,"dbThread":{"exists":true,"readOnlyOpenOk":true,"thread":{"exists":true,"id":"$UUIDF","archived":1}}}'; exit 0;;
+      ok)         echo '{"ok":true,"dbThread":{"exists":true,"readOnlyOpenOk":true,"thread":{"exists":true,"id":"$UUIDF","archived":0,"model":"synthetic-model","threadSource":"user"}},"targetClassification":{"kind":"root","parentThreadId":null,"reasons":["thread-source-root"],"warnings":[]}}'; exit 0;;
+      page)       echo '{"ok":true,"dbThread":{"exists":true,"readOnlyOpenOk":true,"thread":{"exists":true,"id":"$UUIDF","archived":0,"model":"synthetic-model","threadSource":"user","rolloutPath":"C:/ipc-fixture/rollout-current-$UUIDF.jsonl"}},"targetClassification":{"kind":"root","parentThreadId":null,"reasons":["thread-source-root"],"warnings":[]},"rollout":{"sessionsRoot":"C:/ipc-fixture","primary":{"parsedOk":true,"path":"C:/ipc-fixture/rollout-current-$UUIDF.jsonl"},"selection":{"status":"found","reason":"db-rollout-path","authority":"db.rollout_path","path":"C:/ipc-fixture/rollout-current-$UUIDF.jsonl","candidateCount":2,"aliasCount":2}}}'; exit 0;;
+      legacy)     echo '{"ok":true,"dbThread":{"exists":true,"readOnlyOpenOk":true,"thread":{"exists":true,"id":"$UUIDF","archived":0,"model":"synthetic-model","threadSource":null}},"targetClassification":{"kind":"legacy-root-assumed","parentThreadId":null,"reasons":["legacy-indicators-absent"],"warnings":["legacy-null-source"]}}'; exit 0;;
+      child)      echo '{"ok":true,"dbThread":{"exists":true,"readOnlyOpenOk":true,"thread":{"exists":true,"id":"$UUIDF","archived":0,"model":"synthetic-model","threadSource":"subagent"}},"targetClassification":{"kind":"non-root","parentThreadId":"22222222-2222-4222-8222-222222222222","reasons":["thread-source-child","spawn-edge"],"warnings":[]}}'; exit 0;;
+      guardian)   echo '{"ok":true,"dbThread":{"exists":true,"readOnlyOpenOk":true,"thread":{"exists":true,"id":"$UUIDF","archived":0,"model":"synthetic-model","threadSource":"guardian_review"}},"targetClassification":{"kind":"non-root","parentThreadId":null,"reasons":["thread-source-child"],"warnings":[]}}'; exit 0;;
+      source-child) echo '{"ok":true,"dbThread":{"exists":true,"readOnlyOpenOk":true,"thread":{"exists":true,"id":"$UUIDF","archived":0,"model":"synthetic-model","threadSource":null}},"targetClassification":{"kind":"non-root","parentThreadId":null,"reasons":["source-subagent"],"warnings":[]}}'; exit 0;;
+      ambiguous) echo '{"ok":true,"dbThread":{"exists":true,"readOnlyOpenOk":true,"thread":{"exists":true,"id":"$UUIDF","archived":0,"model":"synthetic-model","threadSource":"user"}},"targetClassification":{"kind":"ambiguous","parentThreadId":null,"reasons":["root-child-conflict"],"warnings":[]}}'; exit 0;;
+      model-null) echo '{"ok":true,"dbThread":{"exists":true,"readOnlyOpenOk":true,"thread":{"exists":true,"id":"$UUIDF","archived":0,"model":null,"threadSource":"user"}},"targetClassification":{"kind":"root","parentThreadId":null,"reasons":["thread-source-root"],"warnings":[]}}'; exit 0;;
+      model-empty) echo '{"ok":true,"dbThread":{"exists":true,"readOnlyOpenOk":true,"thread":{"exists":true,"id":"$UUIDF","archived":0,"model":"","threadSource":"user"}},"targetClassification":{"kind":"root","parentThreadId":null,"reasons":["thread-source-root"],"warnings":[]}}'; exit 0;;
+      model-space) echo '{"ok":true,"dbThread":{"exists":true,"readOnlyOpenOk":true,"thread":{"exists":true,"id":"$UUIDF","archived":0,"model":"  ","threadSource":"user"}},"targetClassification":{"kind":"root","parentThreadId":null,"reasons":["thread-source-root"],"warnings":[]}}'; exit 0;;
+      okarchived) echo '{"ok":true,"dbThread":{"exists":true,"readOnlyOpenOk":true,"thread":{"exists":true,"id":"$UUIDF","archived":1,"model":"synthetic-model","threadSource":"user"}},"targetClassification":{"kind":"root","parentThreadId":null,"reasons":["thread-source-root"],"warnings":[]}}'; exit 0;;
       notfound)   echo '{"ok":false,"dbThread":{"exists":true,"readOnlyOpenOk":true,"thread":{"exists":false,"id":null,"archived":null}}}'; exit 1;;
-      positive-exit2) echo '{"ok":true,"dbThread":{"exists":true,"readOnlyOpenOk":true,"thread":{"exists":true,"id":"$UUIDF","archived":0}}}'; exit 2;;
+      positive-exit2) echo '{"ok":true,"dbThread":{"exists":true,"readOnlyOpenOk":true,"thread":{"exists":true,"id":"$UUIDF","archived":0,"model":"synthetic-model","threadSource":"user"}},"targetClassification":{"kind":"root","parentThreadId":null,"reasons":["thread-source-root"],"warnings":[]}}'; exit 2;;
       malformed) echo '{{{ not json'; exit 0;;
       empty)     exit 0;;
       stderr)    echo "boom: inspector crashed" >&2; exit 1;;
     esac;;
   *codex_ipc_rollout_observe.mjs*)
+    printf '%s\n' observe >> "\$FG/eventlog"
     printf '%s\n' "\$*" >> "\$FG/observe_args.log"
     n=\$(cat "\$FG/observe_count" 2>/dev/null || echo 0); n=\$((n+1)); echo "\$n" > "\$FG/observe_count"
     mode=\$(cat "\$FG/observe_mode" 2>/dev/null || echo rollout-hit)
@@ -347,25 +412,97 @@ case "\$*" in
   *) exec "$REAL_NODE" "\$@";;
 esac
 EOF
-cat > "$BIN2/powershell.exe" <<EOF
+[[ $? -eq 0 ]] || fatal "could not materialize foreground-policy node stub"
+cat > "$BIN2/powershell.exe" <<'EOF'
 #!/usr/bin/env bash
-printf '%s\n' "\$*" >> "$FGDIR/pslog"
-exit "\$(cat "$FGDIR/pscode" 2>/dev/null || echo 0)"
+FG="__FGDIR__"
+n=$(cat "$FG/powershell_count" 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > "$FG/powershell_count"
+script=""
+previous=""
+for argument in "$@"; do
+  if [[ "$previous" == "-File" ]]; then script="${argument//\\//}"; break; fi
+  previous="$argument"
+done
+base="${script##*/}"
+case "$base" in
+  codex_ipc_host_policy.ps1)
+    printf '%s\n' "$*" >> "$FG/policylog"
+    printf '%s\n' policy >> "$FG/eventlog"
+    [[ ! -f "$FG/policy_stderr" ]] || cat "$FG/policy_stderr" >&2
+    n=$(cat "$FG/policy_count" 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > "$FG/policy_count"
+    mode=$(cat "$FG/policy_mode" 2>/dev/null || echo eligible-codex-uri)
+    case "$mode" in
+      eligible-codex-uri)
+        echo '{"schemaVersion":1,"ok":true,"purpose":"send","configuration":{"valid":true,"autoload":{"value":"codex-uri","source":"environment"},"intendedHost":{"kind":"package","executable":null,"source":"default"}},"inventory":{"complete":true,"guiHosts":[{"matchesIntended":true}],"appServers":[]},"sendEligible":true,"sendReasons":[],"activationEligible":false,"activationReasons":["not-checked"]}'; exit 0;;
+      eligible-off)
+        echo '{"schemaVersion":1,"ok":true,"purpose":"send","configuration":{"valid":true,"autoload":{"value":"off","source":"default"},"intendedHost":{"kind":"package","executable":null,"source":"default"}},"inventory":{"complete":true,"guiHosts":[{"matchesIntended":true}],"appServers":[]},"sendEligible":true,"sendReasons":[],"activationEligible":false,"activationReasons":["autoload-disabled"]}'; exit 0;;
+      eligible-alt-off)
+        echo '{"schemaVersion":1,"ok":true,"purpose":"send","configuration":{"valid":true,"autoload":{"value":"off","source":"flag"},"intendedHost":{"kind":"alternate","executable":"C:\\Alt\\Host\\ChatGPT.exe","source":"flag"}},"inventory":{"complete":true,"guiHosts":[{"matchesIntended":true}],"appServers":[]},"sendEligible":true,"sendReasons":[],"activationEligible":false,"activationReasons":["autoload-disabled","protocol-host-not-package"]}'; exit 0;;
+      eligible-alt-uri)
+        echo '{"schemaVersion":1,"ok":true,"purpose":"send","configuration":{"valid":true,"autoload":{"value":"codex-uri","source":"flag"},"intendedHost":{"kind":"alternate","executable":"C:\\Alt\\Host\\ChatGPT.exe","source":"flag"}},"inventory":{"complete":true,"guiHosts":[{"matchesIntended":true}],"appServers":[]},"sendEligible":true,"sendReasons":[],"activationEligible":false,"activationReasons":["protocol-host-not-package"]}'; exit 0;;
+      refuse-other)
+        echo '{"schemaVersion":1,"ok":true,"purpose":"send","configuration":{"valid":true,"autoload":{"value":"off","source":"default"},"intendedHost":{"kind":"package","executable":null,"source":"default"}},"inventory":{"complete":true,"guiHosts":[{"matchesIntended":false}],"appServers":[]},"sendEligible":false,"sendReasons":["intended-host-not-running","other-desktop-host-running"],"activationEligible":false,"activationReasons":["send-ineligible"]}'; exit 0;;
+      refuse-missing)
+        echo '{"schemaVersion":1,"ok":true,"purpose":"send","configuration":{"valid":true,"autoload":{"value":"off","source":"default"},"intendedHost":{"kind":"package","executable":null,"source":"default"}},"inventory":{"complete":true,"guiHosts":[],"appServers":[]},"sendEligible":false,"sendReasons":["intended-host-not-running"],"activationEligible":false,"activationReasons":["send-ineligible"]}'; exit 0;;
+      change-on-retry)
+        if [[ "$n" -eq 1 ]]; then
+          echo '{"schemaVersion":1,"ok":true,"purpose":"send","configuration":{"valid":true,"autoload":{"value":"codex-uri","source":"environment"},"intendedHost":{"kind":"package","executable":null,"source":"default"}},"inventory":{"complete":true,"guiHosts":[{"matchesIntended":true}],"appServers":[]},"sendEligible":true,"sendReasons":[],"activationEligible":false,"activationReasons":["not-checked"]}'
+        else
+          echo '{"schemaVersion":1,"ok":true,"purpose":"send","configuration":{"valid":true,"autoload":{"value":"codex-uri","source":"environment"},"intendedHost":{"kind":"package","executable":null,"source":"default"}},"inventory":{"complete":true,"guiHosts":[{"matchesIntended":false}],"appServers":[]},"sendEligible":false,"sendReasons":["other-desktop-host-running"],"activationEligible":false,"activationReasons":["send-ineligible"]}'
+        fi
+        exit 0;;
+      malformed) echo '{bad'; exit 0;;
+      empty) exit 0;;
+      invalid-report) echo '{"schemaVersion":1,"ok":true,"purpose":"send"}'; exit 0;;
+      nonzero-ok)
+        echo '{"schemaVersion":1,"ok":true,"purpose":"send","configuration":{"valid":true,"autoload":{"value":"off","source":"default"},"intendedHost":{"kind":"package","executable":null,"source":"default"}},"inventory":{"complete":true,"guiHosts":[{"matchesIntended":true}],"appServers":[]},"sendEligible":true,"sendReasons":[],"activationEligible":false,"activationReasons":[]}'
+        exit 7;;
+      *) echo "unknown policy mode: $mode" >&2; exit 98;;
+    esac;;
+  codex_ipc_autoload.ps1)
+    printf '%s\n' "$*" >> "$FG/pslog"
+    printf '%s\n' helper >> "$FG/eventlog"
+    [[ ! -f "$FG/helper_stderr" ]] || cat "$FG/helper_stderr" >&2
+    if [[ -f "$FG/compose-inventory.json" ]]; then
+      # No generic PowerShell passthrough: require this worktree's exact helper.
+      [[ "$script" == "$COMPOSE_HELPER" && -n "$REAL_PS" ]] || exit 97
+      args=("$@" -DryRun
+        -MockInventoryJson "$(cat "$FG/compose-inventory.json")"
+        -MockPackageJson "$(cat "$FG/compose-package.json")"
+        -MockRegistrationJson "$(cat "$FG/compose-registration.json")"
+        -MockForegroundProcess explorer -MockForegroundPath 'C:\Windows\explorer.exe')
+      printf '%s\0' "${args[@]}" > "$FG/compose-helper.args"
+      "$REAL_PS" "${args[@]}" > "$FG/compose-helper.out" 2>&1
+      rc=$?
+      printf '%s\n' "$rc" > "$FG/compose-helper.status"
+      cat "$FG/compose-helper.out"
+      exit "$rc"
+    fi
+    exit "$(cat "$FG/pscode" 2>/dev/null || echo 0)";;
+  *) echo "unexpected PowerShell script: $base" >&2; exit 97;;
+esac
 EOF
+sed -i "s|__FGDIR__|$FGDIR|g" "$BIN2/powershell.exe"
+[[ $? -eq 0 ]] || fatal "could not materialize foreground-policy PowerShell stub"
 cat > "$BIN2/codex" <<EOF
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "$FGDIR/codexargs.log"
 exit 0
 EOF
-chmod +x "$BIN2"/*
+[[ $? -eq 0 ]] || fatal "could not materialize foreground-policy codex tripwire"
+chmod +x "$BIN2"/* || fatal "could not make foreground-policy stubs executable"
+assert_stub_resolution "$BIN2"
 
-fgreset(){ # fgreset <client_mode> [inspect_mode] [pscode]
-  rm -f "$FGDIR"/send_count "$FGDIR"/nodeargs.log "$FGDIR"/pslog \
-        "$FGDIR"/observe_count "$FGDIR"/observe_args.log
+fgreset(){ # fgreset <client_mode> [inspect_mode] [pscode] [observe_mode] [policy_mode]
+  rm -f "$FGDIR"/send_count "$FGDIR"/inspect_count "$FGDIR"/nodeargs.log "$FGDIR"/pslog \
+        "$FGDIR"/observe_count "$FGDIR"/observe_args.log "$FGDIR"/policy_count \
+        "$FGDIR"/policylog "$FGDIR"/eventlog "$FGDIR"/policy_stderr "$FGDIR"/powershell_count \
+        "$FGDIR"/helper_stderr "$FGDIR"/no-client.json "$FGDIR"/client.args "$FGDIR"/compose-*
   echo "${1}" > "$FGDIR/client_mode"
   echo "${2:-ok}" > "$FGDIR/inspect_mode"
   echo "${3:-0}" > "$FGDIR/pscode"
   echo "${4:-rollout-hit}" > "$FGDIR/observe_mode"
+  echo "${5:-eligible-codex-uri}" > "$FGDIR/policy_mode"
 }
 fgrun(){ # fgrun <wrapper args...> -> OUT/RC (fast poll knobs; hermetic PATH)
   OUT="$( cd "$REPO" && CODEX_IPC_ROOT="$IPCROOT" CLAUDE_CODE_SESSION_ID="fgsess" \
@@ -378,6 +515,37 @@ assert_tax(){ # every RESULT line in $OUT must match the parser-compatible taxon
   bad="$(printf '%s\n' "$OUT" | grep '^RESULT:' | grep -vE "$TAX_RE" || true)"
   [[ -z "$bad" ]] && ok "$1: all RESULT lines parser-compatible" || { no "$1: non-conforming RESULT line"; printf '%s\n' "$bad"; }
 }
+fg_task_for(){
+  FG_TASKS=()
+  local file
+  while IFS= read -r file; do
+    grep -Fxq "$1" "$file" && FG_TASKS+=("$file")
+  done < <(find "$IPCROOT/fgsess/$UUIDF" -name '*.task.md' -type f 2>/dev/null)
+}
+assert_unsafe_refusal(){ # task text, exact result, expected inspection count
+  fg_task_for "$1"
+  [[ $RC -eq 1 && "${#FG_TASKS[@]}" -eq 1 ]] \
+    && printf '%s\n' "$OUT" | grep -Fxq "RESULT: $2 -- confirmation=not-attempted" \
+    && [[ "$(printf '%s\n' "$OUT" | grep -c '^RESULT:')" -eq 1 ]] \
+    && ! printf '%s\n' "$OUT" | grep -Eq '^(FALLBACK|    read |WAIT:|Open the thread)' \
+    && [[ "$(cat "$FGDIR/inspect_count" 2>/dev/null || echo 0)" -eq "$3" ]] \
+    && [[ ! -e "$FGDIR/policy_count" && ! -e "$FGDIR/send_count" \
+          && ! -e "$FGDIR/powershell_count" && ! -e "$FGDIR/pslog" \
+          && ! -e "$FGDIR/observe_count" && ! -e "$FGDIR/codexargs.log" ]] \
+    && ok "$1: one retained envelope, exact refusal, no pickup/WAIT or downstream contact" \
+    || no "$1: unsafe refusal containment failed (rc=$RC out=$OUT)"
+}
+assert_safe_pickup(){
+  fg_task_for "$1"
+  local path=""
+  [[ "${#FG_TASKS[@]}" -ne 1 ]] || path="$(cygpath -m "${FG_TASKS[0]}" 2>/dev/null || printf '%s' "${FG_TASKS[0]}")"
+  [[ -n "$path" ]] \
+    && printf '%s\n' "$OUT" | grep -Fxq "    read \"$path\" and proceed" \
+    && [[ "$(printf '%s\n' "$OUT" | grep -c '^    read ')" -eq 1 ]] \
+    && ! printf '%s\n' "$OUT" | grep -q '^WAIT:' \
+    && ok "$1: one safe pickup binds the retained envelope, without WAIT" \
+    || no "$1: safe pickup missing, duplicated, or unbound"
+}
 assert_no_codex_cli(){
   local bad
   bad="$(
@@ -387,21 +555,218 @@ assert_no_codex_cli(){
     || { no "a wrapper path invoked the Codex CLI"; printf '%s\n' "$bad"; }
 }
 
+echo "== 13b. shared host policy gates every live send =="
+for refusal in refuse-other:other-desktop-host-running refuse-missing:intended-host-not-running; do
+fgreset always-ok ok 0 rollout-hit "${refusal%%:*}"
+fgrun --ipc "$UUIDF" "t13b initial ${refusal%%:*}"
+[[ $RC -ne 0 ]] \
+  && printf '%s' "$OUT" | grep -q 'HOST-WARNING:' \
+  && printf '%s' "$OUT" | grep -Fxq "RESULT: gui-unowned -- reason=${refusal#*:} -- confirmation=not-attempted" \
+  && [[ "$(cat "$FGDIR/inspect_count" 2>/dev/null || echo 0)" == "1" ]] \
+  && [[ "$(cat "$FGDIR/policy_count" 2>/dev/null || echo 0)" == "1" ]] \
+  && [[ ! -f "$FGDIR/send_count" && ! -f "$FGDIR/pslog" && ! -f "$FGDIR/observe_count" ]] \
+  && [[ "$(tr '\n' ' ' < "$FGDIR/eventlog")" == 'inspect policy ' ]] \
+  && ok "initial host refusal happens after envelope publication and before client/helper contact" \
+  || no "initial host refusal escaped the pre-send gate (rc=$RC)"
+assert_safe_pickup "t13b initial ${refusal%%:*}"
+assert_tax "t13b-refusal"
+done
+
+fgreset always-fail ok 0 rollout-hit eligible-off
+fgrun --ipc "$UUIDF" "t13b default off"
+[[ $RC -ne 0 ]] \
+  && printf '%s' "$OUT" | grep -q 'RESULT: gui-unowned -- reason=autoload-disabled -- confirmation=not-attempted' \
+  && [[ "$(cat "$FGDIR/inspect_count" 2>/dev/null || echo 0)" == "1" ]] \
+  && [[ "$(cat "$FGDIR/policy_count" 2>/dev/null || echo 0)" == "1" ]] \
+  && [[ "$(cat "$FGDIR/send_count" 2>/dev/null || echo 0)" == "1" ]] \
+  && [[ ! -f "$FGDIR/pslog" ]] \
+  && [[ "$(tr '\n' ' ' < "$FGDIR/eventlog")" == 'inspect policy client ' ]] \
+  && ok "default-off exact no-client uses one preflight, then stops without activation or retry" \
+  || no "default-off no-client path activated or retried (rc=$RC)"
+assert_tax "t13b-default-off"
+assert_safe_pickup "t13b default off"
+
+# The first inventory permits the exact no-client send; the real recovery helper
+# then sees changed synthetic inventory and refuses before foreground handling.
+if [[ "$OSTYPE" == msys* || "$OSTYPE" == cygwin* || "${OS:-}" == Windows_NT ]]; then
+  [[ -n "$REAL_PS" ]] || fatal "Windows recovery composition requires real powershell.exe"
+  COMPOSE_HELPER="$(cygpath -m "$(dirname "$SCRIPT")/codex_ipc_autoload.ps1")"
+  COMPOSE_PARENT_ROOT="$IPCROOT"
+  for recovery in alternate empty; do
+    fgreset always-fail ok 0 rollout-hit eligible-codex-uri
+    IPCROOT="$TMP/recovery-$recovery/ipc"
+    recovery_home="$TMP/recovery-$recovery/home"
+    mkdir -p "$IPCROOT" "$recovery_home" || fatal "could not isolate recovery case"
+    if [[ "$recovery" == alternate ]]; then
+      printf '%s\n' '{"complete":true,"packageRootsComplete":true,"packageRoots":[],"errors":[],"processes":[{"pid":201,"parentPid":1,"name":"ChatGPT.exe","executable":"C:\\Alt\\Host\\ChatGPT.exe"}]}' > "$FGDIR/compose-inventory.json"
+    else
+      printf '%s\n' '{"complete":true,"packageRootsComplete":true,"packageRoots":[],"errors":[],"processes":[]}' > "$FGDIR/compose-inventory.json"
+    fi
+    printf '%s\n' '{"state":"clear","runningPackageFullName":"OpenAI.Codex_26.707.3563.0_x64__2p2nqsd0c76g0","runningVersion":"26.707.3563.0","higherVersions":[],"evidence":"mock"}' > "$FGDIR/compose-package.json"
+    printf '%s\n' '{"state":"matches","handler":"AppXcodex","packageFullName":"OpenAI.Codex_26.707.3563.0_x64__2p2nqsd0c76g0","evidence":"mock"}' > "$FGDIR/compose-registration.json"
+    OUT="$( cd "$REPO" && env -u CODEX_IPC_AUTOLOAD -u CODEX_IPC_INTENDED_HOST \
+      -u CODEX_IPC_FOREGROUND_POLICY -u CODEX_IPC_FOREGROUND_SWITCH_STANDING_APPROVAL \
+      -u NODE_OPTIONS -u NODE_PATH -u BASH_ENV -u ENV \
+      HOME="$recovery_home" USERPROFILE="$recovery_home" \
+      TEMP="$recovery_home" TMP="$recovery_home" TMPDIR="$recovery_home" \
+      CODEX_IPC_ROOT="$IPCROOT" CODEX_IPC_RETENTION_DAYS=0 CLAUDE_CODE_SESSION_ID=fgsess \
+      REAL_PS="$REAL_PS" COMPOSE_HELPER="$COMPOSE_HELPER" PATH="$BIN2:$PATH" \
+      bash "$SCRIPT" --ipc "$UUIDF" --autoload codex-uri --intended-host package -- \
+      "t13b composed $recovery" 2>&1 )"; RC=$?
+    reason_tokens='send-ineligible,intended-host-not-running'
+    [[ "$recovery" != alternate ]] || reason_tokens+=',other-desktop-host-running'
+    [[ $RC -eq 1 ]] \
+      && printf '%s\n' "$OUT" | grep -Fxq 'RESULT: gui-unowned -- reason=autoload-policy-refused -- confirmation=not-attempted' \
+      && [[ "$(printf '%s\n' "$OUT" | grep -c '^RESULT:')" -eq 1 ]] \
+      && [[ "$(cat "$FGDIR/compose-helper.status" 2>/dev/null)" == 6 ]] \
+      && tr -s '[:space:]' ' ' < "$FGDIR/compose-helper.out" | grep -Fq "phase=pre-foreground reason=send-ineligible reasons=$reason_tokens" \
+      && ! grep -Eq 'action=(switch-deeplink|deeplink-snapback)' "$FGDIR/compose-helper.out" \
+      && ! printf '%s\n' "$OUT" | grep -Eq 'ACTION:|C:\\Alt\\Host' \
+      && [[ "$(cat "$FGDIR/inspect_count")" == 1 && "$(cat "$FGDIR/policy_count")" == 1 \
+            && "$(cat "$FGDIR/send_count")" == 1 && "$(cat "$FGDIR/powershell_count")" == 2 \
+            && ! -e "$FGDIR/observe_count" && ! -e "$FGDIR/codexargs.log" ]] \
+      && [[ "$(tr '\n' ' ' < "$FGDIR/eventlog")" == 'inspect policy client helper ' ]] \
+      && ok "$recovery recovery: real helper exit 6 at pre-foreground, one send, no retry/observer/activation" \
+      || no "$recovery recovery composition failed (rc=$RC helper=$(cat "$FGDIR/compose-helper.out" 2>/dev/null) out=$OUT)"
+    "$REAL_NODE" - "$FGDIR/compose-helper.args" "$FGDIR/no-client.json" "$UUIDF" "$FGDIR/client.args" "$IPCROOT" \
+      "$FGDIR/compose-inventory.json" "$FGDIR/compose-package.json" "$FGDIR/compose-registration.json" <<'NODE'
+const fs = require("node:fs");
+const path = require("node:path");
+const [argsPath, responsePath, thread, clientPath, ipcRoot, ...mockPaths] = process.argv.slice(2);
+const args = fs.readFileSync(argsPath, "utf8").split("\0").filter(Boolean);
+const one = (flag) => args.filter((item) => item === flag).length === 1;
+const value = (flag) => one(flag) ? args[args.indexOf(flag) + 1] : undefined;
+const response = JSON.parse(fs.readFileSync(responsePath, "utf8"));
+const follower = response.sentRequests?.[0];
+const client = fs.readFileSync(clientPath, "utf8").split("\0").filter(Boolean);
+const clientValue = (flag) => client.filter((arg) => arg === flag).length === 1 ? client[client.indexOf(flag) + 1] : undefined;
+const pickup = /^read "(.+\.task\.md)" and proceed$/.exec(clientValue("--task") ?? "");
+if (!one("-DryRun") || value("-ConversationId") !== thread || value("-Autoload") !== "codex-uri" ||
+    value("-IntendedHost") !== "package" || value("-MockForegroundProcess") !== "explorer" ||
+    path.resolve(value("-IpcRoot") ?? "") !== path.resolve(ipcRoot) || clientValue("--thread") !== thread ||
+    !pickup || path.dirname(path.resolve(pickup[1])) !== path.resolve(ipcRoot, "fgsess", thread) || !fs.existsSync(pickup[1]) ||
+    value("-MockForegroundPath") !== "C:\\Windows\\explorer.exe" ||
+    !["-MockInventoryJson", "-MockPackageJson", "-MockRegistrationJson"].every((flag, i) =>
+      value(flag) === fs.readFileSync(mockPaths[i], "utf8").trim()) ||
+    response.ok !== false || response.targetThreadId !== thread || response.sentRequests.length !== 1 ||
+    follower?.name !== "thread-follower-start-turn" || follower?.json?.method !== "thread-follower-start-turn" ||
+    follower?.json?.params?.conversationId !== thread || response.response?.resultType !== "error" ||
+    response.response?.error !== "no-client-found") process.exit(1);
+NODE
+    [[ $? -eq 0 ]] && ok "$recovery recovery binds exact no-client, thread, DryRun and all mock arguments" \
+      || no "$recovery recovery lost its exact transport/mock binding"
+    assert_safe_pickup "t13b composed $recovery"
+    printf '  EVIDENCE: recovery=%s helper-exit=%s events=%s reasons=%s\n' \
+      "$recovery" "$(cat "$FGDIR/compose-helper.status")" "$(tr '\n' ',' < "$FGDIR/eventlog")" "$reason_tokens"
+    sha256sum "$FGDIR/no-client.json" "$FGDIR/compose-inventory.json" "$FGDIR/compose-helper.args" "$FGDIR/compose-helper.out"
+    IPCROOT="$COMPOSE_PARENT_ROOT"
+  done
+else
+  echo "PLATFORM: Windows recovery composition inapplicable here; real helper rows not executed or counted as PASS."
+fi
+
+fgreset always-fail ok 0 rollout-hit eligible-alt-uri
+fgrun --ipc "$UUIDF" --autoload codex-uri --intended-host 'C:\Alt\Host\ChatGPT.exe' -- "t13b alternate no-client"
+[[ $RC -eq 1 ]] \
+  && printf '%s\n' "$OUT" | grep -Fxq 'RESULT: gui-unowned -- reason=protocol-host-not-package -- confirmation=not-attempted' \
+  && [[ "$(cat "$FGDIR/send_count")" == 1 && ! -e "$FGDIR/pslog" && ! -e "$FGDIR/observe_count" ]] \
+  && [[ "$(tr '\n' ' ' < "$FGDIR/eventlog")" == 'inspect policy client ' ]] \
+  && ok "alternate-host exact no-client refuses protocol activation before helper/retry" \
+  || no "alternate-host no-client recovery escaped containment (rc=$RC out=$OUT)"
+assert_safe_pickup "t13b alternate no-client"
+
+fgreset fail-then-ok ok 0 rollout-hit change-on-retry
+fgrun --ipc "$UUIDF" "t13b retry recheck"
+[[ $RC -ne 0 ]] \
+  && printf '%s' "$OUT" | grep -q 'RESULT: gui-unowned -- reason=other-desktop-host-running -- confirmation=not-attempted' \
+  && [[ "$(cat "$FGDIR/policy_count" 2>/dev/null || echo 0)" == "2" ]] \
+  && [[ "$(cat "$FGDIR/inspect_count" 2>/dev/null || echo 0)" == "1" ]] \
+  && [[ "$(cat "$FGDIR/send_count" 2>/dev/null || echo 0)" == "1" ]] \
+  && [[ "$(grep -c '^helper$' "$FGDIR/eventlog" 2>/dev/null || echo 0)" == "1" ]] \
+  && [[ "$(tr '\n' ' ' < "$FGDIR/eventlog")" == 'inspect policy client helper policy ' ]] \
+  && ok "retry rechecks host policy while reusing the one target inspection" \
+  || no "retry used stale policy/router state (rc=$RC; events=$(tr '\n' ' ' < "$FGDIR/eventlog" 2>/dev/null))"
+assert_tax "t13b-retry-refusal"
+
+for policy_case in malformed empty invalid-report nonzero-ok; do
+  fgreset always-ok ok 0 rollout-hit "$policy_case"
+  fgrun --ipc "$UUIDF" "t13b $policy_case"
+  want_reason=host-policy-invalid
+  [[ "$policy_case" == nonzero-ok ]] && want_reason=host-policy-unavailable
+  [[ $RC -ne 0 ]] \
+    && printf '%s' "$OUT" | grep -q "reason=${want_reason}" \
+    && [[ "$(cat "$FGDIR/inspect_count" 2>/dev/null || echo 0)" == "1" ]] \
+    && [[ ! -f "$FGDIR/send_count" && ! -f "$FGDIR/pslog" ]] \
+    && ok "$policy_case policy output refuses before contact" \
+    || no "$policy_case policy output reached client/helper (rc=$RC)"
+  assert_tax "t13b-$policy_case"
+done
+
+PRIVATE_DIAGNOSTIC='PRIVATE-DIAGNOSTIC-C:\PrivateFixture\RenamedDesktop.exe'
+fgreset always-ok ok 0 rollout-hit eligible-off
+printf '%s\n' "$PRIVATE_DIAGNOSTIC" > "$FGDIR/policy_stderr"
+fgrun --ipc "$UUIDF" "t13b policy diagnostic privacy"
+[[ $RC -eq 0 ]] \
+  && printf '%s' "$OUT" | grep -q 'HOST-WARNING: host policy diagnostics were suppressed' \
+  && ! printf '%s' "$OUT" | grep -Fq "$PRIVATE_DIAGNOSTIC" \
+  && ok "policy diagnostics cannot disclose a private executable path" \
+  || no "policy diagnostics exposed private content (rc=$RC)"
+assert_tax "t13b-policy-privacy"
+
+fgreset always-fail ok 6 rollout-hit eligible-codex-uri
+printf '%s\n' "$PRIVATE_DIAGNOSTIC" > "$FGDIR/helper_stderr"
+fgrun --ipc "$UUIDF" "t13b helper diagnostic privacy"
+[[ $RC -ne 0 ]] \
+  && printf '%s' "$OUT" | grep -q 'RESULT: gui-unowned -- reason=autoload-policy-refused -- confirmation=not-attempted' \
+  && ! printf '%s' "$OUT" | grep -Fq "$PRIVATE_DIAGNOSTIC" \
+  && ok "helper diagnostics cannot disclose a private executable path" \
+  || no "helper diagnostics exposed private content (rc=$RC)"
+assert_tax "t13b-helper-privacy"
+
+fgreset always-ok ok 0 rollout-hit eligible-alt-uri
+fgrun --ipc "$UUIDF" --autoload codex-uri --intended-host 'C:\Alt\Host\ChatGPT.exe' -- "t13b explicit host flags"
+[[ $RC -eq 0 ]] \
+  && printf '%s' "$OUT" | grep -q 'POLICY: autoload=codex-uri (source: flag) intended-host=alternate (source: flag)' \
+  && grep -Fq -- '-Autoload codex-uri' "$FGDIR/policylog" \
+  && grep -Fq -- '-IntendedHost C:\Alt\Host\ChatGPT.exe' "$FGDIR/policylog" \
+  && grep -Fq -- '-IpcRoot ' "$FGDIR/policylog" \
+  && ok "explicit host flags and IPC root reach the shared policy with sources disclosed" \
+  || no "host configuration plumbing/source disclosure failed (rc=$RC)"
+[[ "$(cat "$FGDIR/send_count" 2>/dev/null || echo 0)" == "1" ]] \
+  && [[ ! -f "$FGDIR/pslog" ]] \
+  && ok "activation-only alternate-host uncertainty does not block an owned-thread send" \
+  || no "alternate-host owned send was blocked by activation-only evidence"
+assert_tax "t13b-explicit-flags"
+
+fgreset fail-then-ok ok 0 rollout-hit eligible-codex-uri
+fgrun --ipc "$UUIDF" --autoload codex-uri -- "t13b fresh allowed retry"
+[[ $RC -eq 0 ]] \
+  && [[ "$(tr '\n' ' ' < "$FGDIR/eventlog")" == 'inspect policy client helper policy client observe ' ]] \
+  && ok "allowed retry order is inspect, policy, client, helper, fresh policy, client, observe" \
+  || no "allowed retry lacks an immediately preceding fresh policy (rc=$RC; events=$(tr '\n' ' ' < "$FGDIR/eventlog" 2>/dev/null))"
+assert_tax "t13b-fresh-retry"
+
 echo "== 14. default policy defer: foreground-Codex deferral is explicit =="
 fgreset always-fail ok 2
 fgrun --ipc "$UUIDF" "t14 defer"
 [[ $RC -ne 0 ]] && printf '%s' "$OUT" | grep -q "RESULT: gui-unowned -- reason=codex-foreground-deferred -- confirmation=not-attempted" && ok "defer -> gui-unowned/codex-foreground-deferred" || no "defer subreason wrong (rc=$RC)"
+printf '%s' "$OUT" | grep -q "Router answered no-client-found for thread ${UUIDF}; this token has several possible causes." \
+  && ! printf '%s' "$OUT" | grep -q 'is not loaded in Codex Desktop' \
+  && ok "no-client message reports the router token without inferring load state" \
+  || no "no-client message retained the rejected load-state inference"
 printf '%s' "$OUT" | grep -q "POLICY: foreground=defer (source: default) ack=none" && ok "active policy printed" || no "policy line missing"
+! printf '%s' "$OUT" | grep -q 'codex://threads/' && ok "deferral output gives no manual protocol-activation instruction" || no "deferral output recommends manual protocol activation"
+printf '%s' "$OUT" | grep -Fq "Open the thread in your intended Desktop host's window, then paste:" && ok "deferral assigns thread opening to the operator's intended host" || no "deferral omits the operator-owned thread-opening instruction"
 [[ -n "$(find "$IPCROOT/fgsess/$UUIDF" -name '*.task.md' 2>/dev/null)" ]] && ok "envelope written before deferral" || no "envelope missing on deferral"
 assert_tax "t14"
 
 echo "== 15. switch without ack: fails closed BEFORE any live IPC =="
 fgreset always-fail ok 0
 fgrun --ipc "$UUIDF" --foreground-policy switch -- "t15 switch no ack"
-[[ $RC -ne 0 ]] && printf '%s' "$OUT" | grep -q "reason=foreground-switch-unacknowledged" && ok "switch-no-ack fails closed" || no "switch-no-ack (rc=$RC)"
+[[ $RC -ne 0 ]] && printf '%s' "$OUT" | grep -q "RESULT: gui-unowned -- reason=foreground-switch-unacknowledged -- confirmation=not-attempted" && ok "switch-no-ack refuses as gui-unowned" || no "switch-no-ack (rc=$RC)"
 [[ ! -f "$FGDIR/nodeargs.log" ]] && ok "no live send attempted" || no "live send attempted despite missing ack"
 [[ ! -f "$FGDIR/pslog" ]] && ok "no autoload attempted" || no "autoload attempted despite missing ack"
-printf '%s' "$OUT" | grep -qx 'FALLBACK -- file-drop is ready. In your Codex session, paste:' && ok "fallback preserved" || no "fallback line missing"
+assert_unsafe_refusal "t15 switch no ack" "gui-unowned -- reason=foreground-switch-unacknowledged" 0
 assert_tax "t15"
 
 echo "== 16. switch with ack: autoload gets policy args; delivery reports foreground-switched =="
@@ -510,16 +875,176 @@ fgrun --ipc "$UUIDF" --foreground-policy bogus -- "t19 invalid policy"
 tf19=""; while IFS= read -r f; do grep -qx "t19 invalid policy" "$f" && { tf19="$f"; break; }; done < <(find "$IPCROOT/fgsess" -name '*.task.md' 2>/dev/null)
 [[ -n "$tf19" ]] && ok "envelope written before policy failure" || no "envelope missing on policy failure"
 assert_tax "t19"
+assert_unsafe_refusal "t19 invalid policy" "failed-closed -- reason=invalid-foreground-policy" 0
 
-echo "== 20. inspection ambiguity: six refusals, all before autoload =="
-for m in notfound:target-not-found okarchived:target-archived positive-exit2:target-inspection-ambiguous malformed:target-inspection-ambiguous empty:target-inspection-ambiguous stderr:target-inspection-ambiguous; do
+echo "== 19b. Node availability refusal precedes inspection and suppresses pickup =="
+fgreset always-ok ok 0
+NODE_ENV="$TMP/node-unavailable.sh"
+cat > "$NODE_ENV" <<'EOF'
+command() {
+  if [[ "$#" -eq 2 && "$1" == -v && "$2" == node ]]; then
+    builtin printf 'node-unavailable\n' >> "$NODE_LOOKUP_LOG"
+    return 1
+  fi
+  builtin command "$@"
+}
+EOF
+NODE_LOOKUP_LOG="$FGDIR/node-lookup.log" BASH_ENV="$NODE_ENV" \
+  fgrun --ipc "$UUIDF" -- "t19b node unavailable"
+[[ -s "$FGDIR/node-lookup.log" ]] && ok "Node-unavailable command lookup shim was exercised" \
+  || no "Node-unavailable branch was not reached"
+assert_unsafe_refusal "t19b node unavailable" "failed-closed -- reason=node-unavailable" 0
+
+echo "== 20. target preflight refuses unsafe identity/model state before any send gate =="
+for m in \
+  notfound:target-not-found \
+  okarchived:target-archived \
+  positive-exit2:target-inspection-ambiguous \
+  malformed:target-inspection-ambiguous \
+  empty:target-inspection-ambiguous \
+  stderr:target-inspection-ambiguous \
+  child:target-non-root \
+  guardian:target-non-root \
+  source-child:target-non-root \
+  ambiguous:target-inspection-ambiguous \
+  model-null:target-model-empty \
+  model-empty:target-model-empty \
+  model-space:target-model-empty; do
     imode="${m%%:*}"; want="${m##*:}"
-    fgreset always-fail "$imode" 0
+    fgreset always-ok "$imode" 0
     fgrun --ipc "$UUIDF" "t20 $imode"
-    [[ $RC -ne 0 ]] && printf '%s' "$OUT" | grep -q "reason=${want}" && [[ ! -f "$FGDIR/pslog" ]] \
-        && ok "inspect=$imode -> $want, no deep-link" || no "inspect=$imode (rc=$RC, want $want)"
+    parent_ok=1
+    if [[ "$imode" == child ]]; then
+      printf '%s' "$OUT" | grep -q 'Target parent thread: 22222222-2222-4222-8222-222222222222' || parent_ok=0
+    fi
+    [[ $RC -ne 0 ]] \
+      && printf '%s' "$OUT" | grep -q "RESULT: failed-closed -- reason=${want} -- confirmation=not-attempted" \
+      && ! printf '%s' "$OUT" | grep -Eq '^(FALLBACK|    read |Open the thread)' \
+      && ! printf '%s' "$OUT" | grep -q '^WAIT:' \
+      && [[ "$parent_ok" -eq 1 ]] \
+      && [[ "$(cat "$FGDIR/inspect_count" 2>/dev/null || echo 0)" == "1" ]] \
+      && [[ ! -f "$FGDIR/policy_count" && ! -f "$FGDIR/send_count" \
+            && ! -f "$FGDIR/pslog" && ! -f "$FGDIR/observe_args.log" ]] \
+      && [[ "$(tr '\n' ' ' < "$FGDIR/eventlog")" == 'inspect ' ]] \
+      && ok "inspect=$imode -> $want before policy/client/helper" \
+      || no "inspect=$imode escaped the pre-send refusal (rc=$RC, want=$want, events=$(tr '\n' ' ' < "$FGDIR/eventlog" 2>/dev/null))"
+    assert_unsafe_refusal "t20 $imode" "failed-closed -- reason=$want" 1
 done
 assert_tax "t20"
+
+fgreset always-ok legacy 0 rollout-hit eligible-off
+fgrun --ipc "$UUIDF" "t20 legacy root"
+[[ $RC -eq 0 ]] \
+  && printf '%s' "$OUT" | grep -q 'TARGET-WARNING: legacy thread has no source classification; root status was assumed only because all available child indicators were absent.' \
+  && printf '%s' "$OUT" | grep -q 'RESULT: gui-delivered -- reason=renderer-owned -- confirmation=rollout-hit' \
+  && [[ "$(cat "$FGDIR/inspect_count" 2>/dev/null || echo 0)" == "1" ]] \
+  && [[ "$(tr '\n' ' ' < "$FGDIR/eventlog")" == 'inspect policy client observe ' ]] \
+  && ok "legacy-root-assumed warns, inspects once, and may continue" \
+  || no "legacy-root-assumed was rejected, silent, or re-inspected (rc=$RC)"
+assert_tax "t20-legacy"
+
+echo "== 20b. thread-bound manual delivery prepares pickup + WAIT without live contact =="
+fgreset always-ok page 0 rollout-hit eligible-codex-uri
+OUT="$( cd "$REPO" && CODEX_IPC_ROOT="$IPCROOT" CLAUDE_CODE_SESSION_ID="fgsess" \
+    CODEX_IPC_FOREGROUND_POLICY=bogus CODEX_IPC_AUTOLOAD=bogus \
+    CODEX_IPC_INTENDED_HOST=bogus-relative-host CODEX_IPC_FOREGROUND_SWITCH_STANDING_APPROVAL=1 \
+    PATH="$BIN2:$PATH" bash "$SCRIPT" --ipc "$UUIDF" --deliver manual --request-goal -- "t20b manual page" 2>&1 )"; RC=$?
+manual_task=""; while IFS= read -r f; do grep -qx "t20b manual page" "$f" && { manual_task="$f"; break; }; done < <(find "$IPCROOT/fgsess/$UUIDF" -name '*.task.md' 2>/dev/null)
+[[ $RC -eq 0 && -n "$manual_task" ]] \
+  && printf '%s\n' "$OUT" | grep -q "Open the thread in your intended Desktop host's window, then paste:" \
+  && printf '%s\n' "$OUT" | grep -Eq '^    read ".*\.task\.md" and proceed$' \
+  && printf '%s\n' "$OUT" | grep -q '^WAIT: node ' \
+  && printf '%s\n' "$OUT" | grep -q -- "--thread $UUIDF" \
+  && printf '%s\n' "$OUT" | grep -q -- '--reply-path ' \
+  && printf '%s\n' "$OUT" | grep -q -- "--rollout-path C:/ipc-fixture/rollout-current-$UUIDF.jsonl" \
+  && printf '%s\n' "$OUT" | grep '^WAIT:' | grep -Fq -- '--sessions-root C:/ipc-fixture' \
+  && ! printf '%s\n' "$OUT" | grep -Eq '^(POLICY:|RESULT:|Injecting pickup|\[ Delivered)' \
+  && [[ "$(cat "$FGDIR/inspect_count" 2>/dev/null || echo 0)" == "1" ]] \
+  && [[ ! -f "$FGDIR/send_count" && ! -f "$FGDIR/powershell_count" \
+        && ! -f "$FGDIR/observe_count" && ! -f "$FGDIR/pslog" ]] \
+  && [[ "$(tr '\n' ' ' < "$FGDIR/eventlog")" == 'inspect ' ]] \
+  && ok "manual delivery ignores ambient live policy, inspects once, and prepares thread-bound recovery" \
+  || no "manual delivery contacted a live surface or omitted its pickup/wait contract (rc=$RC events=$(tr '\n' ' ' < "$FGDIR/eventlog" 2>/dev/null))"
+[[ -n "$manual_task" ]] && grep -Fq 'Read the **Task** below, set your `/goal` to a concise summary of it, then complete it' "$manual_task" \
+  && ok "manual delivery preserves the opt-in goal request inside the ordinary envelope" \
+  || no "manual delivery changed or lost the request-goal payload"
+
+echo "== 20c. manual delivery without an authoritative page gives fixed guidance =="
+fgreset always-ok ok 0 rollout-hit eligible-codex-uri
+fgrun --ipc "$UUIDF" --deliver manual -- "t20c manual unknown page"
+[[ $RC -eq 0 ]] \
+  && printf '%s\n' "$OUT" | grep -Fxq "ROLLOUT-PATH: Supply the inspector's database-designated page with --rollout-path <path>." \
+  && [[ "$(printf '%s\n' "$OUT" | grep '^WAIT:' | grep -c -- '--rollout-path' || true)" == "0" ]] \
+  && [[ "$(printf '%s\n' "$OUT" | grep -c '^WAIT:')" == "1" ]] \
+  && [[ ! -f "$FGDIR/send_count" && ! -f "$FGDIR/powershell_count" && ! -f "$FGDIR/observe_count" ]] \
+  && ok "manual delivery omits an unproven page and tells the operator how to bind one" \
+  || no "manual delivery guessed a rollout page or omitted fixed guidance (rc=$RC)"
+
+echo "== 20d. unsafe manual targets retain the envelope but print no actionable pickup =="
+for m in \
+  notfound:target-not-found \
+  okarchived:target-archived \
+  child:target-non-root \
+  model-empty:target-model-empty \
+  ambiguous:target-inspection-ambiguous; do
+    imode="${m%%:*}"; want="${m##*:}"; task="t20d manual $imode"
+    fgreset always-ok "$imode" 0
+    fgrun --ipc "$UUIDF" --deliver manual -- "$task"
+    kept=""; while IFS= read -r f; do grep -qx "$task" "$f" && { kept="$f"; break; }; done < <(find "$IPCROOT/fgsess/$UUIDF" -name '*.task.md' 2>/dev/null)
+    parent_ok=1
+    if [[ "$imode" == child ]]; then
+      printf '%s' "$OUT" | grep -q 'Target parent thread: 22222222-2222-4222-8222-222222222222' || parent_ok=0
+    fi
+    [[ $RC -ne 0 && -n "$kept" ]] \
+      && printf '%s\n' "$OUT" | grep -Fxq "ERROR: manual delivery refused -- reason=${want}" \
+      && ! printf '%s\n' "$OUT" | grep -Eq '^(POLICY:|RESULT:|WAIT:|    read |FALLBACK )' \
+      && [[ "$parent_ok" -eq 1 ]] \
+      && [[ "$(cat "$FGDIR/inspect_count" 2>/dev/null || echo 0)" == "1" ]] \
+      && [[ ! -f "$FGDIR/send_count" && ! -f "$FGDIR/powershell_count" \
+            && ! -f "$FGDIR/observe_count" && ! -f "$FGDIR/pslog" ]] \
+      && [[ "$(tr '\n' ' ' < "$FGDIR/eventlog")" == 'inspect ' ]] \
+      && ok "manual inspect=$imode -> retained envelope + $want without actionable output" \
+      || no "manual inspect=$imode escaped refusal containment (rc=$RC out=$OUT)"
+done
+
+echo "== 20e. manual delivery rejects explicit live-only options before publication =="
+for conflict in autoload intended-host foreground-policy foreground-ack repeated-deliver; do
+  sid="fgconf-$conflict"; task="t20e conflict $conflict"; extra=()
+  case "$conflict" in
+    autoload) extra=(--autoload off);;
+    intended-host) extra=(--intended-host package);;
+    foreground-policy) extra=(--foreground-policy defer);;
+    foreground-ack) extra=(--ack-foreground-switch);;
+    repeated-deliver) extra=(--deliver live);;
+  esac
+  fgreset always-ok ok 0
+  OUT="$( cd "$REPO" && CODEX_IPC_ROOT="$IPCROOT" CLAUDE_CODE_SESSION_ID="$sid" \
+      PATH="$BIN2:$PATH" bash "$SCRIPT" --ipc "$UUIDF" --deliver manual "${extra[@]}" -- "$task" 2>&1 )"; RC=$?
+  [[ $RC -ne 0 ]] \
+    && printf '%s\n' "$OUT" | grep -q '^ERROR: ' \
+    && [[ ! -e "$IPCROOT/$sid" ]] \
+    && [[ ! -f "$FGDIR/inspect_count" && ! -f "$FGDIR/send_count" && ! -f "$FGDIR/powershell_count" ]] \
+    && ok "manual conflict $conflict fails before envelope and child execution" \
+    || no "manual conflict $conflict was accepted or wrote state (rc=$RC out=$OUT)"
+done
+
+echo "== 20f. explicit live delivery preserves foreground refusal precedence =="
+fgreset always-ok child 0
+fgrun --ipc "$UUIDF" --deliver live --foreground-policy bogus -- "t20f invalid live policy"
+[[ $RC -ne 0 ]] \
+  && printf '%s\n' "$OUT" | grep -q 'reason=invalid-foreground-policy' \
+  && [[ ! -f "$FGDIR/inspect_count" && ! -f "$FGDIR/send_count" && ! -f "$FGDIR/powershell_count" ]] \
+  && ok "explicit live invalid-policy refusal still precedes inspection" \
+  || no "explicit live invalid policy lost its precedence (rc=$RC out=$OUT)"
+assert_unsafe_refusal "t20f invalid live policy" "failed-closed -- reason=invalid-foreground-policy" 0
+fgreset always-ok child 0
+fgrun --ipc "$UUIDF" --deliver live --foreground-policy switch -- "t20f live switch no ack"
+[[ $RC -ne 0 ]] \
+  && printf '%s\n' "$OUT" | grep -q 'reason=foreground-switch-unacknowledged' \
+  && [[ ! -f "$FGDIR/inspect_count" && ! -f "$FGDIR/send_count" && ! -f "$FGDIR/powershell_count" ]] \
+  && ok "explicit live switch acknowledgement refusal still precedes inspection" \
+  || no "explicit live switch refusal lost its precedence (rc=$RC out=$OUT)"
+assert_unsafe_refusal "t20f live switch no ack" "gui-unowned -- reason=foreground-switch-unacknowledged" 0
 
 echo "== 21. autoload ok but retry never succeeds: gui-unowned, not gui-delivered =="
 fgreset always-fail ok 0
@@ -531,7 +1056,14 @@ assert_tax "t21"
 echo "== 22. default-policy auto-load delivery still works (reason=auto-loaded) =="
 fgreset fail-then-ok ok 0
 fgrun --ipc "$UUIDF" "t22 autoload delivery"
-[[ $RC -eq 0 ]] && printf '%s' "$OUT" | grep -q "RESULT: gui-delivered -- reason=auto-loaded -- confirmation=rollout-hit" && ok "auto-loaded delivery observed" || no "auto-loaded delivery (rc=$RC)"
+[[ $RC -eq 0 ]] \
+  && printf '%s' "$OUT" | grep -q "RESULT: gui-delivered -- reason=auto-loaded -- confirmation=rollout-hit" \
+  && [[ "$(cat "$FGDIR/inspect_count" 2>/dev/null || echo 0)" == "1" ]] \
+  && [[ "$(cat "$FGDIR/policy_count" 2>/dev/null || echo 0)" == "2" ]] \
+  && [[ "$(cat "$FGDIR/send_count" 2>/dev/null || echo 0)" == "2" ]] \
+  && [[ "$(tr '\n' ' ' < "$FGDIR/eventlog")" == 'inspect policy client helper policy client observe ' ]] \
+  && ok "auto-loaded delivery rechecks host policy, reuses one inspection, and observes after retry" \
+  || no "auto-loaded delivery order/count drifted (rc=$RC; events=$(tr '\n' ' ' < "$FGDIR/eventlog" 2>/dev/null))"
 assert_tax "t22"
 
 echo "== 22b. malformed exit-zero success after autoload is retry-ambiguous =="
@@ -605,6 +1137,24 @@ fgrun --ipc "$UUIDF" "t27 pending no resend"
     && ok "pending adds one observation and no resend" || no "pending send/observe count"
 assert_tax "t27"
 
+echo "== 27b. DB-designated rollout page and discovery scope reach observer and WAIT on both accepted routes =="
+for client_mode in always-ok fail-then-ok; do
+    fgreset "$client_mode" page 0 rollout-pending
+    fgrun --ipc "$UUIDF" "t27b page propagation $client_mode"
+    expected_page="C:/ipc-fixture/rollout-current-$UUIDF.jsonl"
+    [[ $RC -eq 0 ]] \
+        && grep -Fq -- "--rollout-path $expected_page" "$FGDIR/observe_args.log" \
+        && grep -Fq -- "--sessions-root C:/ipc-fixture" "$FGDIR/observe_args.log" \
+        && printf '%s\n' "$OUT" | grep -Fq -- "--rollout-path $expected_page" \
+        && printf '%s\n' "$OUT" | grep '^WAIT:' | grep -Fq -- "--sessions-root C:/ipc-fixture" \
+        && ok "$client_mode propagates the normalized DB page and scope to observer and WAIT" \
+        || no "$client_mode lost the DB page or scope (rc=$RC, args=$(cat "$FGDIR/observe_args.log" 2>/dev/null))"
+    [[ "$(cat "$FGDIR/inspect_count" 2>/dev/null || echo 0)" == "1" ]] \
+        && ok "$client_mode reuses one inspector page snapshot" \
+        || no "$client_mode repeated the inspector while propagating the page"
+    assert_tax "t27b-$client_mode"
+done
+
 echo "== 28. auto-load poll knobs reject zero/malformed values with visible fallback =="
 fgknobrun(){ # fgknobrun <deadline> <interval> <client_mode> <task>
   local deadline="$1" interval="$2" client_mode="$3" task="$4"
@@ -645,7 +1195,7 @@ echo "== 30. injected session id is contained to one segment under the transport
 # Regression: CLAUDE_SESSION_ID becomes a path segment, so a dot segment or separator wrote the
 # envelope OUTSIDE CODEX_IPC_ROOT (audit A-02). Fail closed; never sanitize silently.
 SIDROOT="$TMP/sidroot"; mkdir -p "$SIDROOT/root"
-sid_run(){ ( cd "$NOREPO" && CODEX_IPC_ROOT="$SIDROOT/root" CLAUDE_SESSION_ID="$1" bash "$SCRIPT" "sid containment" >/dev/null 2>&1 ); }
+sid_run(){ ( cd "$NOREPO" && CODEX_IPC_ROOT="$SIDROOT/root" CLAUDE_SESSION_ID="$1" PATH="$BIN:$PATH" bash "$SCRIPT" "sid containment" >/dev/null 2>&1 ); }
 esc=0
 for bad in '../escape' '..' 'a/b' 'a\b' '/abs'; do
     sid_run "$bad" && esc=1
@@ -681,6 +1231,29 @@ assert_recovery_guidance(){ # $1 payload, $2 carrier label
   fi
 }
 
+assert_default_goal_free(){ # $1 payload, $2 carrier label
+  local payload="$1" carrier="$2"
+  if [[ -n "$payload" ]] \
+    && grep -Fq 'Read the **Task** below, then complete it' "$payload" \
+    && ! grep -Fq 'set your `/goal`' "$payload"; then
+    ok "$carrier payload leaves goal setup off by default"
+  else
+    no "$carrier payload still requests goal setup by default"
+  fi
+}
+
+assert_requested_goal(){ # $1 payload, $2 carrier label
+  local payload="$1" carrier="$2" count
+  count=0
+  [[ -n "$payload" ]] && count="$(grep -Fc 'set your `/goal` to a concise summary of it' "$payload")"
+  if [[ "$count" == "1" ]] \
+    && grep -Fq 'Read the **Task** below, set your `/goal` to a concise summary of it, then complete it' "$payload"; then
+    ok "$carrier payload carries exactly one explicit goal request"
+  else
+    no "$carrier payload goal-request count/content wrong (count=$count)"
+  fi
+}
+
 run "$REPO" "sessE1" "review the sandboxed change and reply"
 E1_FD=$(find "$IPCROOT/sessE1/filedrop" -name '*.task.md' 2>/dev/null | head -1)
 if [[ -n "$E1_FD" ]] \
@@ -693,6 +1266,7 @@ else
   no "filedrop payload missing the denied-reply protocol"
 fi
 assert_recovery_guidance "$E1_FD" "filedrop"
+assert_default_goal_free "$E1_FD" "filedrop"
 
 : > "$TMP/nodeargs.log"
 run "$REPO" "sessE1ipc" --ipc "$UUID" --allow-any-thread "review the sandboxed change and reply"
@@ -706,6 +1280,41 @@ else
   no "--ipc payload missing the denied-reply protocol"
 fi
 assert_recovery_guidance "$E1_IPC" "--ipc"
+assert_default_goal_free "$E1_IPC" "--ipc"
+
+run "$REPO" "sessGoalFd" --request-goal "review the sandboxed change and reply"
+GOAL_FD=$(find "$IPCROOT/sessGoalFd/filedrop" -name '*.task.md' 2>/dev/null | head -1)
+if [[ $RC -eq 0 && -n "$GOAL_FD" ]] \
+  && grep -q "attempt to write the printed reply path exactly once" "$GOAL_FD" \
+  && grep -q "the full substantive result" "$GOAL_FD"; then
+  ok "goal-request filedrop payload retains the denied-reply protocol"
+else
+  no "goal-request filedrop payload missing or changed the denied-reply protocol"
+fi
+assert_recovery_guidance "$GOAL_FD" "goal-request filedrop"
+assert_requested_goal "$GOAL_FD" "goal-request filedrop"
+
+: > "$TMP/nodeargs.log"
+run "$REPO" "sessGoalIpc" --ipc "$UUID" --request-goal -- "review the sandboxed change and reply"
+GOAL_IPC=$(find "$IPCROOT/sessGoalIpc/$UUID" -name '*.task.md' 2>/dev/null | head -1)
+if [[ $RC -eq 0 && -n "$GOAL_IPC" ]] \
+  && grep -q "attempt to write the printed reply path exactly once" "$GOAL_IPC" \
+  && grep -q "the full substantive result" "$GOAL_IPC"; then
+  ok "goal-request --ipc payload retains the denied-reply protocol"
+else
+  no "goal-request --ipc payload missing or changed the denied-reply protocol"
+fi
+assert_recovery_guidance "$GOAL_IPC" "goal-request --ipc"
+assert_requested_goal "$GOAL_IPC" "goal-request --ipc"
+
+run "$REPO" "sessGoalMissing" --request-goal
+if [[ $RC -ne 0 ]] \
+  && printf '%s\n' "$OUT" | grep -Fq -- '--request-goal requires a task' \
+  && [[ -z "$(find "$IPCROOT/sessGoalMissing" -name '*.task.md' 2>/dev/null)" ]]; then
+  ok "--request-goal without a task fails before envelope publication"
+else
+  no "--request-goal missing-task handling is absent or published an envelope"
+fi
 
 assert_no_codex_cli
 
@@ -753,7 +1362,7 @@ fgrun_stdout --ipc "$UUIDF" "t34 deferred failed"
 ! printf '%s\n' "$OUT" | grep -q '^WAIT:' && ok "a deferred (gui-unowned) send prints no WAIT hint" || no "failed send leaked a WAIT hint"
 fgreset always-fail ok 0 rollout-hit
 fgrun_stdout --ipc "$UUIDF" --foreground-policy switch -- "t34 switch no ack"
-! printf '%s\n' "$OUT" | grep -q '^WAIT:' && ok "a switch-no-ack failed-closed send prints no WAIT hint" || no "failed-closed leaked a WAIT hint"
+! printf '%s\n' "$OUT" | grep -q '^WAIT:' && ok "a switch-no-ack gui-unowned send prints no WAIT hint" || no "gui-unowned refusal leaked a WAIT hint"
 
 echo "== 35. A3 easy path: codex_ipc_wait + the verbatim OQ-4 caveat on every recovery surface =="
 OQ4='resuming the goal in a fresh, unmarked turn will NOT re-certify the original dispatch id; machine re-certification requires a NEW dispatch with a new marker.'
