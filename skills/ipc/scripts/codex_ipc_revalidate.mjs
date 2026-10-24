@@ -9,6 +9,7 @@ import { existsSync, readdirSync, statSync } from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import {checkPythonReader} from "./codex_ipc_db_read.mjs";
 
 // All required-file checks and sibling invocations are anchored to this script's
 // own directory (the bundled skill's scripts/), so revalidation works from any cwd.
@@ -17,6 +18,8 @@ const SKILL_ROOT = path.dirname(SCRIPT_DIR);
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const REQUIRED_SCRIPT_FILES = [
+  "scripts/codex_ipc_db_read.py",
+  "scripts/codex_ipc_db_read.mjs",
   "scripts/codex_ipc_client.mjs",
   "scripts/codex_ipc_contract_audit.mjs",
   "scripts/codex_ipc_owner_probe.mjs",
@@ -146,14 +149,15 @@ function runCommand(command, args, options = {}) {
     encoding: "utf8",
     timeout: options.timeoutMs || 10000,
     windowsHide: true,
+    maxBuffer: options.completeOutput ? 64 * 1024 * 1024 : undefined,
   });
   return {
-    ok: result.status === 0,
+    ok: result.status === 0 && !result.error && !result.signal,
     command: [command, ...args].join(" "),
     status: result.status,
     signal: result.signal,
-    stdout: truncate(result.stdout || "", options.maxChars || 2000),
-    stderr: truncate(result.stderr || "", options.maxChars || 2000),
+    stdout: options.completeOutput ? (result.stdout || "") : truncate(result.stdout || "", options.maxChars || 2000),
+    stderr: options.completeOutput ? (result.stderr || "") : truncate(result.stderr || "", options.maxChars || 2000),
     error: result.error ? result.error.message : null,
   };
 }
@@ -222,6 +226,8 @@ function checkPowerShellSyntax(relPath) {
 }
 
 function checkNodeSqlite() {
+  const selected = checkPythonReader();
+  if (selected) return selected;
   return runCommand(
     process.execPath,
     ["-e", "import('node:sqlite').then(()=>console.log('node:sqlite ok'))"],
@@ -486,7 +492,7 @@ function runSessionInspect(threadId) {
   return runCommand(
     process.execPath,
     [skillPath("scripts/codex_ipc_session_inspect.mjs"), "--thread", threadId, "--tail-events", "5"],
-    { timeoutMs: 20000, maxChars: 5000 },
+    { timeoutMs: 20000, completeOutput: true },
   );
 }
 

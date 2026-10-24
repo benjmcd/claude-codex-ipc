@@ -8,11 +8,12 @@
 
 import path from "node:path";
 import { existsSync, statSync } from "node:fs";
+import {pythonReaderSelected, readPythonDatabase} from "./codex_ipc_db_read.mjs";
 
 // node:sqlite is optional at the repo level: file-drop handoff works without it.
 let DatabaseSync;
 try {
-  ({ DatabaseSync } = await import("node:sqlite"));
+  if (!pythonReaderSelected()) ({ DatabaseSync } = await import("node:sqlite"));
 } catch (error) {
   console.error(
     "ERROR: node:sqlite is unavailable in this Node.js runtime. This optional inspection " +
@@ -186,14 +187,15 @@ function inspectDb(opts) {
 
   let db;
   try {
-    db = new DatabaseSync(opts.dbPath, { readOnly: true });
-    const availableColumns = new Set(
+    const python = readPythonDatabase("locate", {database: path.resolve(opts.dbPath), columns: THREAD_COLUMNS})?.result;
+    if (!python) db = new DatabaseSync(opts.dbPath, { readOnly: true });
+    const availableColumns = new Set(python ? python.availableColumns :
       db.prepare("pragma table_info(threads)").all().map((row) => row.name),
     );
     const selectedColumns = THREAD_COLUMNS.filter((column) => availableColumns.has(column));
-    const rows = db
+    const rows = (python ? python.rows : db
       .prepare(`select ${selectedColumns.join(", ")} from threads`)
-      .all()
+      .all())
       .map((row) => summarizeThread(row));
 
     if (opts.listProjects) {

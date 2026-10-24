@@ -662,3 +662,57 @@ stderr only; stdout and the exit code are unchanged, and neither is ever a refus
 - [references/security-model.md](references/security-model.md) — threat model and safety gates.
 - [references/troubleshooting.md](references/troubleshooting.md) — dependency and failure-mode
   triage.
+
+## Explicit Windows SQLite reader
+
+Node's `node:sqlite` remains the default. For an explicitly reviewed Python runtime,
+set the single environment variable `CODEX_IPC_SQLITE_READER` to the complete JSON
+printed by that executable using `-I -B -X utf8 scripts/codex_ipc_db_read.py --identity`.
+The identity operation opens only an in-memory database and does not qualify file
+access or any target. Review and retain the executable, Python version, SQLite
+version/source ID and extension/library image hashes before selecting this JSON;
+do not discover and auto-admit a different executable during a failed read.
+
+Inspector, snapshot and locator share this selection. Revalidation checks the
+selected optional mechanism (the historical result key remains `nodeSqlite`) and
+its inspector child inherits the same environment. Handoff's existing inspector
+subprocess also inherits the same selection; no send or target authority changes.
+Unset selection preserves the optional Node dependency for file-drop-only use.
+Malformed, missing, changed or incompatible explicitly selected Python fails
+visibly and never falls back to Node. Wrappers that construct a reduced environment
+must explicitly preserve this admitted value; inherited environment is required.
+
+The Python file reader currently requires Windows SQLite 3.45.1. It uses isolated
+stdlib invocation, fixed operations and validated fields, never caller SQL. It
+opens the actual database URI with `mode=ro`, `query_only=ON`, and `readonly_shm=1`.
+Existing `GENERIC_READ`/`OPEN_EXISTING` handles deny deletion while reading the DB
+and required WAL/SHM. WAL reads require a live owner of the existing index: a
+momentary exclusive probe of SQLite's SHM deadman byte that succeeds means no
+connection owns it, which SQLite would recover, so the reader refuses. Otherwise
+it holds a shared deadman lock while SQLite attaches and validates the owned
+index itself. Ownerless (for example leftover crash) sidecars, missing/short or
+invalid sidecars, unexpected lock failures and read failures refuse; no immutable
+mode, live copy, recovery, initialization, write-open or permission change is used.
+The rollback path excludes concurrent writer handles and refuses unexpected
+journals, since an unguarded mode change could introduce sidecars. While that
+exclusion is held, another process opening the database read/write may be reopened
+read-only by SQLite's Windows VFS and stay read-only for that connection's life;
+the live WAL target does not use this path. Ordinary closed rollback databases
+remain supported; active rollback writers and unsupported platforms refuse
+explicitly. Runtime identity admission covers the executable, `_sqlite3` extension
+and loaded SQLite library, not stdlib modules or path configuration; it is
+compatibility evidence, not a sandbox against an intentionally malicious executable.
+
+JavaScript retains classification, projection, stable hashing, ordering and full
+population maps. SQLite NULL, text, safe integers and finite real values retain
+their existing JSON meanings. BLOB, unsafe integers and nonfinite values refuse
+rather than silently converting; invalid UTF-8 text refuses the whole read. Each
+reader subprocess is bounded to 30 seconds and 64 MiB per output stream, which can
+refuse a very large population or slow `quick_check` that in-process Node would
+finish. Complete output is accepted; any failure refuses with native status, stream
+byte counts/SHA-256 marked complete or partial, the helper's small error and a
+bounded stderr tail, never raw row output. The helper also exits itself after
+30 seconds, because Windows does not end it when a parent is killed. Internal
+revalidation inspection keeps complete output up to 64 MiB and reports process
+errors/signals as failures.
+Qualification does not imply publication, installation, live admission or delivery.
