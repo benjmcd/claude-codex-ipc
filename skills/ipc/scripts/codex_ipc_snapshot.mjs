@@ -9,6 +9,7 @@ import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { existsSync, statSync } from "node:fs";
 import path from "node:path";
+import {readPythonDatabase} from "./codex_ipc_db_read.mjs";
 
 // node:sqlite is optional at the repo level: file-drop handoff works without it.
 // Loaded lazily so --compare mode (plain JSON diffing) needs no SQLite support.
@@ -267,18 +268,19 @@ async function readDbSnapshot(dbPath, threadId, otherThreadIds, marker, includeT
     return { path: dbPath, exists: false, readOnlyOpenOk: false };
   }
 
-  const DatabaseSync = await requireNodeSqlite();
+  const python = readPythonDatabase("snapshot", {database: path.resolve(dbPath), columns: THREAD_COLUMNS})?.result;
+  const DatabaseSync = python ? null : await requireNodeSqlite();
   let db;
   try {
-    db = new DatabaseSync(dbPath, { readOnly: true });
-    const rows = db.prepare(`select ${THREAD_COLUMNS.join(", ")} from threads order by id`).all();
-    const tableNames = db
+    if (!python) db = new DatabaseSync(dbPath, { readOnly: true });
+    const rows = python ? python.rows : db.prepare(`select ${THREAD_COLUMNS.join(", ")} from threads order by id`).all();
+    const tableNames = python ? python.tableNames : db
       .prepare("select name from sqlite_master where type = 'table' order by name")
       .all()
       .map((row) => row.name);
-    const pageCount = db.prepare("pragma page_count").get().page_count;
-    const pageSize = db.prepare("pragma page_size").get().page_size;
-    const quickCheck = db.prepare("pragma quick_check").get().quick_check;
+    const pageCount = python ? python.pageCount : db.prepare("pragma page_count").get().page_count;
+    const pageSize = python ? python.pageSize : db.prepare("pragma page_size").get().page_size;
+    const quickCheck = python ? python.quickCheck : db.prepare("pragma quick_check").get().quick_check;
     const target = summarizeThread(rows.find((row) => row.id === threadId) || null);
     const otherThreads = Object.fromEntries(
       otherThreadIds.map((otherThreadId) => [

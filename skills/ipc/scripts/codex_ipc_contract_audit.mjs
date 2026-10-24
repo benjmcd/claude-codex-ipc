@@ -16,6 +16,8 @@ const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const SKILL_ROOT = path.dirname(SCRIPT_DIR);
 
 const REQUIRED_FILES = [
+  "scripts/codex_ipc_db_read.py",
+  "scripts/codex_ipc_db_read.mjs",
   "SKILL.md",
   "scripts/handoff_to_codex.sh",
   "scripts/codex_ipc_replies.sh",
@@ -304,6 +306,27 @@ function main() {
       },
     ], "A future Desktop update can still require controlled write re-proof if read-only checks detect drift."),
     check("REQ-009", "No direct SQLite writes are part of the tooling.", [
+      {
+        label: "explicit Python mechanism uses fixed operations and noncreating read-only guards",
+        file: "scripts/codex_ipc_db_read.py",
+        ok:
+          contains("scripts/codex_ipc_db_read.py", "mode=ro&readonly_shm=1") &&
+          contains("scripts/codex_ipc_db_read.py", "pragma query_only=on") &&
+          contains("scripts/codex_ipc_db_read.py", "GENERIC_READ; OPEN_EXISTING") &&
+          contains("scripts/codex_ipc_db_read.py", "Unexpected or missing reader parameters") &&
+          contains("scripts/codex_ipc_db_read.py", "('inspect', 'snapshot', 'locate')"),
+      },
+      {
+        label: "one explicit reader selection is shared and availability checks the selected mechanism",
+        file: "scripts/codex_ipc_db_read.mjs",
+        ok:
+          contains("scripts/codex_ipc_db_read.mjs", "CODEX_IPC_SQLITE_READER") &&
+          contains("scripts/codex_ipc_db_read.mjs", "if (!pythonReaderSelected()) return null") &&
+          ["session_inspect", "snapshot", "thread_locator"].every(name =>
+            contains(`scripts/codex_ipc_${name}.mjs`, "readPythonDatabase(")) &&
+          contains("scripts/codex_ipc_revalidate.mjs", "const selected = checkPythonReader()") &&
+          contains("SKILL.md", "never falls back to Node"),
+      },
       {
         label: "read-only SQLite helpers open with readOnly:true",
         file: "scripts/codex_ipc_session_inspect.mjs",

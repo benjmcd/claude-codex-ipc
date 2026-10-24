@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- Added an explicit, optional Windows SQLite reader for the inspector, snapshot and locator.
+  `CODEX_IPC_SQLITE_READER` selects one reviewed Python/SQLite runtime by identity; Node's
+  `node:sqlite` remains the default, and a selected reader never falls back. The reader runs
+  fixed read-only operations, refuses missing, ownerless or invalid WAL state, and bounds its
+  run time, output and failure diagnostics. Revalidation checks the selected reader and keeps
+  complete inspector output.
+
 ## [0.1.14] — 2026-10-03
 
 - Rebound release manifests to the current runtime and installed roots. Clean installs

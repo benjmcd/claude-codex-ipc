@@ -9,6 +9,7 @@ import { createReadStream } from "node:fs";
 import { existsSync, readdirSync, realpathSync, statSync } from "node:fs";
 import path from "node:path";
 import readline from "node:readline";
+import {pythonReaderSelected, readPythonDatabase} from "./codex_ipc_db_read.mjs";
 import {
   advanceRolloutHistoryScope,
   advanceRolloutOwnerLineage,
@@ -23,7 +24,7 @@ import {
 // node:sqlite is optional at the repo level: file-drop handoff works without it.
 let DatabaseSync;
 try {
-  ({ DatabaseSync } = await import("node:sqlite"));
+  if (!pythonReaderSelected()) ({ DatabaseSync } = await import("node:sqlite"));
 } catch (error) {
   console.error(
     "ERROR: node:sqlite is unavailable in this Node.js runtime. This optional inspection " +
@@ -257,18 +258,19 @@ function readDbThread(dbPath, threadId) {
 
   let db;
   try {
-    db = new DatabaseSync(dbPath, { readOnly: true });
-    const availableColumns = new Set(
+    const python = readPythonDatabase("inspect", {database: path.resolve(dbPath), columns: THREAD_COLUMNS, threadId})?.result;
+    if (!python) db = new DatabaseSync(dbPath, { readOnly: true });
+    const availableColumns = new Set(python ? python.availableColumns :
       db.prepare("pragma table_info(threads)").all().map((row) => row.name),
     );
     const selectedColumns = THREAD_COLUMNS.filter((column) => availableColumns.has(column));
     if (!selectedColumns.includes("id")) {
       throw new Error("threads table does not expose an id column");
     }
-    const row = db
+    const row = python ? python.rows[0] : db
       .prepare(`select ${selectedColumns.join(", ")} from threads where id = ?`)
       .get(threadId);
-    const incomingSpawnEdges = readIncomingSpawnEdges(db, threadId);
+    const incomingSpawnEdges = readIncomingSpawnEdges(db, threadId, python);
 
     return {
       path: dbPath,
@@ -296,15 +298,16 @@ function readDbThread(dbPath, threadId) {
   }
 }
 
-function readIncomingSpawnEdges(db, threadId) {
+function readIncomingSpawnEdges(db, threadId, python = null) {
   try {
-    const table = db
+    if (python?.spawnError) throw new Error(python.spawnError);
+    const table = python ? python.spawnTableExists : db
       .prepare("select name from sqlite_master where type = 'table' and name = ?")
       .get("thread_spawn_edges");
     if (!table) {
       return { available: false, readOnlyQueryOk: true, rows: [], warnings: [] };
     }
-    const columns = new Set(
+    const columns = new Set(python ? python.spawnColumns :
       db.prepare("pragma table_info(thread_spawn_edges)").all().map((row) => row.name),
     );
     if (!columns.has("parent_thread_id") || !columns.has("child_thread_id")) {
@@ -316,12 +319,12 @@ function readIncomingSpawnEdges(db, threadId) {
       };
     }
     const statusSelection = columns.has("status") ? ", status" : "";
-    const rows = db
+    const rows = (python ? python.spawnRows : db
       .prepare(
         "select parent_thread_id as parentThreadId, child_thread_id as childThreadId" +
           `${statusSelection} from thread_spawn_edges where lower(child_thread_id) = ?`,
       )
-      .all(threadId)
+      .all(threadId))
       .map((row) => {
         const parentValid = typeof row.parentThreadId === "string" && UUID_RE.test(row.parentThreadId);
         const childValid =
