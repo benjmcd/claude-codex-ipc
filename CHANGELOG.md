@@ -37,6 +37,10 @@ All notable changes to this project will be documented in this file.
   The waiter and the post-send observer keep polling and never certify or confirm on it; the
   harvester reports `pending`. A shrink, a rewritten end, a successor page or an identity change
   stays unproven. Previously a page appended mid-turn ended the wait as `unavailable`.
+- The session inspector's own sessions-root scan skips zstd-archived pages (`*.jsonl.zst`), as
+  the reader's discovery does, so an archived sibling no longer leaves the candidate set
+  unresolved when no database-designated page exists. A `.zst` name the archive grammar rejects
+  is still flagged.
 
 ## [0.1.14] — 2026-10-03
 

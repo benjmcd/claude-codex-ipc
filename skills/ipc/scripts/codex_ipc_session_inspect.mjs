@@ -16,6 +16,7 @@ import {
   createTurnBoundaryAccumulator,
   locateRollout,
   normalizeRolloutRecord,
+  parseRolloutArchiveBasename,
   parseRolloutBasename,
   recordThreadIdentity,
   summarizeThreadActivity,
@@ -717,6 +718,9 @@ function findRolloutCandidates(sessionsRoot, threadId, dbRolloutPath) {
   if (existsSync(sessionsRoot)) {
     for (const filePath of walkFiles(sessionsRoot, (issue) => scanIssues.push(issue))) {
       const basename = path.basename(filePath);
+      // An archived (zstd) page is never a record source, as in the reader's own discovery. A
+      // `.zst` name the archive grammar rejects still falls through and stays flagged below.
+      if (parseRolloutArchiveBasename(basename)) continue;
       const filename = parseRolloutBasename(basename);
       if (filename?.rootThreadId === threadId.toLowerCase()) {
         addCandidate(filePath, "sessions-root-match");
