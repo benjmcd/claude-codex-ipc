@@ -830,6 +830,20 @@ function main() {
           contains("scripts/codex_ipc_autoload.ps1", "foreground-alternate-host"),
       },
       {
+        label: "a connect-phase failure is pre-write non-admission only in its exact structure, on the first attempt and every retry",
+        file: "scripts/handoff_to_codex.sh",
+        ok:
+          contains("scripts/codex_ipc_client.mjs", "if (routerPipePresent(opts.pipePath) === false) {") &&
+          contains("scripts/codex_ipc_client.mjs", 'phase: "connect",') &&
+          contains("scripts/codex_ipc_client.mjs", "sentRequests: [],") &&
+          contains("scripts/handoff_to_codex.sh", 'value?.phase === "connect" &&') &&
+          contains("scripts/handoff_to_codex.sh", "value.sentRequests.length === 0 &&") &&
+          contains("scripts/handoff_to_codex.sh", "RESULT: gui-unowned -- reason=router-absent -- confirmation=not-attempted") &&
+          contains("scripts/handoff_to_codex.sh", "RESULT: gui-unowned -- reason=router-unreachable -- confirmation=not-attempted") &&
+          initialLiveSendPath.includes("report_router_connect_failure_if_any") &&
+          postAutoloadRetryPath.includes("report_router_connect_failure_if_any"),
+      },
+      {
         label: "wrapper pins the complete host and activation refusal vocabulary and the multi-cause no-client observation",
         file: "scripts/handoff_to_codex.sh",
         ok:

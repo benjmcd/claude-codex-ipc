@@ -7,9 +7,10 @@
 import net from "node:net";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
-import { realpathSync } from "node:fs";
+import { readdirSync, realpathSync } from "node:fs";
 
 const DEFAULT_PIPE = "\\\\.\\pipe\\codex-ipc";
+const WINDOWS_PIPE_PREFIX = "\\\\.\\pipe\\";
 const DEFAULT_TIMEOUT_MS = 6000;
 const DEFAULT_CLIENT_TYPE = "external-handoff";
 const FOLLOWER_START_TURN_METHOD = "thread-follower-start-turn";
@@ -317,12 +318,28 @@ function parseAvailableFrames(raw) {
   return messages;
 }
 
+// true or false only when the Windows pipe namespace could be listed; null leaves the answer to
+// the connect attempt itself. Codex Desktop 26.1117 builds no longer serve the router pipe.
+function routerPipePresent(pipePath) {
+  if (process.platform !== "win32" || !pipePath.toLowerCase().startsWith(WINDOWS_PIPE_PREFIX)) {
+    return null;
+  }
+  const name = pipePath.slice(WINDOWS_PIPE_PREFIX.length).toLowerCase();
+  try {
+    return readdirSync(WINDOWS_PIPE_PREFIX).some((entry) => entry.toLowerCase() === name);
+  } catch {
+    return null;
+  }
+}
+
 function connectRouter(pipePath, timeoutMs) {
   return new Promise((resolve, reject) => {
     const socket = net.createConnection(pipePath);
     const timer = setTimeout(() => {
       socket.destroy();
-      reject(new Error(`Timed out connecting after ${timeoutMs}ms`));
+      const error = new Error(`Timed out connecting after ${timeoutMs}ms`);
+      error.code = "ETIMEDOUT";
+      reject(error);
     }, timeoutMs);
 
     socket.once("connect", () => {
@@ -450,8 +467,34 @@ export function projectLiveResponse(
   };
 }
 
+// Every frame is written only after the connect callback, so a connect-phase failure proves that
+// nothing reached the router. It is reported as a structured result with no sent requests; any
+// failure after connect still throws and stays ambiguous for the wrapper.
+function connectFailure(opts, code, message) {
+  return {
+    ok: false,
+    phase: "connect",
+    pipePath: opts.pipePath,
+    targetThreadId: opts.threadId,
+    sentRequests: [],
+    connectError: { code, message },
+  };
+}
+
 async function sendLive(opts, initializeRequest) {
-  const socket = await connectRouter(opts.pipePath, opts.timeoutMs);
+  if (routerPipePresent(opts.pipePath) === false) {
+    return connectFailure(opts, "ENOENT", "the router pipe is not present");
+  }
+  let socket;
+  try {
+    socket = await connectRouter(opts.pipePath, opts.timeoutMs);
+  } catch (error) {
+    return connectFailure(
+      opts,
+      typeof error?.code === "string" && error.code.length > 0 ? error.code : "ECONNECT",
+      String(error?.message || error),
+    );
+  }
   try {
     const initResponse = await sendAndWait(socket, initializeRequest, opts.timeoutMs);
     if (initResponse.resultType !== "success" || !initResponse.result?.clientId) {

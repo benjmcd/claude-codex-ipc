@@ -215,6 +215,14 @@ IPC router named pipe (`\\.\pipe\codex-ipc`, `thread-follower-start-turn`). This
 `codex_ipc_revalidate.mjs` (and, if needed, a controlled `codex_ipc_write_proof.mjs` run) after
 updates.
 
+Codex Desktop 26.1117 and later serve no router pipe; the router was removed upstream after
+26.1111. The client lists the Windows pipe namespace before connecting and reports a missing pipe,
+or any other connect-phase failure, as a structured `phase: "connect"` result with no sent
+requests. Every frame is written only after connect, so the wrapper maps that exact structure to
+`gui-unowned -- reason=router-absent|router-unreachable -- confirmation=not-attempted` and prints
+the pickup line. A connect claim that carries a request or names another thread stays
+`failed-closed -- reason=router-pipe-failure -- confirmation=unknown`.
+
 Every live `--ipc` send reports exactly one result:
 
 - `gui-delivered` — the Desktop renderer accepted the turn. Silent and instant when the target

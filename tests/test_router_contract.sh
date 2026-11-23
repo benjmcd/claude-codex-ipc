@@ -581,6 +581,22 @@ case "$name" in
         printf '{"ok":false,"targetThreadId":"%s","sentRequests":[{"json":{"method":"thread-follower-start-turn","params":{"conversationId":"%s"}}},{"json":{"method":"other","error":"no-client-found"}}],"response":{"resultType":"error","error":"router-contract-changed","nested":{"error":"no-client-found"}}}\n' "$target" "$target"
         exit 1
         ;;
+      router-absent)
+        printf '{"ok":false,"phase":"connect","targetThreadId":"%s","sentRequests":[],"connectError":{"code":"ENOENT","message":"the router pipe is not present"}}\n' "$target"
+        exit 1
+        ;;
+      router-unreachable)
+        printf '{"ok":false,"phase":"connect","targetThreadId":"%s","sentRequests":[],"connectError":{"code":"EACCES","message":"access denied"}}\n' "$target"
+        exit 1
+        ;;
+      connect-claim-with-request)
+        printf '{"ok":false,"phase":"connect","targetThreadId":"%s","sentRequests":[{"name":"thread-follower-start-turn","json":{"method":"thread-follower-start-turn","params":{"conversationId":"%s"}}}],"connectError":{"code":"ENOENT","message":"x"}}\n' "$target" "$target"
+        exit 1
+        ;;
+      connect-claim-other-target)
+        printf '{"ok":false,"phase":"connect","targetThreadId":"%s","sentRequests":[],"connectError":{"code":"ENOENT","message":"x"}}\n' "00000000-0000-4000-8000-000000000000"
+        exit 1
+        ;;
       unknown) printf '%s\n' '{"ok":false,"error":"router-contract-changed"}'; exit 1 ;;
       malformed) printf '%s\n' '{malformed'; exit 1 ;;
       *) printf '%s\n' '{"ok":false,"error":"missing-router-case"}'; exit 1 ;;
@@ -743,6 +759,62 @@ run_wrapper_case malformed 1 \
   "RESULT: failed-closed -- reason=router-pipe-failure -- confirmation=unknown" \
   "malformed client failure fails closed as router-pipe-failure" \
   "FALLBACK -- file-drop is ready"
+# A connect-phase failure precedes every frame write: the client reports it with no sent
+# requests, so non-admission is proven and the pickup line is safe. Codex Desktop 26.1117
+# builds serve no router pipe at all (ENOENT). Only the exact structure qualifies; a
+# connect claim that carries a request, or names another thread, stays ambiguous.
+run_wrapper_case router-absent 1 \
+  "RESULT: gui-unowned -- reason=router-absent -- confirmation=not-attempted" \
+  "an absent router pipe is pre-write non-admission"
+run_wrapper_case router-unreachable 1 \
+  "RESULT: gui-unowned -- reason=router-unreachable -- confirmation=not-attempted" \
+  "any other connect-phase failure is pre-write non-admission"
+run_wrapper_case connect-claim-with-request 1 \
+  "RESULT: failed-closed -- reason=router-pipe-failure -- confirmation=unknown" \
+  "a connect claim that carries a sent request stays ambiguous" \
+  "FALLBACK -- file-drop is ready"
+run_wrapper_case connect-claim-other-target 1 \
+  "RESULT: failed-closed -- reason=router-pipe-failure -- confirmation=unknown" \
+  "a connect claim for another thread stays ambiguous" \
+  "FALLBACK -- file-drop is ready"
+for _pickup_case in router-absent router-unreachable; do
+  _pickup_out="$(env PATH="$STUB_BIN:$PATH" REAL_NODE="$NODE_BIN" ROUTER_CASE="$_pickup_case" \
+    TOOL_LOG="$TOOL_LOG" POLICY_LOG="$POLICY_LOG" HOME="$TMP/$_pickup_case/home" \
+    CLAUDE_SESSION_ID="33333333-3333-4333-8333-333333333333" CODEX_IPC_ROOT="$TMP/$_pickup_case/ipc" \
+    CODEX_IPC_AUTOLOAD=codex-uri CODEX_IPC_RETENTION_DAYS=0 \
+    bash "$WRAPPER" --ipc "$THREAD" "$TASK_TEXT" 2>&1)"
+  if printf '%s\n' "$_pickup_out" | grep -Fq "FALLBACK -- file-drop is ready" \
+    && ! printf '%s\n' "$_pickup_out" | grep -Fq "AMBIGUOUS"; then
+    ok "$_pickup_case prints the pickup line and no ambiguity notice"
+  else
+    no "$_pickup_case pickup output is wrong"
+    printf '%s\n' "$_pickup_out" | sed -n '1,20p'
+  fi
+done
+unset _pickup_case _pickup_out
+
+echo "== 3b. real client: a connect-phase failure is structured and sends nothing =="
+# A random pipe name that no process serves. On Windows the client finds it absent in the pipe
+# namespace and never connects; elsewhere the connect itself fails with ENOENT. Either way the
+# result is the same structure, and nothing reaches the Desktop router.
+ABSENT_PIPE='\\.\pipe\codex-ipc-absent-'"$RANDOM$RANDOM"
+ABSENT_ERR="$TMP/absent-pipe.err"
+ABSENT_OUT="$("$NODE_BIN" "$CLIENT" --thread "$THREAD" --task "$TASK_TEXT" --pipe "$ABSENT_PIPE" \
+  --allow-any-thread --send --ack-live-write --timeout-ms 2000 2>"$ABSENT_ERR")"
+ABSENT_RC=$?
+if [[ $ABSENT_RC -eq 1 ]] && ABSENT_OUT="$ABSENT_OUT" THREAD="$THREAD" "$NODE_BIN" -e '
+const value = JSON.parse(process.env.ABSENT_OUT);
+const ok = value.ok === false && value.phase === "connect" &&
+  value.targetThreadId === process.env.THREAD &&
+  Array.isArray(value.sentRequests) && value.sentRequests.length === 0 &&
+  !("response" in value) && value.connectError?.code === "ENOENT";
+process.exit(ok ? 0 : 1);
+'; then
+  ok "an absent pipe yields phase=connect, ENOENT, no sent requests, exit 1"
+else
+  no "absent-pipe client result is not the structured connect failure (rc=$ABSENT_RC)"
+  printf '%s\n' "$ABSENT_OUT" | sed -n '1,12p'; sed -n '1,8p' "$ABSENT_ERR"
+fi
 
 echo "== revalidator host-policy authority =="
 REVALIDATOR="$(dirname "$CLIENT")/codex_ipc_revalidate.mjs"

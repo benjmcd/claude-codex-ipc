@@ -1173,6 +1173,48 @@ const exact =
 process.exit(exact ? 0 : 1);
 ' "$IPC_CID"
     }
+    # Prints the connect error code and succeeds only for the client's exact connect-phase
+    # failure: no request was sent, so the router never saw this dispatch.
+    router_connect_failure() {
+        printf '%s' "$IPC_OUTPUT" | node --input-type=module -e '
+import fs from "node:fs";
+let value;
+try {
+  value = JSON.parse(fs.readFileSync(0, "utf8"));
+} catch {
+  process.exit(1);
+}
+const target = String(process.argv[1] || "").toLowerCase();
+const code = value?.connectError?.code;
+const exact =
+  value?.ok === false &&
+  value?.phase === "connect" &&
+  String(value?.targetThreadId || "").toLowerCase() === target &&
+  Array.isArray(value?.sentRequests) &&
+  value.sentRequests.length === 0 &&
+  !("response" in value) &&
+  typeof code === "string" &&
+  /^[A-Z][A-Z0-9_]{1,31}$/.test(code);
+if (!exact) process.exit(1);
+console.log(code);
+' "$IPC_CID"
+    }
+    # Pre-write: the client never connected, so nothing was sent and pickup is safe. Codex
+    # Desktop 26.1117 builds serve no router pipe, which shows up here as ENOENT. Exits when the
+    # last attempt was a connect-phase failure; returns otherwise.
+    report_router_connect_failure_if_any() {
+        local connect_code
+        connect_code=$(router_connect_failure) || return 0
+        if [[ "$connect_code" == "ENOENT" ]]; then
+            echo "RESULT: gui-unowned -- reason=router-absent -- confirmation=not-attempted" >&2
+            echo "(No Desktop IPC router pipe is present; Codex Desktop 26.1117 and later serve none. Nothing was sent.)" >&2
+        else
+            echo "RESULT: gui-unowned -- reason=router-unreachable -- confirmation=not-attempted" >&2
+            echo "(The router pipe could not be connected (${connect_code}); nothing was sent.)" >&2
+        fi
+        fallback
+        exit 1
+    }
     print_router_response() {
         # The client pretty-prints its document with `response` LAST, after the echoed
         # `sentRequests`, so a twenty-line clip of the whole document ends inside the request echo
@@ -1246,6 +1288,7 @@ console.log(JSON.stringify({
         report_host_policy_refusal
         exit 1
     fi
+    report_router_connect_failure_if_any
     if ! authoritative_no_client; then
         # Router/pipe-level failure (app closed, timeout, protocol drift). This is
         # POST-ATTEMPT: the follower frame is written before the response is awaited,
@@ -1361,6 +1404,9 @@ console.log(JSON.stringify({
             report_host_policy_refusal
             exit 1
         fi
+        # Every earlier attempt ended in an authoritative no-client-found, so a pre-write
+        # connect failure here still proves non-admission.
+        report_router_connect_failure_if_any
         # Retry ONLY on the authoritative "thread not loaded" answer. Any other
         # failure (timeout, closed pipe, protocol drift) is post-attempt and may have
         # already admitted the task -- retrying it is the duplicate-execution defect

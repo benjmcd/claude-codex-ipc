@@ -41,6 +41,14 @@ All notable changes to this project will be documented in this file.
   the reader's discovery does, so an archived sibling no longer leaves the candidate set
   unresolved when no database-designated page exists. A `.zst` name the archive grammar rejects
   is still flagged.
+- Live `--ipc` reports a missing Desktop router as pre-write non-admission. Codex Desktop 26.1117
+  serves no `\\.\pipe\codex-ipc` (the router was removed upstream after 26.1111). The client
+  lists the Windows pipe namespace before connecting and reports a missing pipe, or any other
+  connect-phase failure, as a structured `phase: "connect"` result with no sent requests. The
+  wrapper maps that exact structure to `gui-unowned -- reason=router-absent|router-unreachable --
+  confirmation=not-attempted` and prints the pickup line; previously it reported
+  `failed-closed -- reason=router-pipe-failure -- confirmation=unknown` with no pickup. The
+  method-version fixture records the 26.1117.4957.0 observation.
 
 ## [0.1.14] — 2026-10-03
 

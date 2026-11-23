@@ -363,6 +363,13 @@ request may still have occurred. After an
 ambiguous post-attempt result (`confirmation=unknown`) pickup is suppressed and resending is
 forbidden — the turn may already have been admitted.
 
+Codex Desktop 26.1117 and later serve no IPC router (`\\.\pipe\codex-ipc` was removed upstream;
+26.1111 still served it). A live send there reports
+`RESULT: gui-unowned -- reason=router-absent -- confirmation=not-attempted` with the pickup line:
+the client found no pipe and sent nothing. Any other connect-phase failure reports
+`reason=router-unreachable` the same way. On those builds use `--deliver manual` and paste the
+pickup line.
+
 When the target is unowned and Codex itself is the operator's foreground window, a **foreground
 policy** applies (default `defer` — never navigate the visible app). Canonical grammar:
 
