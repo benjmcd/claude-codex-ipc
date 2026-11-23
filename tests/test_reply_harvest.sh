@@ -1834,6 +1834,88 @@ await test("observer rejects agent-only, substring, ambiguous, and malformed evi
   );
 });
 
+await test("observer keeps observing a page that grows after each read and reports pending", async () => {
+  const thread = "11111111-1111-4111-8111-111111111111";
+  const target = path.join(tmp, `rollout-observe-growth-${thread}.jsonl`);
+  fs.writeFileSync(target, `${JSON.stringify({ type: "session_meta", payload: { id: thread } })}\n`);
+  let clock = 0;
+  let reads = 0;
+  const result = await observeRollout(
+    {
+      threadId: thread,
+      dispatchId: "8000000002-8-abcdef0123456789",
+      rolloutPath: target,
+      sessionsRoot: tmp,
+      budgetMs: 20,
+      intervalMs: 10,
+    },
+    {
+      now: () => clock,
+      sleep: async (ms) => { clock += ms; },
+      readRolloutFile: (filePath, options) => {
+        const parsed = readRolloutFile(filePath, options);
+        reads += 1;
+        fs.appendFileSync(
+          filePath,
+          `${JSON.stringify({ type: "event_msg", payload: { type: "token_count", info: { total: reads } } })}\n`,
+        );
+        return parsed;
+      },
+    },
+  );
+  assert.equal(result.token, "rollout-pending", JSON.stringify(result));
+  assert.ok(reads >= 2);
+  assert.equal(result.diagnostics.filter((item) => item.code === "page-snapshot-stale").length, 1);
+  assert.ok(!result.diagnostics.some((item) => item.code === "page-supersession-unproven"));
+});
+
+await test("harvester reports a page that grew after its one-shot read as pending, not unavailable", () => {
+  fs.mkdirSync(path.dirname(uniqueBasic), { recursive: true });
+  const target = path.join(tmp, path.basename(uniqueBasic));
+  fs.copyFileSync(uniqueBasic, target);
+  const resolvedTarget = path.resolve(target);
+  const originalFstat = fs.fstatSync;
+  const originalStat = fs.statSync;
+  let readerRan = false;
+  let grew = false;
+  fs.fstatSync = function injectedFstat(...args) {
+    readerRan = true;
+    return originalFstat.apply(fs, args);
+  };
+  fs.statSync = function injectedStat(filePath, ...args) {
+    // Grow between the completed read and the page assessor's own revalidation, not inside the
+    // reader's post-read size check (which would correctly report not-at-EOF instead).
+    if (
+      readerRan && !grew && path.resolve(String(filePath)) === resolvedTarget &&
+      String(new Error().stack).includes("validateCandidate")
+    ) {
+      grew = true;
+      fs.appendFileSync(
+        target,
+        `${JSON.stringify({ type: "event_msg", payload: { type: "token_count", info: { total: 1 } } })}\n`,
+      );
+    }
+    return originalStat.call(fs, filePath, ...args);
+  };
+  let result;
+  try {
+    result = harvestDispatch({
+      dispatchId: dispatch,
+      replyPath: path.join(tmp, "growth-absent.reply.md"),
+      threadId: "11111111-1111-4111-8111-111111111111",
+      rolloutPath: target,
+      sessionsRoot: tmp,
+    });
+  } finally {
+    fs.fstatSync = originalFstat;
+    fs.statSync = originalStat;
+  }
+  assert.ok(grew, "the injected growth did not run");
+  assert.equal(result.source, "none", JSON.stringify(result));
+  assert.equal(result.reason, "pending", JSON.stringify(result));
+  assert.ok(result.diagnostics.some((item) => item.code === "page-snapshot-stale"));
+});
+
 console.log(`RESULT: ${passed} passed, 0 failed`);
 NODE
 then

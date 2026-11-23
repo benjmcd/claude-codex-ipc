@@ -31,6 +31,12 @@ All notable changes to this project will be documented in this file.
   `--all-turns` and `--reasoning headline|none` change it. The reply viewer prints a labelled
   section of each dispatch's own turn after the body. Waiter, harvester, reader, completion
   certification and marker binding are unchanged; `recentItems` and `--summary` are unchanged.
+- A bound rollout page that grows after a certifying read is now a stale snapshot, not lost
+  authority. Same-identity growth whose old end is still a record boundary makes the page
+  assessor report `stale` (`page-snapshot-stale`, `bound-page-grew`) after the successor scan.
+  The waiter and the post-send observer keep polling and never certify or confirm on it; the
+  harvester reports `pending`. A shrink, a rewritten end, a successor page or an identity change
+  stays unproven. Previously a page appended mid-turn ended the wait as `unavailable`.
 
 ## [0.1.14] — 2026-10-03
 

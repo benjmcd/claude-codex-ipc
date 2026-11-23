@@ -979,6 +979,19 @@ function main() {
           matchCount("scripts/codex_ipc_rollout_reader.mjs", /node:sqlite/g) === 0,
       },
       {
+        label: "append-only growth of the bound page is a stale snapshot that never certifies; a shrink stays unproven",
+        file: "scripts/codex_ipc_rollout_reader.mjs",
+        ok:
+          contains("scripts/codex_ipc_rollout_reader.mjs", "!cutoffIsRecordBoundary(rolloutPath, options.expectedSize)") &&
+          contains("scripts/codex_ipc_rollout_reader.mjs", 'return unproven("bound-page-size-changed");') &&
+          contains("scripts/codex_ipc_rollout_reader.mjs", 'return pageAssessment("stale", "page-snapshot-stale", {') &&
+          contains("scripts/codex_ipc_wait.mjs", 'if (assessment.status === "stale") {') &&
+          contains("scripts/codex_ipc_wait.mjs", 'const resolved = page === "current"') &&
+          contains("scripts/codex_ipc_rollout_observe.mjs", 'if (assessment.status === "stale") {') &&
+          contains("scripts/codex_ipc_rollout_observe.mjs", 'if (page === "current" && admissionObserved && !hardReadFailure) {') &&
+          contains("scripts/codex_ipc_reply_harvest.mjs", 'if (pageAssessment.status === "stale") {'),
+      },
+      {
         label: "archived (zstd) pages never become record sources, and an archived paginated page is read for the veto or fails it closed",
         file: "scripts/codex_ipc_rollout_reader.mjs",
         ok:

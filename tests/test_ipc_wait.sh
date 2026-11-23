@@ -2031,5 +2031,167 @@ await test("an unreadable archived paginated page fails the page set closed", as
     item.reason === (zstdAvailable ? "archive-invalid" : "archive-unsupported")));
 });
 
+// A live bound page keeps growing while its turn runs. Same-identity growth after a certifying
+// read, with that read's end still a record boundary, is a stale snapshot: the waiter keeps
+// polling and never certifies on it. A shrink, a rewritten end, a successor page or an identity
+// change stays terminal.
+function appendRecords(target, records) {
+  fs.appendFileSync(target, `${records.map((item) => JSON.stringify(item)).join("\n")}\n`);
+}
+
+function growingReader(afterRead) {
+  let reads = 0;
+  const reader = (filePath, options) => {
+    const result = readRolloutFile(filePath, options);
+    afterRead(reads, filePath);
+    reads += 1;
+    return result;
+  };
+  reader.reads = () => reads;
+  return reader;
+}
+
+function steppedClock(extra = {}) {
+  let clock = 0;
+  return { now: () => clock, sleep: async (ms) => { clock += ms; }, ...extra };
+}
+
+function growthOptions(root, rollout, extra = {}) {
+  return directOptions(root, rollout, path.join(root, "missing.reply.md"), {
+    acceptRolloutFallback: true,
+    budgetMs: 100,
+    intervalMs: 10,
+    ...extra,
+  });
+}
+
+await test("append-only growth after a certifying read keeps polling and certifies once settled", async () => {
+  const root = caseDir("growth-stale-then-done");
+  const rollout = writeRollout(root, ownOpenRecords());
+  const reader = growingReader((index, target) => {
+    if (index === 0) {
+      appendRecords(target, [event("agent_message", ownTurn, { phase: "commentary", message: "working" })]);
+    } else if (index === 1) {
+      appendRecords(target, [
+        event("agent_message", ownTurn, { phase: "final_answer", message: "grown body" }),
+        event("task_complete", ownTurn, { last_agent_message: "grown body" }),
+      ]);
+    }
+  });
+  const result = await waitForCompletion(growthOptions(root, rollout), steppedClock({ readRolloutFile: reader }));
+  assert.equal(result.token, "done", JSON.stringify(result));
+  assert.equal(result.replySource, "rollout-fallback");
+  assert.equal(reader.reads(), 3);
+  assert.equal(
+    result.diagnostics.filter((item) => item.code === "page-snapshot-stale").length,
+    1,
+    "a stale snapshot is recorded once",
+  );
+  assert.ok(result.diagnostics.some((item) =>
+    item.code === "page-snapshot-stale" && item.reason === "bound-page-grew"));
+  assert.ok(!result.diagnostics.some((item) => item.code === "page-supersession-unproven"));
+});
+
+await test("growth on every read stays pending through the budget and never certifies", async () => {
+  const root = caseDir("growth-stale-endless");
+  const rollout = writeRollout(root, ownCompletedRecords("already complete body"));
+  const reader = growingReader((index, target) => {
+    appendRecords(target, [event("token_count", undefined, { info: { total: index } })]);
+  });
+  const result = await waitForCompletion(
+    growthOptions(root, rollout, { budgetMs: 50 }),
+    steppedClock({ readRolloutFile: reader }),
+  );
+  assert.equal(result.token, "pending", JSON.stringify(result));
+  assert.ok(reader.reads() >= 2);
+  assert.ok(result.diagnostics.some((item) => item.code === "page-snapshot-stale"));
+});
+
+await test("a page that shrinks after the read stays unavailable", async () => {
+  const root = caseDir("growth-shrink");
+  const rollout = writeRollout(root, ownOpenRecords());
+  const reader = growingReader((index, target) => {
+    if (index === 0) {
+      const text = fs.readFileSync(target, "utf8");
+      fs.writeFileSync(target, text.slice(0, text.length - 8));
+    }
+  });
+  const result = await waitForCompletion(growthOptions(root, rollout), steppedClock({ readRolloutFile: reader }));
+  assert.equal(result.token, "unavailable", JSON.stringify(result));
+  assert.ok(result.diagnostics.some((item) =>
+    item.code === "page-supersession-unproven" && item.reason === "bound-page-size-changed"));
+});
+
+await test("growth whose old end is no longer a record boundary stays unavailable", async () => {
+  const root = caseDir("growth-rewritten-end");
+  const rollout = writeRollout(root, ownOpenRecords());
+  const reader = growingReader((index, target) => {
+    if (index === 0) {
+      const text = fs.readFileSync(target, "utf8");
+      fs.writeFileSync(target, `${text.slice(0, -1)} ${JSON.stringify(event("token_count", undefined))}\n`);
+    }
+  });
+  const result = await waitForCompletion(growthOptions(root, rollout), steppedClock({ readRolloutFile: reader }));
+  assert.equal(result.token, "unavailable", JSON.stringify(result));
+  assert.ok(result.diagnostics.some((item) =>
+    item.code === "page-supersession-unproven" && item.reason === "bound-page-size-changed"));
+});
+
+await test("a successor page still vetoes a growing bound page", async () => {
+  const root = caseDir("growth-successor");
+  const records = ownOpenRecords();
+  const rollout = writeRollout(root, records);
+  const reader = growingReader((index, target) => {
+    if (index === 0) {
+      const cutoff = fs.statSync(target).size;
+      appendRecords(target, [event("agent_message", ownTurn, { phase: "commentary", message: "working" })]);
+      writeSuccessor(root, records, cutoff, currentPageId);
+    }
+  });
+  const result = await waitForCompletion(growthOptions(root, rollout), steppedClock({ readRolloutFile: reader }));
+  assert.equal(result.token, "unavailable", JSON.stringify(result));
+  assert.ok(result.diagnostics.some((item) => item.code === "rollout-page-superseded"));
+  assert.ok(!result.diagnostics.some((item) => item.code === "page-snapshot-stale"));
+});
+
+await test("a replaced bound page (new identity, larger) stays unavailable", async () => {
+  const root = caseDir("growth-identity-swap");
+  const rollout = writeRollout(root, ownOpenRecords());
+  const reader = growingReader((index, target) => {
+    if (index === 0) {
+      const text = fs.readFileSync(target, "utf8");
+      fs.renameSync(target, `${target}.old`);
+      fs.writeFileSync(target, `${text}${JSON.stringify(event("token_count", undefined))}\n`);
+    }
+  });
+  const result = await waitForCompletion(growthOptions(root, rollout), steppedClock({ readRolloutFile: reader }));
+  assert.equal(result.token, "unavailable", JSON.stringify(result));
+  assert.ok(result.diagnostics.some((item) =>
+    item.code === "page-supersession-unproven" && item.reason === "bound-page-identity-changed"));
+});
+
+await test("the page assessor separates stale growth from a shrink and from an unchanged page", () => {
+  const root = caseDir("growth-assessor");
+  const rollout = writeRollout(root, ownOpenRecords());
+  const size = fs.statSync(rollout).size;
+  const firstLineEnd = Buffer.byteLength(JSON.stringify(sessionMeta())) + 1;
+  const assess = (expectedSize) => assessRolloutPageSupersession({
+    threadId: thread,
+    rolloutPath: rollout,
+    sessionsRoot: root,
+    expectedSize,
+  });
+  assert.equal(assess(size).status, "current");
+  const stale = assess(firstLineEnd);
+  assert.equal(stale.status, "stale");
+  assert.deepEqual(
+    stale.diagnostics.map((item) => [item.code, item.reason, item.expectedSize, item.size]),
+    [["page-snapshot-stale", "bound-page-grew", firstLineEnd, size]],
+  );
+  assert.equal(assess(firstLineEnd - 1).status, "unproven", "a non-boundary snapshot end");
+  assert.equal(assess(size + 1).status, "unproven", "a shrink");
+  assert.equal(assess(-1).status, "unproven", "a negative snapshot size");
+});
+
 console.log(`RESULT: ${passed} passed, 0 failed`);
 NODE
