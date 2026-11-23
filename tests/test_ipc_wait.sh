@@ -2193,5 +2193,48 @@ await test("the page assessor separates stale growth from a shrink and from an u
   assert.equal(assess(-1).status, "unproven", "a negative snapshot size");
 });
 
+await test("--materialize-reply requires the fallback flag and a resolvable reply path", () => {
+  const base = ["--thread", thread, "--dispatch", dispatch, "--materialize-reply"];
+  assert.throws(
+    () => parseWaitArgs([...base, "--reply-path", path.join(tmp, `${dispatch}.reply.md`)], {}),
+    /--materialize-reply requires --accept-rollout-fallback/,
+  );
+  assert.throws(
+    () => parseWaitArgs([...base, "--accept-rollout-fallback"], {}),
+    /--materialize-reply requires --reply-path or --session/,
+  );
+  assert.equal(parseWaitArgs([...base, "--accept-rollout-fallback", "--session", "sid"], {})
+    .options.materializeReply, true);
+});
+
+await test("the waiter keeps a rollout-only reply only with --materialize-reply; stdout stays the token", () => {
+  const root = caseDir("wait-materialize");
+  const rollout = writeRollout(root, ownCompletedRecords("materialized body"));
+  const channel = path.join(root, "transport", "sid", thread);
+  fs.mkdirSync(channel, { recursive: true });
+  fs.writeFileSync(path.join(channel, taskName), "task\n");
+  const replyPath = path.join(channel, `${dispatch}.reply.md`);
+  const copyPath = path.join(channel, `${dispatch}.reply.rollout.md`);
+  const args = [
+    "--thread", thread, "--dispatch", dispatch, "--reply-path", replyPath,
+    "--rollout-path", rollout, "--sessions-root", root, "--accept-rollout-fallback",
+  ];
+  const plain = cli(args);
+  assert.equal(plain.status, 0, plain.stderr);
+  assert.equal(plain.stdout, "done\n");
+  assert.equal(fs.existsSync(copyPath), false, "the waiter is read-only without the flag");
+  const first = cli([...args, "--materialize-reply"]);
+  assert.equal(first.status, 0, first.stderr);
+  assert.equal(first.stdout, "done\n");
+  assert.match(first.stderr, /"code":"reply-materialized","bytes":17,"sha256":"[0-9a-f]{64}"/);
+  assert.equal(fs.readFileSync(copyPath, "utf8"), "materialized body");
+  assert.equal(fs.existsSync(replyPath), false, "the primary reply file is never written");
+  const second = cli([...args, "--materialize-reply", "--status-exit-codes"]);
+  assert.equal(second.status, 0, second.stderr);
+  assert.equal(second.stdout, "done\n");
+  assert.match(second.stderr, /"code":"reply-materialize-refused","reason":"materialized-present"/);
+  assert.equal(fs.readFileSync(copyPath, "utf8"), "materialized body");
+});
+
 console.log(`RESULT: ${passed} passed, 0 failed`);
 NODE

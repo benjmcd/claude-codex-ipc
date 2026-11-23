@@ -32,7 +32,7 @@ Before force replacement, run the matching preview: `./install.sh --dry-run --fo
 | Client says `--model/--effort require --ack-thread-settings-change` | Those direct-client values persist as stored-thread settings. Supply the acknowledgement only when the operator explicitly intends the change. Values empty after trimming are always rejected. The maintained wrapper omits both fields. |
 | Goal-driven target already has an unfinished goal | Leave `--request-goal` off. Run `handoff_to_codex.sh --ipc <uuid> --deliver manual -- "<task>"` and have the operator paste its pickup line into the intended thread. A closed turn is not a prerequisite; expect `pending` until the named dispatch has its own completion evidence. Never call `turn/interrupt` or resend merely to manufacture an idle gap. |
 | `--ipc` → `failed-closed` with pipe/connect errors | The host gate passed, but the private router attempt failed or drifted. Run `codex_ipc_revalidate.mjs`; suspect drift before suspecting the target. This is post-attempt ambiguity, so do not resend. |
-| `--ipc` → `gui-unowned -- reason=router-absent` | Codex Desktop 26.1117 and later serve no router pipe (`\\.\pipe\codex-ipc`); the router was removed upstream. Nothing was sent, so the printed pickup line is safe. Use `--deliver manual` on these builds. `reason=router-unreachable` is the same pre-write outcome for any other connect failure. |
+| `--ipc` → `gui-unowned -- reason=router-absent` | Codex Desktop 26.1117 and later serve no router pipe (`\\.\pipe\codex-ipc`); the router was removed upstream. The host policy refuses a proven 26.1117+ host before any pipe contact (the `HOST-WARNING` line names its version); a host of unknown version finds no pipe. Nothing was sent, so the printed pickup line is safe. Use `--deliver manual` on these builds. `reason=router-unreachable` is the same pre-write outcome for any other connect failure. |
 | `reason=autoload-disabled` / `protocol-host-not-package` | Guarded recovery stopped because activation is off (the default), or the intended host is alternate and therefore never package-activated. The category does not independently prove current ownership. Use the printed file-drop line in the intended host. |
 | `reason=autoload-policy-refused` | The helper's fresh activation gate refused. Current real-machine readers do not qualify package-update clearance or the effective protocol handler, so this is the expected result for an unowned real package thread even with `--autoload codex-uri`. Revalidation or historical proof does not override it. |
 | `--ipc` → `gui-unowned` repeatedly | Neither `gui-unowned` nor `confirmation=not-attempted` alone authorizes pickup or retry. Pickup needs eligible target inspection and non-admission; eligible-target host refusals and exact no-client recovery retain the printed safe line. Confirm current target/host state before using it. Do not open the protocol URI manually to bypass the policy. |
@@ -60,6 +60,10 @@ Paste the printed pickup and run the printed `WAIT:` command. When the reply fil
 named dispatch has a certifiable final message, the waiter returns `done` with
 `replySource=rollout-fallback`; render it with
 `skills/ipc/scripts/codex_ipc_replies.sh --session <sid> -c <uuid> --rollout-path <inspector-page>`.
+The printed `WAIT:` line includes `--materialize-reply`, so that body is also kept beside the
+envelope as `<dispatch>.reply.rollout.md` and stays readable after Codex compresses the page to
+`.jsonl.zst`. A `WAIT_DIAGNOSTIC` line reports `reply-materialized` or
+`reply-materialize-refused` with its reason; the `done` token and exit code are unaffected.
 The public root remains `~/.claude/ipc`. Pointing `CODEX_IPC_ROOT` at a directory the target can
 write is an operator configuration choice, and every participant must use that same explicit root;
 the tool never hard-codes a replacement or predicts writability from stored sandbox settings.
@@ -158,6 +162,10 @@ Preserve intentional Unicode; do not normalize or auto-convert it.
 ## After a Codex Desktop update
 
 1. `node skills/ipc/scripts/codex_ipc_revalidate.mjs --thread <conversation-id>` (validate-only).
+   On a 26.1117+ host, `codexPipePresence` reporting the pipe absent is expected (these builds
+   serve no router), and so is `connect ENOENT` from the live read or `codex_ipc_probe.mjs`. A
+   process serving `\\.\pipe\codex-ipc` there is not the Desktop; the probe would send it
+   `initialize`, so skip the live read on such a host.
 2. Inspect `checks.hostPolicy`: it is the current send-eligibility authority. A refusal suppresses
    the optional live read. If it passes and drift is suspected, `--allow-live-ipc-read --timeout-ms
    1500` re-proves router framing (sends `initialize` only).

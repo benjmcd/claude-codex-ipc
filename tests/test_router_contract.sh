@@ -573,6 +573,11 @@ case "$name" in
         exit 0
         ;;
       malformed-success) printf '%s\n' '{"ok":true,"resultType":"success"}'; exit 0 ;;
+      routerless-host|routerless-unversioned|router-malformed-expectation|router-expected-host)
+        printf 'client invoked: %s\n' "$ROUTER_CASE" >> "$TOOL_LOG.client"
+        printf '{"ok":true,"targetThreadId":"%s","sentRequests":[{"name":"thread-follower-start-turn","json":{"method":"thread-follower-start-turn","params":{"conversationId":"%s"}}}],"response":{"resultType":"success"}}\n' "$target" "$target"
+        exit 0
+        ;;
       no-client|no-client-orphan|no-client-archived|no-client-invalid-archive|no-client-db-unavailable|no-client-warning)
         printf '{"ok":false,"targetThreadId":"%s","sentRequests":[{"name":"thread-follower-start-turn","json":{"method":"thread-follower-start-turn","params":{"conversationId":"%s"}}}],"response":{"resultType":"error","error":"no-client-found"}}\n' "$target" "$target"
         exit 1
@@ -658,7 +663,15 @@ for argument in "$@"; do
 done
 if [[ "${script##*/}" == "codex_ipc_host_policy.ps1" ]]; then
   printf '%s\n' "$*" >> "$POLICY_LOG"
-  echo '{"schemaVersion":1,"ok":true,"purpose":"send","configuration":{"valid":true,"autoload":{"value":"codex-uri","source":"environment"},"intendedHost":{"kind":"package","executable":null,"source":"default"}},"inventory":{"complete":true,"guiHosts":[{"matchesIntended":true}],"appServers":[]},"sendEligible":true,"sendReasons":[],"activationEligible":false,"activationReasons":["not-checked"]}'
+  case "${ROUTER_CASE:-}" in
+    routerless-host) echo '{"schemaVersion":1,"ok":true,"purpose":"send","configuration":{"valid":true,"autoload":{"value":"codex-uri","source":"environment"},"intendedHost":{"kind":"package","executable":null,"source":"default"}},"inventory":{"complete":true,"guiHosts":[{"matchesIntended":true}],"appServers":[]},"sendEligible":true,"sendReasons":[],"activationEligible":false,"activationReasons":["not-checked"],"intendedHostVersion":"26.1117.4957.0","routerExpected":false}' ;;
+    routerless-unversioned) echo '{"schemaVersion":1,"ok":true,"purpose":"send","configuration":{"valid":true,"autoload":{"value":"codex-uri","source":"environment"},"intendedHost":{"kind":"package","executable":null,"source":"default"}},"inventory":{"complete":true,"guiHosts":[{"matchesIntended":true}],"appServers":[]},"sendEligible":true,"sendReasons":[],"activationEligible":false,"activationReasons":["not-checked"],"intendedHostVersion":null,"routerExpected":false}' ;;
+    router-malformed-expectation) echo '{"schemaVersion":1,"ok":true,"purpose":"send","configuration":{"valid":true,"autoload":{"value":"codex-uri","source":"environment"},"intendedHost":{"kind":"package","executable":null,"source":"default"}},"inventory":{"complete":true,"guiHosts":[{"matchesIntended":true}],"appServers":[]},"sendEligible":true,"sendReasons":[],"activationEligible":false,"activationReasons":["not-checked"],"intendedHostVersion":"26.1117.4957.0","routerExpected":"no"}' ;;
+    router-expected-host) echo '{"schemaVersion":1,"ok":true,"purpose":"send","configuration":{"valid":true,"autoload":{"value":"codex-uri","source":"environment"},"intendedHost":{"kind":"package","executable":null,"source":"default"}},"inventory":{"complete":true,"guiHosts":[{"matchesIntended":true}],"appServers":[]},"sendEligible":true,"sendReasons":[],"activationEligible":false,"activationReasons":["not-checked"],"intendedHostVersion":"26.1111.9664.0","routerExpected":true}' ;;
+    *)
+      echo '{"schemaVersion":1,"ok":true,"purpose":"send","configuration":{"valid":true,"autoload":{"value":"codex-uri","source":"environment"},"intendedHost":{"kind":"package","executable":null,"source":"default"}},"inventory":{"complete":true,"guiHosts":[{"matchesIntended":true}],"appServers":[]},"sendEligible":true,"sendReasons":[],"activationEligible":false,"activationReasons":["not-checked"]}'
+      ;;
+  esac
   exit 0
 fi
 printf 'powershell.exe invoked: %s\n' "$*" >> "$TOOL_LOG"
@@ -777,6 +790,42 @@ run_wrapper_case connect-claim-other-target 1 \
   "RESULT: failed-closed -- reason=router-pipe-failure -- confirmation=unknown" \
   "a connect claim for another thread stays ambiguous" \
   "FALLBACK -- file-drop is ready"
+# A host the policy proves to be a 26.1117+ build serves no router: the wrapper refuses before the
+# client runs, so nothing contacts any process serving that pipe name. An unknown or older
+# version keeps the client path; a malformed expectation fails closed.
+run_wrapper_case routerless-host 1 \
+  "RESULT: gui-unowned -- reason=router-absent -- confirmation=not-attempted" \
+  "a routerless (26.1117+) intended host is refused before the client"
+run_wrapper_case routerless-unversioned 1 \
+  "RESULT: gui-unowned -- reason=host-policy-invalid -- confirmation=not-attempted" \
+  "a routerless claim without a host version fails closed as invalid policy"
+run_wrapper_case router-malformed-expectation 1 \
+  "RESULT: gui-unowned -- reason=host-policy-invalid -- confirmation=not-attempted" \
+  "a non-boolean router expectation fails closed as invalid policy"
+if grep -Eq 'client invoked: (routerless-host|routerless-unversioned|router-malformed-expectation)' "$TOOL_LOG.client"; then
+  no "the client ran for a refused router expectation"
+else
+  ok "no client ran for a routerless or malformed router expectation (zero pipe contact)"
+fi
+run_wrapper_case router-expected-host 0 \
+  "RESULT: gui-delivered -- reason=renderer-owned -- confirmation=rollout-hit" \
+  "a host that still expects a router keeps the client path"
+grep -q 'client invoked: router-expected-host' "$TOOL_LOG.client" \
+  && ok "the client runs for a host that expects a router" \
+  || no "the client did not run for a router-expecting host"
+_routerless_out="$(env PATH="$STUB_BIN:$PATH" REAL_NODE="$NODE_BIN" ROUTER_CASE=routerless-host \
+  TOOL_LOG="$TOOL_LOG" POLICY_LOG="$POLICY_LOG" HOME="$TMP/routerless-pickup/home" \
+  CLAUDE_SESSION_ID="33333333-3333-4333-8333-333333333333" CODEX_IPC_ROOT="$TMP/routerless-pickup/ipc" \
+  CODEX_IPC_AUTOLOAD=codex-uri CODEX_IPC_RETENTION_DAYS=0 \
+  bash "$WRAPPER" --ipc "$THREAD" "$TASK_TEXT" 2>&1)"
+if printf '%s\n' "$_routerless_out" | grep -Fq "FALLBACK -- file-drop is ready" \
+  && printf '%s\n' "$_routerless_out" | grep -Fq "intended host 26.1117.4957.0 is a Codex Desktop 26.1117+ build"; then
+  ok "the routerless refusal names the host version and prints the pickup line"
+else
+  no "routerless refusal output is wrong"
+  printf '%s\n' "$_routerless_out" | sed -n '1,20p'
+fi
+unset _routerless_out
 for _pickup_case in router-absent router-unreachable; do
   _pickup_out="$(env PATH="$STUB_BIN:$PATH" REAL_NODE="$NODE_BIN" ROUTER_CASE="$_pickup_case" \
     TOOL_LOG="$TOOL_LOG" POLICY_LOG="$POLICY_LOG" HOME="$TMP/$_pickup_case/home" \

@@ -43,6 +43,15 @@ it writes, locks, and creates nothing (not even the transport root). Flags:
 closed (exit 1, never a false "0 replies"). Per-entry (session/thread/dispatch) attribution is what
 keeps this a view rather than a re-commingling of channels.
 
+A materialized rollout copy (`<dispatch>.reply.rollout.md`, written only by the opt-in
+`codex_ipc_wait.mjs --materialize-reply` or `codex_ipc_reply_harvest.mjs --materialize` after the
+harvester's fallback certification, with `.reply.rollout.json` provenance) renders as
+`source=rollout-materialized` when no primary `.reply.md` exists; a primary always wins. The
+supersession check runs against it while the rollout is readable, and the footer counts it as
+answered scope-wide. The retention sweep treats it like a reply: an aged task is swept once a reply
+or a copy exists, and aged copies are swept like replies. Writes use an exclusively created
+private temp file hard-linked into place, so an existing file is never replaced.
+
 After each dispatch's body the view prints a labelled section of the recorded reasoning of that
 dispatch's own turn (`--reasoning full|headline|none`, default `full`; items whole unless
 `--reasoning-max-item-chars` caps them; `--reasoning-max-bytes`, 64000 per dispatch by default, is a
@@ -223,7 +232,11 @@ IPC router named pipe (`\\.\pipe\codex-ipc`, `thread-follower-start-turn`). This
 updates.
 
 Codex Desktop 26.1117 and later serve no router pipe; the router was removed upstream after
-26.1111. The client lists the Windows pipe namespace before connecting and reports a missing pipe,
+26.1111. The host policy emits the intended GUI's version (`intendedHostVersion`, from its
+`resources\owl-app.ini` `AppVersion`, else its Store package folder name) and `routerExpected`
+(`false` from 26.1117, `true` before, `null` when unknown). On `false` the send gate refuses with
+`gui-unowned -- reason=router-absent -- confirmation=not-attempted` and the pickup line before the
+client runs, so no process serving that pipe name is ever contacted. For any other host the client lists the Windows pipe namespace before connecting and reports a missing pipe,
 or any other connect-phase failure, as a structured `phase: "connect"` result with no sent
 requests. Every frame is written only after connect, so the wrapper maps that exact structure to
 `gui-unowned -- reason=router-absent|router-unreachable -- confirmation=not-attempted` and prints

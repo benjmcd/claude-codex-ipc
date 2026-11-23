@@ -656,11 +656,16 @@ NODE
         eval "$WAIT23B_CMD --budget-ms 0"
       ) >"$WAIT23B_OUT" 2>"$WAIT23B_ERR"; WAIT23B_RC=$?
       printf 'done\n' > "$TMP/wait23b.expected"
+      # The printed WAIT carries --materialize-reply: after done/rollout-fallback the waiter keeps
+      # the certified body beside the envelope and reports it in one more stderr diagnostic.
+      COPY23B="${REPLY23B%.reply.md}.reply.rollout.md"
       if [[ $WAIT23B_RC -eq 0 ]] && cmp -s "$TMP/wait23b.expected" "$WAIT23B_OUT" \
-          && [[ "$(wc -l < "$WAIT23B_ERR" | tr -d ' ')" -eq 1 ]] \
+          && [[ "$(wc -l < "$WAIT23B_ERR" | tr -d ' ')" -eq 2 ]] \
           && grep -Fxq 'WAIT_DIAGNOSTIC {"code":"reply-source","source":"rollout-fallback"}' "$WAIT23B_ERR" \
+          && grep -Eq '^WAIT_DIAGNOSTIC \{"code":"reply-materialized","bytes":24,"sha256":"[0-9a-f]{64}"\}$' "$WAIT23B_ERR" \
+          && [[ -f "$COPY23B" && "$(cat "$COPY23B")" == "C3-SANDBOX-FALLBACK-BODY" ]] \
           && ! grep -Fq 'C3-SANDBOX-FALLBACK-BODY' "$WAIT23B_OUT" "$WAIT23B_ERR"; then
-        ok "real waiter certifies the absent-reply dispatch from the bound multi-page rollout"
+        ok "real waiter certifies the absent-reply dispatch from the bound multi-page rollout and keeps a copy"
       else
         no "real waiter failed multi-page fallback (rc=$WAIT23B_RC out=$(cat "$WAIT23B_OUT") err=$(cat "$WAIT23B_ERR"))"
       fi
@@ -671,6 +676,18 @@ NODE
         PAGE23B_CURRENT="$PAGE23B_CURRENT" THREAD23B="$U1" PATH="$BIN23B:$PATH" \
         bash "$SCRIPT" --session seam23b -c "$U1" --rollout-path "$PAGE23B_CURRENT" 2>&1)"; VRC=$?
       HASH23B_AFTER="$(sha256sum "$TASK23B" "$PAGE23B_OLD" "$PAGE23B_CURRENT")"
+      if [[ $VRC -eq 0 && "$VOUT" == *"source=rollout-materialized"* \
+            && "$VOUT" == *"C3-SANDBOX-FALLBACK-BODY"* ]]; then
+        ok "real viewer renders the materialized copy of the certified multi-page body"
+      else
+        no "real viewer failed materialized rendering (rc=$VRC out=$VOUT)"
+      fi
+      rm -f "$COPY23B" "${REPLY23B%.reply.md}.reply.rollout.json"
+      VOUT="$(env CODEX_IPC_ROOT="$SEAM23B_ROOT" CLAUDE_CODE_SESSION_ID=seam23b \
+        CODEX_IPC_SESSIONS_ROOT="$SEAM23B_PAGES" REAL_NODE23B="$REAL_NODE23B" \
+        INSPECT23B_COUNT="$INSPECT23B_COUNT" FORBIDDEN23B="$FORBIDDEN23B" \
+        PAGE23B_CURRENT="$PAGE23B_CURRENT" THREAD23B="$U1" PATH="$BIN23B:$PATH" \
+        bash "$SCRIPT" --session seam23b -c "$U1" --rollout-path "$PAGE23B_CURRENT" 2>&1)"; VRC=$?
       if [[ $VRC -eq 0 && "$VOUT" == *"source=rollout-fallback"* \
             && "$VOUT" == *"C3-SANDBOX-FALLBACK-BODY"* ]]; then
         ok "real viewer renders the certified multi-page rollout fallback body"
@@ -680,7 +697,7 @@ NODE
       if [[ ! -e "$REPLY23B" && "$HASH23B_BEFORE" == "$HASH23B_AFTER" \
             && "$(wc -l < "$INSPECT23B_COUNT" | tr -d ' ')" -eq 1 \
             && ! -e "$FORBIDDEN23B" ]]; then
-        ok "fallback path stays read-only, keeps reply absent, inspects once, and makes zero live contacts"
+        ok "fallback path leaves task and pages unchanged, keeps the primary reply absent, inspects once, and makes zero live contacts"
       else
         no "fallback seam mutated evidence, created a reply, re-inspected, or touched a live child"
       fi

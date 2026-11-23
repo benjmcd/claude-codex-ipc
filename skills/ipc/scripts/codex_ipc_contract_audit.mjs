@@ -842,6 +842,17 @@ function main() {
           contains("scripts/codex_ipc_autoload.ps1", "foreground-alternate-host"),
       },
       {
+        label: "a proven 26.1117+ intended host is refused inside the send gate, before the client, with the pickup line",
+        file: "scripts/handoff_to_codex.sh",
+        ok:
+          contains("scripts/codex_ipc_host_policy.ps1", "return ([version]::new($parsed.Major, $parsed.Minor) -lt [version]::new(26, 1117))") &&
+          contains("scripts/codex_ipc_host_policy.ps1", "intendedHostVersion = $intendedHostVersion") &&
+          contains("scripts/codex_ipc_host_policy.ps1", "routerExpected = $routerExpected") &&
+          contains("scripts/handoff_to_codex.sh", 'if (routerExpected === false && typeof hostVersion !== "string") process.exit(1);') &&
+          contains("scripts/handoff_to_codex.sh", 'HOST_POLICY_REFUSAL_REASON="router-absent"') &&
+          /host_policy_send\(\) \{[\s\S]*HOST_POLICY_REFUSAL_REASON="router-absent"[\s\S]*?\n    \}\n    report_host_policy_refusal\(\) \{/.test(handoffText),
+      },
+      {
         label: "a connect-phase failure is pre-write non-admission only in its exact structure, on the first attempt and every retry",
         file: "scripts/handoff_to_codex.sh",
         ok:
@@ -1016,6 +1027,25 @@ function main() {
           contains("scripts/codex_ipc_rollout_observe.mjs", 'if (assessment.status === "stale") {') &&
           contains("scripts/codex_ipc_rollout_observe.mjs", 'if (page === "current" && admissionObserved && !hardReadFailure) {') &&
           contains("scripts/codex_ipc_reply_harvest.mjs", 'if (pageAssessment.status === "stale") {'),
+      },
+      {
+        label: "rollout replies are materialized only by explicit opt-in, after certification, beside the envelope, never over anything",
+        file: "scripts/codex_ipc_reply_harvest.mjs",
+        ok:
+          contains("scripts/codex_ipc_reply_harvest.mjs", "export function materializeDispatch(options)") &&
+          contains("scripts/codex_ipc_reply_harvest.mjs", 'descriptor = fs.openSync(temp, "wx", 0o600);') &&
+          contains("scripts/codex_ipc_reply_harvest.mjs", "fs.linkSync(temp, target);") &&
+          contains("scripts/codex_ipc_reply_harvest.mjs", 'if (lstatOrNull(replyPath)) return materializeRefused("primary-present");') &&
+          contains("scripts/codex_ipc_reply_harvest.mjs", 'return materializeRefused("dispatch-id-reused", harvested.diagnostics);') &&
+          contains("scripts/codex_ipc_reply_harvest.mjs", 'if (harvested.source !== "rollout-fallback") {') &&
+          contains("scripts/codex_ipc_reply_harvest.mjs", 'return materializeRefused("body-too-large", [], { sourceBytes: harvested.sourceBytes });') &&
+          contains("scripts/codex_ipc_reply_harvest.mjs", "export const MATERIALIZED_REPLY_SUFFIX = \".reply.rollout.md\";") &&
+          contains("scripts/codex_ipc_wait.mjs", "--materialize-reply requires --accept-rollout-fallback") &&
+          contains("scripts/codex_ipc_wait.mjs", 'result.replySource === "rollout-fallback") {') &&
+          contains("scripts/handoff_to_codex.sh", "--status-exit-codes --materialize-reply)") &&
+          contains("scripts/handoff_to_codex.sh", "-name '*.reply.rollout.md' -o -name '*.reply.rollout.json'") &&
+          contains("scripts/codex_ipc_replies.sh", 'reply_source="rollout-materialized"') &&
+          !contains("scripts/codex_ipc_replies.sh", "--materialize"),
       },
       {
         label: "archived (zstd) pages never become record sources, and an archived paginated page is read for the veto or fails it closed",

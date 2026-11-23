@@ -36,8 +36,9 @@ Codex; never auto-switched), `foreground-restore-unproven` (restore-if-known is 
 `target-non-root`/`target-model-empty`/`target-inspection-ambiguous` (positive target proof
 required before any maintained-wrapper live attempt),
 `router-pipe-failure`, `foreground-switch-unacknowledged`, `invalid-foreground-policy`,
-`router-absent` (no router pipe: Codex Desktop 26.1117 and later serve none; nothing was sent,
-so the pickup line is printed — use `--deliver manual`), `router-unreachable` (the pipe could not
+`router-absent` (no router: Codex Desktop 26.1117 and later serve none. The host policy refuses a
+proven 26.1117+ host before any pipe contact, and a host of unknown version finds no pipe; nothing
+was sent, so the pickup line is printed — use `--deliver manual`), `router-unreachable` (the pipe could not
 be connected; nothing was sent, pickup printed).
 The target snapshot is run once before the first live attempt and reused across auto-load recovery;
 the host inventory still runs fresh before each send or retry. `target-non-root` may print a known

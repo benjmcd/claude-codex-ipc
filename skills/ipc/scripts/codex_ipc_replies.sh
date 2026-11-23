@@ -363,13 +363,19 @@ for entry in "${ENTRIES[@]}"; do
         continue
     fi
     reply_readable=0
+    reply_source="reply-file"
+    materialized_path="${dispatch_dir}/${dispatch}.reply.rollout.md"
     if [[ -f "$reply_path" && ! -L "$reply_path" ]] \
         && head -c 0 -- "$reply_path" >/dev/null 2>&1; then
         reply_readable=1; kind="reply"; p="$reply_path"
+    elif [[ -f "$materialized_path" && ! -L "$materialized_path" ]] \
+        && head -c 0 -- "$materialized_path" >/dev/null 2>&1; then
+        # A certified rollout body the harvester's materialize mode kept; a primary reply always wins.
+        reply_readable=1; kind="reply"; p="$materialized_path"; reply_source="rollout-materialized"
     fi
     bytes="$(stat -c %s "$p" 2>/dev/null || echo 0)"
     if [[ "$PATHS_ONLY" -eq 1 ]]; then
-        if [[ "$kind" == "reply" ]]; then path_source="reply-file"; else path_source="task-envelope"; fi
+        if [[ "$kind" == "reply" ]]; then path_source="$reply_source"; else path_source="task-envelope"; fi
         printf '%s\t%s\t%s\t%s\t%s\t"%s"\n' "$when" "$thread" "$dispatch" "$bytes" "$path_source" "$(to_win "$p")"
         continue
     fi
@@ -378,8 +384,9 @@ for entry in "${ENTRIES[@]}"; do
     if [[ "$reply_readable" -eq 1 ]] && command -v node >/dev/null 2>&1 \
         && [[ -f "$HARVESTER" && "$thread" != "filedrop" && -f "$task_path" && ! -L "$task_path" ]]; then
         harvest_output=""
+        # The supersession check also runs for a materialized copy while its rollout is readable.
         if harvest_output="$(node "$HARVESTER" --thread "$thread" --dispatch "$dispatch" \
-            --reply-path "$reply_path" --max-bytes "$MAX_BYTES" "${ROLLOUT_ARGS[@]}" 2>&1)"; then
+            --reply-path "$p" --max-bytes "$MAX_BYTES" "${ROLLOUT_ARGS[@]}" 2>&1)"; then
             printf '%s\n' "$harvest_output" \
                 | grep -E '^(ROLLOUT-PATH|ROLLOUT-PAGE):|^ROLLOUT_DIAGNOSTIC \{"code":"(turn-error|turn-model-state)"' || true
             if printf '%s\n' "$harvest_output" \
@@ -449,12 +456,16 @@ for entry in "${ENTRIES[@]}"; do
         echo ""
         continue
     fi
-    echo "=== [$i] ${when} | thread: ${tlabel} | dispatch: ${dispatch} | source=reply-file | ${bytes} B"
+    echo "=== [$i] ${when} | thread: ${tlabel} | dispatch: ${dispatch} | source=${reply_source} | ${bytes} B"
     echo "    \"$(to_win "$p")\""
+    reply_label="Primary reply"; selected_label="Selected primary"
+    if [[ "$reply_source" == "rollout-materialized" ]]; then
+        reply_label="Materialized rollout copy"; selected_label="Materialized rollout copy"
+    fi
     if [[ "$reply_superseded" -eq 1 ]]; then
-        echo "    [WARNING: REPLY-SUPERSEDED] Primary reply may be superseded; inspect the dispatch thread before relying on it."
+        echo "    [WARNING: REPLY-SUPERSEDED] ${reply_label} may be superseded; inspect the dispatch thread before relying on it."
     elif [[ "$reply_supersession_status" == "pending" || "$reply_supersession_status" == "unavailable" ]]; then
-        echo "    [CAUTION: REPLY-SUPERSESSION-${reply_supersession_status^^}] Selected primary may be stale; freshness and supersession could not be certified."
+        echo "    [CAUTION: REPLY-SUPERSESSION-${reply_supersession_status^^}] ${selected_label} may be stale; freshness and supersession could not be certified."
     fi
     if [[ "$bytes" -eq 0 ]]; then
         echo "    (empty — possibly mid-write or pending; re-run to refresh)"
@@ -482,7 +493,8 @@ rollout_answered=0
 while IFS= read -r t; do
     [[ -n "$t" ]] || continue
     d="$(dirname "$t")"; base="$(basename "$t" .task.md)"
-    [[ -f "${d}/${base}.reply.md" ]] && continue
+    # A primary reply or a materialized rollout copy answers the dispatch, scope-wide.
+    [[ -f "${d}/${base}.reply.md" || -f "${d}/${base}.reply.rollout.md" ]] && continue
     if [[ -n "${ROLLOUT_ANSWERED["$(basename "$d")/${base}"]+x}" ]]; then
         rollout_answered=$(( rollout_answered + 1 ))
     else

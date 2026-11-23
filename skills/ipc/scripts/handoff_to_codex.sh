@@ -34,8 +34,9 @@
 #   CODEX_IPC_RETENTION_DAYS=<n>       prune transport files older than n days on each run.
 #                                      KEEP-ONLY BY DEFAULT: unset, empty and 0 all mean never
 #                                      delete; pruning requires an explicit positive integer.
-#                                      When enabled: aged *.reply.md files, and aged
-#                                      *.task.md files whose same-dispatch *.reply.md exists, are
+#                                      When enabled: aged *.reply.md files, aged materialized
+#                                      *.reply.rollout.md/.json copies, and aged *.task.md files
+#                                      whose same-dispatch reply or materialized copy exists, are
 #                                      deleted. An UNREPLIED *.task.md is NEVER age-deleted: an
 #                                      outstanding dispatch is kept until it is answered, and
 #                                      pairing ambiguity errs toward retention.
@@ -522,14 +523,18 @@ if (( 10#$RETENTION_DAYS > 0 )); then
     if [[ "$RETENTION_SWEEP_OK" -eq 1 ]]; then
         # Aged tasks first, deciding pairing BEFORE any reply is deleted below --
         # otherwise an aged pair's task would misread as unreplied and never sweep.
+        # A materialized rollout copy (*.reply.rollout.md) answers its dispatch like a reply.
         while IFS= read -r -d '' AGED_TASK; do
-            if [[ -f "${AGED_TASK%.task.md}.reply.md" ]]; then
+            if [[ -f "${AGED_TASK%.task.md}.reply.md" || -f "${AGED_TASK%.task.md}.reply.rollout.md" ]]; then
                 rm -f -- "$AGED_TASK" \
                     || echo "WARNING: retention sweep could not delete \"${AGED_TASK}\"." >&2
             fi
         done < <(find "$IPC_ROOT" -type f -name '*.task.md' -mtime +"$RETENTION_DAYS" -print0 2>/dev/null)
-        # Aged replies are terminal artifacts: sweepable unconditionally, as before.
+        # Aged replies, and aged materialized copies with their provenance, are terminal artifacts:
+        # sweepable unconditionally, as before.
         find "$IPC_ROOT" -type f -name '*.reply.md' -mtime +"$RETENTION_DAYS" -delete 2>/dev/null || true
+        find "$IPC_ROOT" -type f \( -name '*.reply.rollout.md' -o -name '*.reply.rollout.json' \) \
+            -mtime +"$RETENTION_DAYS" -delete 2>/dev/null || true
         find "$IPC_ROOT" -mindepth 1 -type d -empty -mtime +"$RETENTION_DAYS" -delete 2>/dev/null || true
     else
         echo "WARNING: refusing retention sweep for dangerous CODEX_IPC_ROOT \"${IPC_ROOT}\"." >&2
@@ -932,7 +937,9 @@ process.stdout.write([state, parent, legacy, rolloutPath, sessionsRoot].join("\t
             --thread "$IPC_CID" --dispatch "$DISPATCH_ID" --reply-path "$INBOUND")
         [[ -z "$INSPECT_ROLLOUT_PATH" ]] || wait_args+=(--rollout-path "$INSPECT_ROLLOUT_PATH")
         [[ -z "$INSPECT_SESSIONS_ROOT" ]] || wait_args+=(--sessions-root "$INSPECT_SESSIONS_ROOT")
-        wait_args+=(--accept-rollout-fallback --budget-ms 1800000 --interval-ms 1000 --status-exit-codes)
+        # --materialize-reply keeps a certified rollout-only reply beside the envelope, so it stays
+        # readable after Codex compresses the page; it never writes the primary reply file.
+        wait_args+=(--accept-rollout-fallback --budget-ms 1800000 --interval-ms 1000 --status-exit-codes --materialize-reply)
         printf 'WAIT:'
         printf ' %q' "${wait_args[@]}"
         printf '\n'
@@ -1117,13 +1124,27 @@ if (value.sendEligible === true &&
   process.exit(1);
 }
 if (value.sendEligible === false && reasons.length === 0) process.exit(1);
+// routerExpected: false only for an intended host proven to be a routerless (26.1117+) build;
+// absent or null means unknown, which keeps the connect-phase path.
+const routerExpected = value.routerExpected;
+const hostVersion = value.intendedHostVersion;
+if (routerExpected !== undefined && routerExpected !== null && typeof routerExpected !== "boolean") {
+  process.exit(1);
+}
+if (hostVersion !== undefined && hostVersion !== null &&
+    (typeof hostVersion !== "string" || !/^\d+(?:\.\d+){1,3}$/.test(hostVersion))) {
+  process.exit(1);
+}
+if (routerExpected === false && typeof hostVersion !== "string") process.exit(1);
 process.stdout.write([
   autoload.value,
   autoload.source,
   intended.kind,
   intended.source,
   value.sendEligible ? "true" : "false",
-  reasons.join(","),
+  reasons.join(",") || "-",
+  routerExpected === true ? "true" : routerExpected === false ? "false" : "unknown",
+  typeof hostVersion === "string" ? hostVersion : "-",
 ].join("\t"));
 ' 2>/dev/null) || policy_fields=""
         if [[ -z "$policy_fields" ]]; then
@@ -1133,10 +1154,11 @@ process.stdout.write([
             return 1
         fi
 
-        local send_eligible
+        local send_eligible router_expected host_version
         IFS=$'\t' read -r HOST_AUTOLOAD_EFFECTIVE HOST_AUTOLOAD_SOURCE \
             HOST_INTENDED_KIND_EFFECTIVE HOST_INTENDED_SOURCE send_eligible \
-            HOST_POLICY_REASON_LIST <<< "$policy_fields"
+            HOST_POLICY_REASON_LIST router_expected host_version <<< "$policy_fields"
+        [[ "$HOST_POLICY_REASON_LIST" == "-" ]] && HOST_POLICY_REASON_LIST=""
         echo "POLICY: autoload=${HOST_AUTOLOAD_EFFECTIVE} (source: ${HOST_AUTOLOAD_SOURCE}) intended-host=${HOST_INTENDED_KIND_EFFECTIVE} (source: ${HOST_INTENDED_SOURCE})"
         if [[ "$send_eligible" != "true" ]]; then
             HOST_POLICY_REFUSAL=1
@@ -1146,6 +1168,15 @@ process.stdout.write([
                 *,intended-host-not-running,*) HOST_POLICY_REFUSAL_REASON="intended-host-not-running" ;;
                 *) HOST_POLICY_REFUSAL_REASON="host-policy-invalid" ;;
             esac
+            return 1
+        fi
+        # A proven 26.1117+ intended host serves no router, so a server of that pipe name could only
+        # be another process. Refuse before the client runs: zero pipe contact, pickup is safe.
+        # An unknown version keeps the client's connect-phase handling.
+        if [[ "$router_expected" == "false" ]]; then
+            HOST_POLICY_REFUSAL=1
+            HOST_POLICY_REFUSAL_REASON="router-absent"
+            HOST_POLICY_REASON_LIST="intended host ${host_version} is a Codex Desktop 26.1117+ build, which serves no IPC router"
             return 1
         fi
         return 0
