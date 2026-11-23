@@ -842,6 +842,17 @@ function main() {
           contains("scripts/codex_ipc_autoload.ps1", "foreground-alternate-host"),
       },
       {
+        label: "a proven 26.1117+ intended host is refused inside the send gate, before the client, with the pickup line",
+        file: "scripts/handoff_to_codex.sh",
+        ok:
+          contains("scripts/codex_ipc_host_policy.ps1", "return ([version]::new($parsed.Major, $parsed.Minor) -lt [version]::new(26, 1117))") &&
+          contains("scripts/codex_ipc_host_policy.ps1", "intendedHostVersion = $intendedHostVersion") &&
+          contains("scripts/codex_ipc_host_policy.ps1", "routerExpected = $routerExpected") &&
+          contains("scripts/handoff_to_codex.sh", 'if (routerExpected === false && typeof hostVersion !== "string") process.exit(1);') &&
+          contains("scripts/handoff_to_codex.sh", 'HOST_POLICY_REFUSAL_REASON="router-absent"') &&
+          /host_policy_send\(\) \{[\s\S]*HOST_POLICY_REFUSAL_REASON="router-absent"[\s\S]*?\n    \}\n    report_host_policy_refusal\(\) \{/.test(handoffText),
+      },
+      {
         label: "a connect-phase failure is pre-write non-admission only in its exact structure, on the first attempt and every retry",
         file: "scripts/handoff_to_codex.sh",
         ok:

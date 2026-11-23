@@ -232,7 +232,11 @@ IPC router named pipe (`\\.\pipe\codex-ipc`, `thread-follower-start-turn`). This
 updates.
 
 Codex Desktop 26.1117 and later serve no router pipe; the router was removed upstream after
-26.1111. The client lists the Windows pipe namespace before connecting and reports a missing pipe,
+26.1111. The host policy emits the intended GUI's version (`intendedHostVersion`, from its
+`resources\owl-app.ini` `AppVersion`, else its Store package folder name) and `routerExpected`
+(`false` from 26.1117, `true` before, `null` when unknown). On `false` the send gate refuses with
+`gui-unowned -- reason=router-absent -- confirmation=not-attempted` and the pickup line before the
+client runs, so no process serving that pipe name is ever contacted. For any other host the client lists the Windows pipe namespace before connecting and reports a missing pipe,
 or any other connect-phase failure, as a structured `phase: "connect"` result with no sent
 requests. Every frame is written only after connect, so the wrapper maps that exact structure to
 `gui-unowned -- reason=router-absent|router-unreachable -- confirmation=not-attempted` and prints

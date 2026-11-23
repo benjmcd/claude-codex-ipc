@@ -1124,13 +1124,27 @@ if (value.sendEligible === true &&
   process.exit(1);
 }
 if (value.sendEligible === false && reasons.length === 0) process.exit(1);
+// routerExpected: false only for an intended host proven to be a routerless (26.1117+) build;
+// absent or null means unknown, which keeps the connect-phase path.
+const routerExpected = value.routerExpected;
+const hostVersion = value.intendedHostVersion;
+if (routerExpected !== undefined && routerExpected !== null && typeof routerExpected !== "boolean") {
+  process.exit(1);
+}
+if (hostVersion !== undefined && hostVersion !== null &&
+    (typeof hostVersion !== "string" || !/^\d+(?:\.\d+){1,3}$/.test(hostVersion))) {
+  process.exit(1);
+}
+if (routerExpected === false && typeof hostVersion !== "string") process.exit(1);
 process.stdout.write([
   autoload.value,
   autoload.source,
   intended.kind,
   intended.source,
   value.sendEligible ? "true" : "false",
-  reasons.join(","),
+  reasons.join(",") || "-",
+  routerExpected === true ? "true" : routerExpected === false ? "false" : "unknown",
+  typeof hostVersion === "string" ? hostVersion : "-",
 ].join("\t"));
 ' 2>/dev/null) || policy_fields=""
         if [[ -z "$policy_fields" ]]; then
@@ -1140,10 +1154,11 @@ process.stdout.write([
             return 1
         fi
 
-        local send_eligible
+        local send_eligible router_expected host_version
         IFS=$'\t' read -r HOST_AUTOLOAD_EFFECTIVE HOST_AUTOLOAD_SOURCE \
             HOST_INTENDED_KIND_EFFECTIVE HOST_INTENDED_SOURCE send_eligible \
-            HOST_POLICY_REASON_LIST <<< "$policy_fields"
+            HOST_POLICY_REASON_LIST router_expected host_version <<< "$policy_fields"
+        [[ "$HOST_POLICY_REASON_LIST" == "-" ]] && HOST_POLICY_REASON_LIST=""
         echo "POLICY: autoload=${HOST_AUTOLOAD_EFFECTIVE} (source: ${HOST_AUTOLOAD_SOURCE}) intended-host=${HOST_INTENDED_KIND_EFFECTIVE} (source: ${HOST_INTENDED_SOURCE})"
         if [[ "$send_eligible" != "true" ]]; then
             HOST_POLICY_REFUSAL=1
@@ -1153,6 +1168,15 @@ process.stdout.write([
                 *,intended-host-not-running,*) HOST_POLICY_REFUSAL_REASON="intended-host-not-running" ;;
                 *) HOST_POLICY_REFUSAL_REASON="host-policy-invalid" ;;
             esac
+            return 1
+        fi
+        # A proven 26.1117+ intended host serves no router, so a server of that pipe name could only
+        # be another process. Refuse before the client runs: zero pipe contact, pickup is safe.
+        # An unknown version keeps the client's connect-phase handling.
+        if [[ "$router_expected" == "false" ]]; then
+            HOST_POLICY_REFUSAL=1
+            HOST_POLICY_REFUSAL_REASON="router-absent"
+            HOST_POLICY_REASON_LIST="intended host ${host_version} is a Codex Desktop 26.1117+ build, which serves no IPC router"
             return 1
         fi
         return 0

@@ -744,6 +744,37 @@ function Resolve-CodexIpcInventory {
     }
 }
 
+# Codex Desktop builds from 26.1117 serve no IPC router: no process of that build listens on
+# \\.\pipe\codex-ipc, so any server of that name on such a host is not the Desktop's. The version
+# is read from the intended GUI's own resources\owl-app.ini (AppVersion), else from a Store package
+# folder name in its path; anything else leaves it unknown, and routerExpected stays null.
+function Get-CodexIpcHostVersion {
+    param([object]$Executable)
+
+    if ($Executable -isnot [string] -or [string]::IsNullOrWhiteSpace($Executable)) { return $null }
+    try {
+        $ini = Join-Path (Join-Path (Split-Path -Parent $Executable) 'resources') 'owl-app.ini'
+        if (Test-Path -LiteralPath $ini -PathType Leaf) {
+            foreach ($line in [System.IO.File]::ReadAllLines($ini)) {
+                if ($line -match '^\s*AppVersion\s*=\s*(\d+(?:\.\d+){1,3})\s*$') { return [string]$Matches[1] }
+            }
+        }
+    } catch {
+        # An unreadable owl-app.ini leaves the package-path evidence below.
+    }
+    if ($Executable -match '(?i)\\OpenAI\.Codex_(\d+\.\d+\.\d+\.\d+)_') { return [string]$Matches[1] }
+    return $null
+}
+
+function Test-CodexIpcRouterExpected {
+    param([object]$Version)
+
+    $parsed = $null
+    if ($Version -isnot [string] -or -not [version]::TryParse($Version, [ref]$parsed)) { return $null }
+    # The first routerless line is 26.1117.
+    return ([version]::new($parsed.Major, $parsed.Minor) -lt [version]::new(26, 1117))
+}
+
 function Get-CodexIpcSendDecision {
     param([object]$Inventory)
 
@@ -1137,6 +1168,8 @@ function Invoke-CodexIpcHostPolicyCli {
     $sendReasons = @()
     $activationEligible = $null
     $activationReasons = @()
+    $intendedHostVersion = $null
+    $routerExpected = $null
     if ($purpose -eq 'send' -or $purpose -eq 'activation') {
         $rawInventory = if ($mockInventoryPresent) {
             ConvertFrom-CodexIpcMockInventory -Json $mockInventoryJson
@@ -1149,6 +1182,11 @@ function Invoke-CodexIpcHostPolicyCli {
         $sendDecision = Get-CodexIpcSendDecision -Inventory $inventory
         $sendEligible = [bool]$sendDecision.eligible
         $sendReasons = @($sendDecision.reasons)
+        $intendedEntries = @($inventory.guiHosts | Where-Object { $_.matchesIntended })
+        if ($intendedEntries.Count -eq 1) {
+            $intendedHostVersion = Get-CodexIpcHostVersion -Executable $intendedEntries[0].executable
+            $routerExpected = Test-CodexIpcRouterExpected -Version $intendedHostVersion
+        }
         if ($purpose -eq 'send') {
             $activationEligible = $false
             $activationReasons = @('activation-not-evaluated')
@@ -1188,6 +1226,8 @@ function Invoke-CodexIpcHostPolicyCli {
         activationEligible = $activationEligible
         sendReasons = @($sendReasons)
         activationReasons = @($activationReasons)
+        intendedHostVersion = $intendedHostVersion
+        routerExpected = $routerExpected
         limitations = @('inventory-does-not-prove-thread-ownership')
     }
 }

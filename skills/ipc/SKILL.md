@@ -365,9 +365,12 @@ forbidden — the turn may already have been admitted.
 
 Codex Desktop 26.1117 and later serve no IPC router (`\\.\pipe\codex-ipc` was removed upstream;
 26.1111 still served it). A live send there reports
-`RESULT: gui-unowned -- reason=router-absent -- confirmation=not-attempted` with the pickup line:
-the client found no pipe and sent nothing. Any other connect-phase failure reports
-`reason=router-unreachable` the same way. On those builds use `--deliver manual` and paste the
+`RESULT: gui-unowned -- reason=router-absent -- confirmation=not-attempted` with the pickup line.
+When the host policy proves the intended host is a 26.1117+ build (its own `owl-app.ini`
+`AppVersion`, else its Store package version), the wrapper refuses before the client runs, with
+zero pipe contact, because any server of that name on such a host is not the Desktop's. For a
+host of unknown version the client still finds no pipe and sends nothing; any other
+connect-phase failure reports `reason=router-unreachable` the same way. On those builds use `--deliver manual` and paste the
 pickup line.
 
 When the target is unowned and Codex itself is the operator's foreground window, a **foreground

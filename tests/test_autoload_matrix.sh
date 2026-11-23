@@ -363,6 +363,36 @@ assert_policy 0 "R2 declared alternate inventory is send eligible" '
   value.inventory.guiHosts.length === 1 && value.inventory.guiHosts[0].classification === "alternate" &&
   value.inventory.guiHosts[0].matchesIntended === true'
 
+
+# Router expectation: Codex Desktop 26.1117+ serves no IPC router. The version comes from the
+# intended GUI's resources\owl-app.ini, else from a Store package folder name; otherwise unknown.
+POLICY_OUT="$(powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$POLICYWIN" \
+    -Purpose send -IpcRoot "$POLICY_ROOT" -DryRun -MockInventoryJson "$MOCK_PACKAGE" 2>&1)"; POLICY_RC=$?
+assert_policy 0 "R2r1 a pre-26.1117 package host expects a router" '
+  value.sendEligible === true && value.intendedHostVersion === "26.707.3563.0" && value.routerExpected === true'
+MOCK_ROUTERLESS_PACKAGE="${MOCK_PACKAGE//26.707.3563.0/26.1201.1.0}"
+POLICY_OUT="$(powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$POLICYWIN" \
+    -Purpose send -IpcRoot "$POLICY_ROOT" -DryRun -MockInventoryJson "$MOCK_ROUTERLESS_PACKAGE" 2>&1)"; POLICY_RC=$?
+assert_policy 0 "R2r2 a 26.1117+ package host expects no router" '
+  value.sendEligible === true && value.intendedHostVersion === "26.1201.1.0" && value.routerExpected === false'
+POLICY_OUT="$(powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$POLICYWIN" \
+    -Purpose send -IpcRoot "$POLICY_ROOT" -IntendedHost 'C:\Alt\Host\ChatGPT.exe' \
+    -DryRun -MockInventoryJson "$MOCK_ALTERNATE" 2>&1)"; POLICY_RC=$?
+assert_policy 0 "R2r3 a host with no version evidence leaves routerExpected unknown" '
+  value.sendEligible === true && value.intendedHostVersion === null && value.routerExpected === null'
+OWL_HOST_DIR="$POLICY_ROOT/owl-host"; mkdir -p "$OWL_HOST_DIR/resources"
+for _owl_case in "26.1117.31558:false" "26.1111.71704:true"; do
+  printf '[Owl]\r\nUserDataDirectoryName=Codex\r\nAppVersion=%s\r\n' "${_owl_case%%:*}" > "$OWL_HOST_DIR/resources/owl-app.ini"
+  OWL_EXE_WIN="$(cygpath -w "$OWL_HOST_DIR")\ChatGPT.exe"
+  OWL_EXE_JSON="${OWL_EXE_WIN//\\/\\\\}"
+  MOCK_OWL='{"complete":true,"packageRootsComplete":true,"packageRoots":[],"errors":[],"processes":[{"pid":211,"parentPid":1,"name":"ChatGPT.exe","executable":"'"$OWL_EXE_JSON"'"}]}'
+  POLICY_OUT="$(powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$POLICYWIN" \
+      -Purpose send -IpcRoot "$POLICY_ROOT" -IntendedHost "$OWL_EXE_WIN" \
+      -DryRun -MockInventoryJson "$MOCK_OWL" 2>&1)"; POLICY_RC=$?
+  assert_policy 0 "R2r4 owl-app.ini AppVersion ${_owl_case%%:*} sets routerExpected ${_owl_case##*:}" "
+    value.sendEligible === true && value.intendedHostVersion === '${_owl_case%%:*}' && value.routerExpected === ${_owl_case##*:}"
+done
+unset _owl_case
 MOCK_OTHER='{"complete":true,"packageRootsComplete":true,"packageRoots":[],"errors":[],"processes":[{"pid":301,"parentPid":1,"name":"ChatGPT.exe","executable":"C:\\Program Files\\WindowsApps\\OpenAI.ChatGPT-Desktop_1.2026.100.0_x64__9x9x9x9x9x9x9\\app\\ChatGPT.exe"}]}'
 POLICY_OUT="$(powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$POLICYWIN" \
     -Purpose send -IpcRoot "$POLICY_ROOT" -DryRun -MockInventoryJson "$MOCK_OTHER" 2>&1)"; POLICY_RC=$?

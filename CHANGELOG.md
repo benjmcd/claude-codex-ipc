@@ -66,6 +66,15 @@ All notable changes to this project will be documented in this file.
   uncertified or over 4 MiB. The viewer shows the copy as `source=rollout-materialized`, keeps its
   supersession check while the rollout is readable, and counts it as answered; the retention sweep
   treats it like a reply. The viewer and the flagless waiter still write nothing.
+- A live `--ipc` send to a proven Codex Desktop 26.1117+ host is refused before the client runs,
+  with zero pipe contact. These builds serve no router, so a process serving
+  `\\.\pipe\codex-ipc` on such a host is not the Desktop's. The host policy now emits
+  `intendedHostVersion` (from the intended GUI's `resources\owl-app.ini` `AppVersion`, else its
+  Store package folder name) and `routerExpected` (`false` from 26.1117, `true` before, `null`
+  when unknown). On `false` the send gate reports `gui-unowned -- reason=router-absent --
+  confirmation=not-attempted` with the pickup line; a malformed expectation fails closed as
+  `host-policy-invalid`, and an unknown version keeps the client's connect-phase handling. The
+  docs note that on 26.1117+ the pipe's absence and the probe's `connect ENOENT` are expected.
 
 ## [0.1.14] — 2026-10-03
 
