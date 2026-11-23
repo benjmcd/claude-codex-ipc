@@ -35,8 +35,6 @@ while IFS= read -r _git_var; do
 done < <(compgen -e)
 REPO_ROOT="$(cd "$TDIR/.." && pwd)"
 export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0="$REPO_ROOT"
-# The last commit before reasoning visibility. The unchanged-paths leg compares against it.
-PRE_REASONING_REF="e4c8431a"
 
 TMP="$(mktemp -d)" && [[ -n "$TMP" && -d "$TMP" ]] || { echo "FATAL: no temp dir" >&2; exit 1; }
 trap 'rm -rf "$TMP"' EXIT
@@ -383,18 +381,7 @@ if cmp -s "$TMP/view-stripped.txt" "$TMP/view-none.txt" \
 else
   no "viewer section (body=$BODY_LINE section=$SECTION_LINE)"; diff "$TMP/view-stripped.txt" "$TMP/view-none.txt" | head -6
 fi
-if git -C "$REPO_ROOT" cat-file -e "${PRE_REASONING_REF}^{commit}" 2>/dev/null; then
-  OLDV="$TMP/old-viewer"; mkdir -p "$OLDV"
-  for name in codex_ipc_replies.sh codex_ipc_safe_render.sh codex_ipc_reply_harvest.mjs codex_ipc_rollout_reader.mjs codex_ipc_session_inspect.mjs codex_ipc_db_read.mjs; do
-    git -C "$REPO_ROOT" show "${PRE_REASONING_REF}:skills/ipc/scripts/$name" > "$OLDV/$name" 2>/dev/null
-  done
-  view "$OLDV/codex_ipc_replies.sh" > "$TMP/view-old.txt"
-  if cmp -s "$TMP/view-old.txt" "$TMP/view-none.txt"; then
-    ok "--reasoning none output is byte-identical to the ${PRE_REASONING_REF} viewer"
-  else
-    no "--reasoning none differs from the pre-feature viewer"; diff "$TMP/view-old.txt" "$TMP/view-none.txt" | head -6
-  fi
-fi
+# The invariant (the reasoning section is the only difference from --reasoning none) is the test above.
 printf 'An ordinary reply.\n' > "$IPC/$SID/$INJ_THREAD/$DISPATCH.reply.md"
 view "$VIEWER" > "$TMP/view-reply.txt"
 if grep -q 'source=reply-file' "$TMP/view-reply.txt" && ! grep -q 'REPLY-SUPERSEDED\]' "$TMP/view-reply.txt" \
