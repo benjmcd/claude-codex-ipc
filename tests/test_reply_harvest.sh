@@ -691,6 +691,28 @@ await test("a unique completed rollout is selected only when primary is unavaila
   assert.equal(result.duplicateCount, 1);
 });
 
+await test("an archived (zstd) legacy sibling does not withhold a unique completed rollout", () => {
+  const sessionsRoot = path.join(tmp, "sessions-archived-legacy");
+  fs.mkdirSync(path.join(sessionsRoot, "current"), { recursive: true });
+  fs.mkdirSync(path.join(sessionsRoot, "archived"), { recursive: true });
+  const page = path.join(sessionsRoot, "current", path.basename(uniqueBasic));
+  fs.copyFileSync(uniqueBasic, page);
+  fs.writeFileSync(
+    path.join(sessionsRoot, "archived", "rollout-old-11111111-1111-4111-8111-111111111111.jsonl.zst"),
+    "legacy archive bytes are never opened",
+  );
+  const result = harvestDispatch({
+    dispatchId: dispatch,
+    replyPath: path.join(tmp, "archived-legacy-absent.reply.md"),
+    threadId: "11111111-1111-4111-8111-111111111111",
+    rolloutPath: page,
+    sessionsRoot,
+  });
+  assert.equal(result.source, "rollout-fallback", JSON.stringify(result));
+  assert.equal(Buffer.from(result.bodyBase64, "base64").toString("utf8"), "latest final");
+  assert.equal(result.diagnostics.some((item) => item.code === "rollout-name-unrecognized"), false);
+});
+
 await test("identity-backed mirrored records preserve one safe fallback occurrence", () => {
   const result = harvestDispatch({
     dispatchId: dispatch,

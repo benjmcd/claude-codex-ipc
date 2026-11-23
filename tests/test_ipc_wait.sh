@@ -1782,5 +1782,254 @@ await test("post-locator wait read remains bound to the requested rollout owner"
   );
 });
 
+// --- Settings-only response items and archived (zstd) rollout pages ---
+const zlibApi = (await import("node:zlib")).default;
+const crypto = await import("node:crypto");
+const zstdAvailable = typeof zlibApi.zstdCompressSync === "function";
+
+function ownCompletedWithInTurn(extraRecords, body = "settings turn body") {
+  const records = ownOpenRecords();
+  return [
+    ...records,
+    ...extraRecords,
+    event("agent_message", ownTurn, { phase: "final_answer", message: body }),
+    event("task_complete", ownTurn, { last_agent_message: body }),
+  ];
+}
+
+const configurationUpdate = {
+  type: "response_item",
+  payload: { type: "configuration_update", reasoning: { effort: "high" } },
+};
+const additionalTools = {
+  type: "response_item",
+  payload: {
+    type: "additional_tools",
+    id: "fixture-tools",
+    role: "developer",
+    tools: [{ type: "namespace", name: "fixture", description: "fixture tools", tools: [{ type: "function", name: "noop" }] }],
+  },
+};
+
+await test("settings-only response items inside the dispatch turn keep rollout fallback certifiable", async () => {
+  const root = caseDir("settings-items-in-turn");
+  const rollout = writeRollout(root, ownCompletedWithInTurn([configurationUpdate, additionalTools]));
+  const parsed = readRolloutFile(rollout);
+  assert.equal(parsed.diagnostics.some((item) => item.code === "schema-drift"), false);
+  const result = await waitForCompletion(directOptions(
+    root,
+    rollout,
+    path.join(root, "missing.reply.md"),
+    { acceptRolloutFallback: true },
+  ));
+  assert.equal(result.token, "done");
+  assert.equal(result.replySource, "rollout-fallback");
+  assert.deepEqual(result.diagnostics, []);
+});
+
+for (const [label, record] of [
+  ["steer-input context", {
+    type: "retained_context",
+    payload: { type: "native_steer_ownership", version: 1, record: { phase: "steer", items: [{ type: "message" }] } },
+  }],
+  ["configuration update carrying a body key", {
+    type: "response_item",
+    payload: { type: "configuration_update", reasoning: { effort: "high" }, content: [{ text: "body" }] },
+  }],
+  ["tool manifest with a non-developer role", {
+    type: "response_item",
+    payload: { ...additionalTools.payload, role: "user" },
+  }],
+  ["tool manifest carrying a message", {
+    type: "response_item",
+    payload: { ...additionalTools.payload, message: "body" },
+  }],
+  ["configuration update carrying an unobserved key", {
+    type: "response_item",
+    payload: { ...configurationUpdate.payload, output: "unobserved" },
+  }],
+  ["tool manifest carrying an unobserved key", {
+    type: "response_item",
+    payload: { ...additionalTools.payload, item: { type: "message" } },
+  }],
+]) {
+  await test(`${label} inside the dispatch turn stays schema drift and is not certified`, async () => {
+    const root = caseDir(`settings-drift-${label.replace(/[^a-z]+/giu, "-")}`);
+    const rollout = writeRollout(root, ownCompletedWithInTurn([record]));
+    const parsed = readRolloutFile(rollout);
+    assert.ok(parsed.diagnostics.some((item) => item.code === "schema-drift"));
+    const result = await waitForCompletion(directOptions(
+      root,
+      rollout,
+      path.join(root, "missing.reply.md"),
+      { acceptRolloutFallback: true },
+    ));
+    assert.notEqual(result.token, "done");
+  });
+}
+
+function pagedRecords(pageId, base = thread) {
+  return [
+    {
+      type: "session_meta",
+      payload: {
+        id: thread,
+        session_id: thread,
+        history_mode: "paginated",
+        history_base: { thread_id: base, end_byte_offset: 0 },
+      },
+    },
+    ...ownCompletedRecords().slice(1),
+  ];
+}
+
+function writePagedRollout(directory, pageId, records) {
+  fs.mkdirSync(directory, { recursive: true });
+  const target = path.join(directory, `rollout-page-${thread}_${pageId}.jsonl`);
+  fs.writeFileSync(target, `${records.map((item) => JSON.stringify(item)).join("\n")}\n`);
+  return target;
+}
+
+function writeArchive(target, text) {
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  fs.writeFileSync(
+    target,
+    zstdAvailable ? zlibApi.zstdCompressSync(Buffer.from(text)) : Buffer.from("not zstd"),
+  );
+  return target;
+}
+
+// Page ids reuse the public-safety scanner's synthetic allowlist.
+const currentPageId = "33333333-3333-4333-8333-333333333333";
+const archivedPageId = "00000000-0000-4000-8000-000000000000";
+
+await test("an archived legacy root page beside the current page does not unresolve the page set", async () => {
+  const root = caseDir("archived-legacy-root");
+  const rollout = writePagedRollout(path.join(root, "2026", "11", "17"), currentPageId, pagedRecords(currentPageId));
+  // A legacy archive is never opened: its bytes need not even be valid zstd.
+  fs.mkdirSync(path.join(root, "2026", "10", "20"), { recursive: true });
+  fs.writeFileSync(path.join(root, "2026", "10", "20", `rollout-root-${thread}.jsonl.zst`), "legacy archive");
+  const result = await waitForCompletion(directOptions(
+    root,
+    rollout,
+    path.join(root, "missing.reply.md"),
+    { acceptRolloutFallback: true, sessionsRoot: root },
+  ));
+  assert.equal(result.token, "done");
+  assert.equal(result.replySource, "rollout-fallback");
+  assert.equal(result.diagnostics.some((item) => item.code === "candidate-set-unresolved"), false);
+  const cliResult = cli([
+    "--thread", thread, "--dispatch", dispatch, "--rollout-path", rollout,
+    "--sessions-root", root, "--reply-path", path.join(root, "missing.reply.md"),
+    "--accept-rollout-fallback", "--status-exit-codes",
+  ]);
+  assert.equal(cliResult.status, 0, cliResult.stderr);
+  assert.equal(cliResult.stdout, "done\n");
+  assert.match(cliResult.stderr, /"source":"rollout-fallback"/);
+});
+
+await test("an archived paginated page that is not the bound page's successor leaves it current", async () => {
+  const root = caseDir("archived-unrelated-page");
+  const rollout = writePagedRollout(path.join(root, "2026", "11", "17"), currentPageId, pagedRecords(currentPageId));
+  writeArchive(
+    path.join(root, "2026", "10", "30", `rollout-page-${thread}_${archivedPageId}.jsonl.zst`),
+    `${JSON.stringify(pagedRecords(archivedPageId)[0])}\n${JSON.stringify(event("task_started", otherTurn))}\n`,
+  );
+  const result = await waitForCompletion(directOptions(
+    root,
+    rollout,
+    path.join(root, "missing.reply.md"),
+    { acceptRolloutFallback: true, sessionsRoot: root },
+  ));
+  if (zstdAvailable) {
+    assert.equal(result.token, "done");
+    assert.equal(result.replySource, "rollout-fallback");
+  } else {
+    assert.equal(result.token, "unavailable");
+    assert.ok(result.diagnostics.some((item) => item.reason === "archive-unsupported"));
+  }
+});
+
+await test("an archived paginated successor still vetoes the bound page", async () => {
+  const root = caseDir("archived-successor");
+  const records = pagedRecords(currentPageId);
+  const rollout = writePagedRollout(path.join(root, "2026", "11", "17"), currentPageId, records);
+  const cutoff = Buffer.byteLength(`${records.map((item) => JSON.stringify(item)).join("\n")}\n`);
+  writeArchive(
+    path.join(root, "2026", "11", "20", `rollout-page-${thread}_${archivedPageId}.jsonl.zst`),
+    `${JSON.stringify({
+      type: "session_meta",
+      payload: {
+        id: thread,
+        session_id: thread,
+        history_mode: "paginated",
+        history_base: { thread_id: currentPageId, end_byte_offset: cutoff },
+      },
+    })}\n`,
+  );
+  const result = await waitForCompletion(directOptions(
+    root,
+    rollout,
+    path.join(root, "missing.reply.md"),
+    { acceptRolloutFallback: true, sessionsRoot: root },
+  ));
+  assert.equal(result.token, "unavailable");
+  assert.ok(result.diagnostics.some((item) =>
+    zstdAvailable ? item.code === "rollout-page-superseded" : item.reason === "archive-unsupported"));
+});
+
+await test("an archived successor with a large header and a highly compressible tail still vetoes", async () => {
+  const root = caseDir("archived-successor-large-header");
+  const records = pagedRecords(currentPageId);
+  const rollout = writePagedRollout(path.join(root, "2026", "11", "17"), currentPageId, records);
+  const cutoff = Buffer.byteLength(`${records.map((item) => JSON.stringify(item)).join("\n")}\n`);
+  // A ~400 KB header is not done by the first compressed windows, and the 30 MB repetitive tail
+  // overflows the 24 MB record cap as soon as a window reaches it: only the bisection finds the
+  // header's newline.
+  const header = JSON.stringify({
+    type: "session_meta",
+    payload: {
+      id: thread,
+      session_id: thread,
+      history_mode: "paginated",
+      history_base: { thread_id: currentPageId, end_byte_offset: cutoff },
+      base_instructions: { text: crypto.randomBytes(200 * 1024).toString("hex") },
+    },
+  });
+  writeArchive(
+    path.join(root, "2026", "11", "20", `rollout-page-${thread}_${archivedPageId}.jsonl.zst`),
+    `${header}\n${"x".repeat(30 * 1024 * 1024)}\n`,
+  );
+  const result = await waitForCompletion(directOptions(
+    root,
+    rollout,
+    path.join(root, "missing.reply.md"),
+    { acceptRolloutFallback: true, sessionsRoot: root },
+  ));
+  assert.equal(result.token, "unavailable");
+  assert.ok(result.diagnostics.some((item) =>
+    zstdAvailable ? item.code === "rollout-page-superseded" : item.reason === "archive-unsupported"));
+});
+
+await test("an unreadable archived paginated page fails the page set closed", async () => {
+  const root = caseDir("archived-unreadable");
+  const rollout = writePagedRollout(path.join(root, "2026", "11", "17"), currentPageId, pagedRecords(currentPageId));
+  fs.mkdirSync(path.join(root, "2026", "10", "30"), { recursive: true });
+  fs.writeFileSync(
+    path.join(root, "2026", "10", "30", `rollout-page-${thread}_${archivedPageId}.jsonl.zst`),
+    "not a zstd frame",
+  );
+  const result = await waitForCompletion(directOptions(
+    root,
+    rollout,
+    path.join(root, "missing.reply.md"),
+    { acceptRolloutFallback: true, sessionsRoot: root },
+  ));
+  assert.equal(result.token, "unavailable");
+  assert.ok(result.diagnostics.some((item) =>
+    item.code === "page-supersession-unproven" &&
+    item.reason === (zstdAvailable ? "archive-invalid" : "archive-unsupported")));
+});
+
 console.log(`RESULT: ${passed} passed, 0 failed`);
 NODE

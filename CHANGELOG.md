@@ -10,6 +10,21 @@ All notable changes to this project will be documented in this file.
   fixed read-only operations, refuses missing, ownerless or invalid WAL state, and bounds its
   run time, output and failure diagnostics. Revalidation checks the selected reader and keeps
   complete inspector output.
+- Host policy accepts an app-server started by the intended GUI's Electron Node utility process,
+  and the `--__codex-windows-mxc` sandbox helper, as runtime children, not second Desktop hosts.
+  The utility process (`node.mojom.NodeService`) must run the GUI's own executable and be
+  launched directly by the GUI. It is the only GUI-named process allowed between the GUI and its
+  runtime; the runtime's descendants keep the existing ancestry rules. A second GUI, an
+  unreadable identity, or unproven ancestry still refuses with `other-desktop-host-running` or
+  `host-inventory-incomplete`.
+- The rollout reader recognizes zstd-archived pages (`*.jsonl.zst`) during discovery. They are
+  never record sources or locate candidates. An archived legacy page cannot supersede the bound
+  page and is skipped, as its `.jsonl` form is. An archived paginated page's header is read for
+  the successor veto. An unreadable page, or a runtime without zstd, keeps the page unproven.
+- The reader admits two settings-only response items found by a 2026-11-23 corpus census,
+  `configuration_update` and the developer-role `additional_tools`, with exactly their observed
+  payload keys. `retained_context/native_steer_ownership` and every other shape remain schema
+  drift.
 
 ## [0.1.14] — 2026-10-03
 
