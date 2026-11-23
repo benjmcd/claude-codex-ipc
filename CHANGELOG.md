@@ -10,6 +10,12 @@ All notable changes to this project will be documented in this file.
   fixed read-only operations, refuses missing, ownerless or invalid WAL state, and bounds its
   run time, output and failure diagnostics. Revalidation checks the selected reader and keeps
   complete inspector output.
+- Added reasoning (thinking) visibility. The inspector's default output carries
+  `rollout.primary.reasoning` (thread-activity/1): the latest turn's recorded reasoning in full,
+  with headlines, no per-item cap unless asked, a paging safety limit, an untrusted label and encrypted-only counts; `--turns N`, `--turn`,
+  `--all-turns` and `--reasoning headline|none` change it. The reply viewer prints a labelled
+  section of each dispatch's own turn after the body. Waiter, harvester, reader, completion
+  certification and marker binding are unchanged; `recentItems` and `--summary` are unchanged.
 
 ## [0.1.14] — 2026-10-03
 

@@ -2196,6 +2196,14 @@ echo "== 24. O3/AC1: the DEFAULT emit is byte-identical to ${PRE_O3_REF:0:7} at 
 # changing any historical value: targetClassification; incomingSpawnEdges; the source/provider/
 # agent fields; and ownerSessionMeta. The current side removes exactly those enumerated additions
 # before comparison. No pre-existing field is normalized or removed.
+#
+# DELIBERATE PIN CHANGE (reasoning visibility, Phase 1): the default emit gained ONE additive field,
+# rollout.primary.reasoning (thread-activity/1), on by default by operator decision ("full thinking
+# by default"). It is appended after every historical key of primary and is computed from records
+# the parse already reads; no historical field, key order or value changes, and recentItems are
+# untouched. Two legs keep that claim falsifiable: the "current" leg removes exactly that one new
+# key (beside the enumerated A2 additions), and the "current-none" leg runs --reasoning none, which
+# must OMIT the key, and compares with nothing reasoning-related removed at all.
 O3_NORMALIZER="$TMP/o3-normalize.mjs"
 cat > "$O3_NORMALIZER" <<'EOF'
 import fs from "node:fs";
@@ -2211,6 +2219,25 @@ if (mode === "current") {
     delete value.dbThread?.thread?.[key];
   }
   delete value.rollout?.primary?.ownerSessionMeta;
+  // Reasoning visibility (deliberate, additive; see the scenario-24 header): present by default.
+  if (value.rollout?.primary && !Object.hasOwn(value.rollout.primary, "reasoning")) {
+    throw new Error("default emit lost rollout.primary.reasoning");
+  }
+  if (value.rollout?.primary && Object.keys(value.rollout.primary).at(-1) !== "reasoning") {
+    throw new Error("rollout.primary.reasoning is not appended after every historical key");
+  }
+  delete value.rollout?.primary?.reasoning;
+} else if (mode === "current-none") {
+  delete value.rollout?.sessionsRoot;
+  delete value.targetClassification;
+  delete value.dbThread?.incomingSpawnEdges;
+  for (const key of ["source", "modelProvider", "agentNickname", "agentRole", "agentPath"]) {
+    delete value.dbThread?.thread?.[key];
+  }
+  delete value.rollout?.primary?.ownerSessionMeta;
+  if (value.rollout?.primary && Object.hasOwn(value.rollout.primary, "reasoning")) {
+    throw new Error("--reasoning none must omit rollout.primary.reasoning");
+  }
 } else if (mode !== "historical") {
   throw new Error(`unknown normalization mode: ${mode}`);
 }
@@ -2239,6 +2266,13 @@ if [[ -n "$PRE_O3" ]]; then
         AC1_DIFFS=$((AC1_DIFFS+1))
         echo "    default output drifted: fixture=$fixture --tail-events $window"
         diff "$TMP/ac1-old.n" "$TMP/ac1-new.n" | head -6 | sed 's/^/      /'
+      fi
+      run_o3 "$TMP/ac1-none" "$INSPECT" "$O3/$fixture/state.sqlite" "$O3/$fixture/sessions" --tail-events "$window" --reasoning none
+      AC1_PAIRS=$((AC1_PAIRS+1))
+      if ! "$NODE_BIN" "$O3_NORMALIZER" current-none "$TMP/ac1-none" "$TMP/ac1-none.n" \
+         || ! cmp -s "$TMP/ac1-old.n" "$TMP/ac1-none.n"; then
+        AC1_DIFFS=$((AC1_DIFFS+1))
+        echo "    --reasoning none output drifted: fixture=$fixture --tail-events $window"
       fi
     done
   done

@@ -367,7 +367,9 @@ else
 fi
 
 # 6. Non-synthetic UUIDs: every UUID in the repo must be on the synthetic-fixture allowlist.
-ALLOWED_UUIDS='^(00000000-0000-4000-8000-000000000000|00000000-0000-4000-8000-00000000c0de|11111111-1111-4111-8111-111111111111|22222222-2222-4222-8222-222222222222|33333333-3333-4333-8333-333333333333)$'
+# The 0f0f00NN family is the shared thread-activity/1 reasoning fixtures' thread ids
+# (tests/fixtures/reasoning): an index byte in the first and last group, zeros elsewhere.
+ALLOWED_UUIDS='^(00000000-0000-4000-8000-000000000000|00000000-0000-4000-8000-00000000c0de|11111111-1111-4111-8111-111111111111|22222222-2222-4222-8222-222222222222|33333333-3333-4333-8333-333333333333|0f0f00[0-9a-f]{2}-0000-4000-8000-0000000000[0-9a-f]{2})$'
 uuid_matches=""
 capture_match uuid_matches "repository UUID grep" grep -rIhoE --binary-files=without-match \
     --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=worktrees \
