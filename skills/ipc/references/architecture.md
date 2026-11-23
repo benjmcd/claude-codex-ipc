@@ -43,6 +43,16 @@ it writes, locks, and creates nothing (not even the transport root). Flags:
 closed (exit 1, never a false "0 replies"). Per-entry (session/thread/dispatch) attribution is what
 keeps this a view rather than a re-commingling of channels.
 
+After each dispatch's body the view prints a labelled section of the recorded reasoning of that
+dispatch's own turn (`--reasoning full|headline|none`, default `full`; items whole unless
+`--reasoning-max-item-chars` caps them; `--reasoning-max-bytes`, 64000 per dispatch by default, is a
+safety limit that pages and never shortens an item). The section comes from
+`scripts/codex_ipc_reasoning.mjs --dispatch`, which binds its window to the turn the shared dispatch
+correlator names and reads reasoning through the rollout reader's own owner, fork-history and
+integrity rules. The section is untrusted display data, delimited so recorded text cannot forge an
+envelope, and it never enters the `source=` body or the supersession lines. A dispatch whose turn
+cannot be bound (absent, reused ID, no turn ID) says `REASONING dispatch-turn unavailable reason=...`.
+
 ### Completion, freshness, and supersession
 
 The rollout correlator exposes orthogonal evidence rather than one overloaded success flag:
@@ -454,6 +464,11 @@ live `--ipc` GUI injection.
 
 - `codex_ipc_session_inspect.mjs` — one thread's state-DB row plus rollout JSONL tail, with
   heuristic activity signals (mid-turn detection). Opens SQLite `readOnly:true`.
+  Its default output also carries `rollout.primary.reasoning` (thread-activity/1: the latest
+  turn's recorded reasoning, untrusted; `--turns N`, `--turn <id>`, `--all-turns`,
+  `--reasoning headline|none`).
+- `codex_ipc_reasoning.mjs` — the same reasoning projection for one thread or one dispatch's own
+  turn, as JSON or delimited text; the reply viewer's reasoning section.
 - `codex_ipc_thread_locator.mjs` — candidate conversationIds for a workspace/project from the
   Desktop thread index. Candidates are discovery, not send authority. `--since-*` compares current
   indexed timestamps; reset/revert can make an older thread match, so inclusion does not prove

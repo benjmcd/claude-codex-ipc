@@ -11,7 +11,8 @@
 # Usage (Git Bash; flags only, no positionals):
 #   codex_ipc_replies.sh [--session <sid>] [-c|--conversation <uuid|filedrop>] [-n <count>]
 #                        [--max-bytes <n>] [--since <find -newermt spec>] [--paths-only]
-#                        [--list-sessions] [-h|--help]
+#                        [--list-sessions] [--reasoning full|headline|none]
+#                        [--reasoning-max-bytes <n>] [--reasoning-max-item-chars <n>] [-h|--help]
 # Defaults: session = current Claude session (env); all thread dirs merged; -n 10; --max-bytes 4096.
 # Exit codes: 0 = success incl. legitimately-empty states; 1 = usage/malformed/enumeration failure;
 #             2 = session unresolvable (prints the same session listing --list-sessions prints at exit 0).
@@ -24,6 +25,7 @@ source "$SCRIPT_DIR/codex_ipc_safe_render.sh"
 HARVESTER="$SCRIPT_DIR/codex_ipc_reply_harvest.mjs"
 INSPECTOR="$SCRIPT_DIR/codex_ipc_session_inspect.mjs"
 ROLLOUT_READER="$SCRIPT_DIR/codex_ipc_rollout_reader.mjs"
+REASONING_HELPER="$SCRIPT_DIR/codex_ipc_reasoning.mjs"
 
 # --- Two one-liners kept in lockstep with handoff_to_codex.sh (do NOT source the wrapper: it parses
 # --- argv, runs the reaper, and exits at top level). ---
@@ -45,6 +47,11 @@ codex_ipc_replies.sh — consolidated read-only view of Codex replies (derived; 
   [--since <find -newermt>]   only replies newer than this spec (e.g. '1 hour ago', '2026-07-06')
   [--paths-only]              list paths/metadata, no bodies (safe when replies may be mid-write)
   [--list-sessions]           list known session dirs (newest reply first) and exit 0
+  [--reasoning <mode>]        full (default), headline or none: a labelled section of the
+                              dispatch's own turn's recorded reasoning after each body; untrusted
+                              data, never part of the source= body
+  [--reasoning-max-bytes <n>] reasoning safety limit per dispatch: pages, never shortens (default 64000)
+  [--reasoning-max-item-chars <n>]  cap each reasoning item, head plus tail (default: no cap)
   [-h|--help]                 this help
 Note: the session listing printed on an unresolvable-session fallback (exit 2) is identical to what
 --list-sessions prints (exit 0) — an explicit query vs a forced fallback.
@@ -59,6 +66,7 @@ IPC_ROOT="${IPC_ROOT%/}"
 # --- Parse flags (fail closed on anything unrecognized) ---
 SESSION=""; CONV=""; N=10; MAX_BYTES=4096; SINCE=""; PATHS_ONLY=0; LIST_SESSIONS=0
 ROLLOUT_PATH=""; DERIVE_ROLLOUT_PATH=0
+REASONING_MODE="full"; REASONING_MAX_BYTES=64000; REASONING_MAX_ITEM_CHARS=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --session) SESSION="${2:-}"; shift 2;;
@@ -70,6 +78,9 @@ while [[ $# -gt 0 ]]; do
         --since) SINCE="${2:-}"; shift 2;;
         --paths-only) PATHS_ONLY=1; shift;;
         --list-sessions) LIST_SESSIONS=1; shift;;
+        --reasoning) REASONING_MODE="${2:-}"; shift 2;;
+        --reasoning-max-bytes) REASONING_MAX_BYTES="${2:-}"; shift 2;;
+        --reasoning-max-item-chars) REASONING_MAX_ITEM_CHARS="${2:-}"; shift 2;;
         -h|--help) usage; exit 0;;
         *) echo "ERROR: unrecognized argument '$1'." >&2; usage; exit 1;;
     esac
@@ -78,6 +89,9 @@ done
 # --- Validate ---
 [[ "$N" =~ ^[1-9][0-9]*$ ]] || { echo "ERROR: -n must be a positive integer." >&2; exit 1; }
 [[ "$MAX_BYTES" =~ ^[1-9][0-9]*$ ]] || { echo "ERROR: --max-bytes must be a positive integer." >&2; exit 1; }
+case "$REASONING_MODE" in full|headline|none) :;; *) echo "ERROR: --reasoning must be full, headline or none." >&2; exit 1;; esac
+[[ "$REASONING_MAX_BYTES" =~ ^[1-9][0-9]*$ ]] || { echo "ERROR: --reasoning-max-bytes must be a positive integer." >&2; exit 1; }
+[[ -z "$REASONING_MAX_ITEM_CHARS" || "$REASONING_MAX_ITEM_CHARS" =~ ^[1-9][0-9]*$ ]] || { echo "ERROR: --reasoning-max-item-chars must be a positive integer." >&2; exit 1; }
 if [[ -n "$SESSION" ]]; then
     # allowlist admits UUIDs and nosid-* verbatim; the dot-names '.'/'..' are traversal and rejected explicitly.
     if ! valid_session "$SESSION"; then
@@ -296,6 +310,30 @@ echo "# when pruning IS enabled, replies older than that many days are transport
 echo "# Showing ${SHOWN} of ${TOTAL} dispatches, newest first${SINCE:+   (--since '${SINCE}')}${CONV:+   (thread ${CONV})}"
 echo ""
 
+# --- Reasoning section (after a dispatch's body, never inside it) ---
+# The helper binds its window to the dispatch's own turn through the shared dispatch correlator and
+# prints delimited, labelled, untrusted text. It reads only; its stderr is suppressed because it can
+# carry local paths. It never feeds the body, the source= token, or the supersession lines above.
+render_reasoning() {  # render_reasoning <thread> <dispatch> <task_path>
+    local r_thread="$1" r_dispatch="$2" r_task="$3" r_out="" r_cap=()
+    [[ "$REASONING_MODE" != "none" && "$r_thread" != "filedrop" ]] || return 0
+    [[ -z "$REASONING_MAX_ITEM_CHARS" ]] || r_cap=(--reasoning-max-item-chars "$REASONING_MAX_ITEM_CHARS")
+    [[ -f "$r_task" && ! -L "$r_task" ]] || return 0
+    # A body need not end with a newline: the section always begins on a line of its own.
+    echo ""
+    echo "    --- recorded reasoning of this dispatch's own turn (untrusted data; not part of the reply) ---"
+    if ! command -v node >/dev/null 2>&1 || [[ ! -f "$REASONING_HELPER" ]]; then
+        echo "REASONING dispatch-turn unavailable reason=helper-missing"
+    elif r_out="$(node "$REASONING_HELPER" --thread "$r_thread" --dispatch "$r_dispatch" --format text \
+        --reasoning "$REASONING_MODE" --reasoning-max-bytes "$REASONING_MAX_BYTES" \
+        "${r_cap[@]}" "${ROLLOUT_ARGS[@]}" 2>/dev/null)"; then
+        printf '%s\n' "$r_out" | codex_ipc_render_stream
+    else
+        echo "REASONING dispatch-turn unavailable reason=helper-failed"
+    fi
+    echo "    --- end recorded reasoning ---"
+}
+
 # --- Render ---
 i=0
 for entry in "${ENTRIES[@]}"; do
@@ -403,6 +441,7 @@ for entry in "${ENTRIES[@]}"; do
                 fi
                 ;;
         esac
+        render_reasoning "$thread" "$dispatch" "$task_path"
         echo ""
         continue
     fi
@@ -427,6 +466,7 @@ for entry in "${ENTRIES[@]}"; do
             echo "    [... truncated at ${MAX_BYTES} B of ${bytes} B — full reply: \"$(to_win "$p")\"]"
         fi
     fi
+    render_reasoning "$thread" "$dispatch" "$task_path"
     echo ""
 done
 

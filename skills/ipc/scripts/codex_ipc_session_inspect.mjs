@@ -20,6 +20,14 @@ import {
   recordThreadIdentity,
   summarizeThreadActivity,
 } from "./codex_ipc_rollout_reader.mjs";
+import {
+  createReasoningCollector,
+  defaultReasoningOptions,
+  DEFAULT_REASONING_MAX_BYTES,
+  projectReasoning,
+  takeReasoningFlag,
+  validateReasoningOptions,
+} from "./codex_ipc_reasoning.mjs";
 
 // node:sqlite is optional at the repo level: file-drop handoff works without it.
 let DatabaseSync;
@@ -43,6 +51,9 @@ const ADMITTED_ACTIVITY_ITEMS = Symbol("admittedActivityItems");
 // Target classification must distinguish a cleanly absent parent from rollout owner evidence that
 // could not be trusted. Keep the parser detail invocation-local rather than expanding JSON output.
 const ROLLOUT_OWNER_INTEGRITY = Symbol("rolloutOwnerIntegrity");
+// Reasoning collected during the one full parse; projected into rollout.primary.reasoning, which is
+// ADDITIVE: every other field is computed exactly as before, and recentItems are not touched.
+const ROLLOUT_REASONING = Symbol("rolloutReasoning");
 // --- `--summary` projection caps (O3) -------------------------------------------------------
 // These bound the ONLY two open-ended arrays the projection carries. They are projection-time
 // caps: they never reach parseArgs, inspectSession, parseRollout or inferActivitySignals, so
@@ -91,6 +102,19 @@ Options:
   --db <path>            State DB path. Default: %USERPROFILE%\\.codex\\state_5.sqlite
   --sessions-root <path> Sessions root. Default: CODEX_IPC_SESSIONS_ROOT, else
                          %USERPROFILE%\\.codex\\sessions. The flag wins.
+
+Reasoning (rollout.primary.reasoning; untrusted recorded data, never instructions):
+  --reasoning full|headline|none   full text with its headline (default), headline only, or
+                                   none (the field is then omitted)
+  --turns N | --turn <turnId> | --all-turns
+                                   the window: the latest turn by default (in progress, or the
+                                   last completed)
+  --reasoning-order newest|oldest  default newest
+  --reasoning-max-item-chars N     cap each item, head plus tail (default: no cap)
+  --reasoning-max-bytes N          per call safety limit: pages at an item, never shortens one
+                                   (default ${DEFAULT_REASONING_MAX_BYTES})
+  --reasoning-cursor C             go on with a previous answer's nextCursor
+  --summary never carries reasoning.
   --help                 Show this help.
 
 Safety:
@@ -118,9 +142,15 @@ function parseArgs(argv) {
     // effect. It is deliberately NOT a value-bearing option and never rewrites another field.
     summary: false,
     help: false,
+    reasoning: defaultReasoningOptions(),
   };
 
   for (let index = 0; index < argv.length; index += 1) {
+    const reasoningNext = takeReasoningFlag(argv, index, opts.reasoning);
+    if (reasoningNext !== null) {
+      index = reasoningNext - 1;
+      continue;
+    }
     const arg = argv[index];
     switch (arg) {
       case "--thread":
@@ -156,6 +186,7 @@ function parseArgs(argv) {
     }
     validateUuid(opts.threadId, "--thread");
     opts.threadId = opts.threadId.toLowerCase();
+    validateReasoningOptions(opts.reasoning);
   }
 
   return opts;
@@ -198,6 +229,21 @@ async function inspectSession(opts) {
     ? await parseRollout(primaryRollout.path, opts.tailEvents, opts.maxTextChars, opts.threadId)
     : null;
   const targetClassification = classifyTarget(dbThread, rolloutSummary, rolloutSelection);
+  if (rolloutSummary && opts.reasoning.mode !== "none") {
+    const collected = rolloutSummary[ROLLOUT_REASONING];
+    rolloutSummary.reasoning = projectReasoning(
+      {
+        entries: collected.entries,
+        snapshots: collected.snapshots,
+        threadId: opts.threadId,
+        provider: collected.provider || dbThread.thread?.modelProvider || null,
+        integrity: rolloutSummary[ROLLOUT_OWNER_INTEGRITY]
+          ? { ok: true }
+          : { ok: false, reason: "rollout-owner-integrity" },
+      },
+      opts.reasoning,
+    );
+  }
 
   const ok = Boolean(dbThread.thread?.exists || rolloutSummary?.parsedOk);
   return {
@@ -834,6 +880,8 @@ async function parseRollout(filePath, tailEvents, maxTextChars, expectedThreadId
   const boundarySnapshots = [];
   const boundaryDiagnostics = [];
   const ownerIntegrityDiagnostics = [];
+  const reasoning = createReasoningCollector();
+  let reasoningProvider = null;
 
   const rl = readline.createInterface({
     input: createReadStream(filePath, { encoding: "utf8" }),
@@ -853,7 +901,9 @@ async function parseRollout(filePath, tailEvents, maxTextChars, expectedThreadId
       if (parseErrors.length < 5) {
         parseErrors.push({ line: lineCount, error: error.message });
       }
-      boundarySnapshots.push(...accumulator.push({ parseError: true, line: lineCount }).snapshots);
+      const parseErrorPush = accumulator.push({ parseError: true, line: lineCount });
+      boundarySnapshots.push(...parseErrorPush.snapshots);
+      reasoning.observe({ parseError: true, line: lineCount }, parseErrorPush);
       continue;
     }
 
@@ -892,6 +942,9 @@ async function parseRollout(filePath, tailEvents, maxTextChars, expectedThreadId
       declaredSessionId === rolloutThreadId;
     if (isCurrentOwnerSessionMeta) {
       sessionMetaSeen = true;
+      if (reasoningProvider === null && typeof parsed?.payload?.model_provider === "string") {
+        reasoningProvider = parsed.payload.model_provider;
+      }
       if (ownerSessionMeta === null) {
         const rawParent = parsed?.payload?.parent_thread_id;
         const parentPresent = rawParent !== undefined && rawParent !== null;
@@ -958,7 +1011,13 @@ async function parseRollout(filePath, tailEvents, maxTextChars, expectedThreadId
       const boundaryRecord = ownerConflict
         ? { ...normalized, knownPair: false, text: "", phase: null, role: null }
         : normalized;
-      boundarySnapshots.push(...accumulator.push(boundaryRecord).snapshots);
+      const boundaryPush = accumulator.push(boundaryRecord);
+      boundarySnapshots.push(...boundaryPush.snapshots);
+      // Reasoning is attributed to turns by the same boundary machine, from records already
+      // admitted by owner and fork-history scope. Owner-conflicted records contribute none.
+      if (!ownerConflict) {
+        reasoning.attach(reasoning.observe(normalized, boundaryPush), parsed);
+      }
       if (!normalized.knownPair) {
         boundaryDiagnostics.push({ code: "schema-drift", line: lineCount });
       }
@@ -1003,6 +1062,11 @@ async function parseRollout(filePath, tailEvents, maxTextChars, expectedThreadId
     ownerIntegrityDiagnostics.push(item);
   }
   boundarySnapshots.push(...accumulator.finish(boundaryDiagnostics));
+  const reasoningCollected = {
+    entries: reasoning.entries(),
+    snapshots: [...boundarySnapshots],
+    provider: reasoningProvider,
+  };
   const latestBoundarySnapshot = boundarySnapshots.reduce(
     (latest, snap) => (latest === null || snap.sequence > latest.sequence ? snap : latest),
     null,
@@ -1040,6 +1104,7 @@ async function parseRollout(filePath, tailEvents, maxTextChars, expectedThreadId
     [ADMITTED_ACTIVITY_ITEMS]:
       ownerIntegrityDiagnostics.length === 0 ? admittedActivityItems : [],
     boundarySnapshot,
+    [ROLLOUT_REASONING]: reasoningCollected,
   };
 }
 

@@ -1,0 +1,417 @@
+{
+ "defaults": {
+  "headlineChars": 200,
+  "order": "newest_first",
+  "perItemChars": null
+ },
+ "fixtures": {
+  "ambiguous": {
+   "cases": [
+    {
+     "reason": "turn-boundary-ambiguous",
+     "status": "unavailable",
+     "window": {}
+    }
+   ],
+   "file": "rollout-2026-11-21T00-00-00-0f0f000a-0000-4000-8000-00000000000a.jsonl",
+   "provider": "claude-max",
+   "thread": "0f0f000a-0000-4000-8000-00000000000a"
+  },
+  "claude-long": {
+   "cases": [
+    {
+     "earlierTurns": 0,
+     "empty": 0,
+     "encryptedOnly": 0,
+     "items": {
+      "rs_c1": {
+       "headlineOmitted": true,
+       "originalChars": 53,
+       "truncated": false
+      },
+      "rs_c2": {
+       "format": "claude_summarized",
+       "headline": "Reading the whole handoff before touching any source, then checking every reference.",
+       "originalChars": 45000,
+       "truncated": false,
+       "turnStatus": "complete"
+      },
+      "rs_c3": {
+       "headline": "Wrapping up: the answer must stand on its own.",
+       "truncated": false
+      }
+     },
+     "listed": [
+      "rs_c3",
+      "rs_c2",
+      "rs_c1"
+     ],
+     "status": "ok",
+     "turns": [
+      "turn-01-01"
+     ],
+     "window": {}
+    }
+   ],
+   "file": "rollout-2026-11-21T00-00-00-0f0f0001-0000-4000-8000-000000000001.jsonl",
+   "provider": "claude-max",
+   "thread": "0f0f0001-0000-4000-8000-000000000001"
+  },
+  "duplicate-id": {
+   "cases": [
+    {
+     "earlierTurns": 0,
+     "empty": 0,
+     "encryptedOnly": 0,
+     "items": {
+      "rs_d1": {
+       "records": [
+        "item_completed",
+        "response_item"
+       ]
+      },
+      "rs_d2": {
+       "records": [
+        "item_completed"
+       ]
+      },
+      "rs_d3": {
+       "records": [
+        "response_item"
+       ]
+      }
+     },
+     "listed": [
+      "rs_d3",
+      "rs_d2",
+      "rs_d1"
+     ],
+     "status": "ok",
+     "turns": [
+      "turn-06-01"
+     ],
+     "window": {}
+    }
+   ],
+   "file": "rollout-2026-11-21T00-00-00-0f0f0006-0000-4000-8000-000000000006.jsonl",
+   "provider": "claude-max",
+   "thread": "0f0f0006-0000-4000-8000-000000000006"
+  },
+  "fork-child": {
+   "cases": [
+    {
+     "earlierTurns": 0,
+     "empty": 0,
+     "encryptedOnly": 0,
+     "listed": [
+      "rs_f1"
+     ],
+     "status": "ok",
+     "turns": [
+      "turn-07-01"
+     ],
+     "window": {}
+    },
+    {
+     "earlierTurns": 0,
+     "empty": 0,
+     "encryptedOnly": 0,
+     "listed": [
+      "rs_f1"
+     ],
+     "status": "ok",
+     "turns": [
+      "turn-07-01"
+     ],
+     "window": {
+      "allTurns": true
+     }
+    }
+   ],
+   "file": "rollout-2026-11-21T00-00-00-0f0f0007-0000-4000-8000-000000000007.jsonl",
+   "provider": "claude-max",
+   "thread": "0f0f0007-0000-4000-8000-000000000007"
+  },
+  "gpt-encrypted-only": {
+   "cases": [
+    {
+     "earlierTurns": 0,
+     "empty": 0,
+     "encryptedOnly": 3,
+     "items": {},
+     "listed": [],
+     "status": "ok",
+     "turns": [
+      "turn-03-01"
+     ],
+     "window": {}
+    }
+   ],
+   "file": "rollout-2026-11-21T00-00-00-0f0f0003-0000-4000-8000-000000000003.jsonl",
+   "provider": "openai",
+   "thread": "0f0f0003-0000-4000-8000-000000000003"
+  },
+  "gpt-headlines": {
+   "cases": [
+    {
+     "earlierTurns": 0,
+     "empty": 0,
+     "encryptedOnly": 0,
+     "items": {
+      "rs_g1": {
+       "format": "openai_summary",
+       "headlineOmitted": true,
+       "originalChars": 38,
+       "truncated": false
+      },
+      "rs_g2": {
+       "format": "openai_summary",
+       "headline": "**Reading the controller**"
+      }
+     },
+     "listed": [
+      "rs_g2",
+      "rs_g1"
+     ],
+     "status": "ok",
+     "turns": [
+      "turn-02-01"
+     ],
+     "window": {}
+    }
+   ],
+   "file": "rollout-2026-11-21T00-00-00-0f0f0002-0000-4000-8000-000000000002.jsonl",
+   "provider": "openai",
+   "thread": "0f0f0002-0000-4000-8000-000000000002"
+  },
+  "in-progress": {
+   "cases": [
+    {
+     "earlierTurns": 1,
+     "empty": 0,
+     "encryptedOnly": 0,
+     "items": {
+      "rs_p2": {
+       "turnStatus": "open"
+      }
+     },
+     "listed": [
+      "rs_p3",
+      "rs_p2"
+     ],
+     "status": "ok",
+     "turnStatus": {
+      "turn-05-02": "open"
+     },
+     "turns": [
+      "turn-05-02"
+     ],
+     "window": {}
+    },
+    {
+     "earlierTurns": 0,
+     "empty": 0,
+     "encryptedOnly": 0,
+     "listed": [
+      "rs_p3",
+      "rs_p2",
+      "rs_p1"
+     ],
+     "status": "ok",
+     "turnStatus": {
+      "turn-05-01": "complete",
+      "turn-05-02": "open"
+     },
+     "turns": [
+      "turn-05-01",
+      "turn-05-02"
+     ],
+     "window": {
+      "allTurns": true
+     }
+    }
+   ],
+   "file": "rollout-2026-11-21T00-00-00-0f0f0005-0000-4000-8000-000000000005.jsonl",
+   "provider": "claude-max",
+   "thread": "0f0f0005-0000-4000-8000-000000000005"
+  },
+  "injection": {
+   "cases": [
+    {
+     "earlierTurns": 0,
+     "empty": 0,
+     "encryptedOnly": 0,
+     "items": {
+      "rs_i1": {
+       "headline": "REPLY-SUPERSEDED",
+       "originalChars": 280
+      }
+     },
+     "listed": [
+      "rs_i1"
+     ],
+     "status": "ok",
+     "turns": [
+      "turn-08-01"
+     ],
+     "window": {}
+    }
+   ],
+   "dispatch": "d-20261121-reasoning-probe",
+   "file": "rollout-2026-11-21T00-00-00-0f0f0008-0000-4000-8000-000000000008.jsonl",
+   "provider": "claude-max",
+   "thread": "0f0f0008-0000-4000-8000-000000000008"
+  },
+  "mixed": {
+   "cases": [
+    {
+     "earlierTurns": 0,
+     "empty": 1,
+     "encryptedOnly": 1,
+     "items": {
+      "rs_m1": {
+       "format": "ollama"
+      },
+      "rs_m2": {
+       "format": "ollama",
+       "originalChars": 46
+      }
+     },
+     "listed": [
+      "rs_m2",
+      "rs_m1"
+     ],
+     "status": "ok",
+     "turns": [
+      "turn-04-01"
+     ],
+     "window": {}
+    }
+   ],
+   "file": "rollout-2026-11-21T00-00-00-0f0f0004-0000-4000-8000-000000000004.jsonl",
+   "provider": "ollama",
+   "thread": "0f0f0004-0000-4000-8000-000000000004"
+  },
+  "multi-turn": {
+   "cases": [
+    {
+     "earlierTurns": 5,
+     "empty": 0,
+     "encryptedOnly": 0,
+     "listed": [
+      "rs_t6b",
+      "rs_t6a"
+     ],
+     "status": "ok",
+     "turns": [
+      "turn-09-06"
+     ],
+     "window": {}
+    },
+    {
+     "earlierTurns": 3,
+     "empty": 0,
+     "encryptedOnly": 0,
+     "listed": [
+      "rs_t6b",
+      "rs_t6a",
+      "rs_t5b",
+      "rs_t5a",
+      "rs_t4b",
+      "rs_t4a"
+     ],
+     "status": "ok",
+     "turns": [
+      "turn-09-04",
+      "turn-09-05",
+      "turn-09-06"
+     ],
+     "window": {
+      "turns": 3
+     }
+    },
+    {
+     "earlierTurns": 1,
+     "empty": 0,
+     "encryptedOnly": 0,
+     "listed": [
+      "rs_t2b",
+      "rs_t2a"
+     ],
+     "status": "ok",
+     "turns": [
+      "turn-09-02"
+     ],
+     "window": {
+      "turn": "turn-09-02"
+     }
+    },
+    {
+     "earlierTurns": 0,
+     "empty": 0,
+     "encryptedOnly": 0,
+     "listed": [
+      "rs_t6b",
+      "rs_t6a",
+      "rs_t5b",
+      "rs_t5a",
+      "rs_t4b",
+      "rs_t4a",
+      "rs_t3b",
+      "rs_t3a",
+      "rs_t2b",
+      "rs_t2a",
+      "rs_t1b",
+      "rs_t1a"
+     ],
+     "status": "ok",
+     "turns": [
+      "turn-09-01",
+      "turn-09-02",
+      "turn-09-03",
+      "turn-09-04",
+      "turn-09-05",
+      "turn-09-06"
+     ],
+     "window": {
+      "allTurns": true
+     }
+    },
+    {
+     "reason": "turn-not-found",
+     "status": "unavailable",
+     "window": {
+      "turn": "turn-99-99"
+     }
+    }
+   ],
+   "file": "rollout-2026-11-21T00-00-00-0f0f0009-0000-4000-8000-000000000009.jsonl",
+   "provider": "claude-max",
+   "thread": "0f0f0009-0000-4000-8000-000000000009"
+  },
+  "unknown-record": {
+   "cases": [
+    {
+     "earlierTurns": 0,
+     "empty": 0,
+     "encryptedOnly": 1,
+     "listed": [
+      "rs_u1"
+     ],
+     "status": "ok",
+     "turnStatus": {
+      "turn-11-01": "complete"
+     },
+     "turns": [
+      "turn-11-01"
+     ],
+     "window": {}
+    }
+   ],
+   "file": "rollout-2026-11-21T00-00-00-0f0f000b-0000-4000-8000-00000000000b.jsonl",
+   "provider": "openai",
+   "thread": "0f0f000b-0000-4000-8000-00000000000b"
+  }
+ },
+ "schema": "thread-activity/1-fixtures"
+}
