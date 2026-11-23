@@ -711,6 +711,18 @@ function main() {
           contains("SKILL.md", "--accept-rollout-fallback"),
       },
       {
+        label: "final-message reply mode is explicit, --ipc only, names no reply file, and records itself in the envelope",
+        file: "scripts/handoff_to_codex.sh",
+        ok:
+          contains("scripts/handoff_to_codex.sh", 'REPLY_MODE="file"') &&
+          contains("scripts/handoff_to_codex.sh", "file|final-message) REPLY_MODE=\"$2\" ;;") &&
+          contains("scripts/handoff_to_codex.sh", "Reply mode: final-message. When finished, put your complete reply/result in your final agent") &&
+          contains("scripts/handoff_to_codex.sh", "Do NOT write a reply file for this handoff") &&
+          contains("scripts/codex_ipc_replies.sh", 'ROLLOUT_ANSWERED["${thread}/${dispatch}"]=1') &&
+          contains("SKILL.md", "--reply-mode final-message") &&
+          contains("references/handoff-template.md", "Final-message reply mode"),
+      },
+      {
         label: "handoff template carries the denied-reply completion obligation",
         file: "references/handoff-template.md",
         ok:
@@ -1078,11 +1090,12 @@ function main() {
           manualPreparationPath.length > 0 &&
           [
             "read \\\"${OUTBOUND}\\\" and proceed",
-            "Codex's reply will be written to ${INBOUND}",
+            "print_reply_route",
             "ROLLOUT-PATH: Supply the inspector's database-designated page with --rollout-path <path>.",
             "print_wait_hint",
             "exit 0",
           ].every((anchor) => manualPreparationPath.includes(anchor)) &&
+          contains("scripts/handoff_to_codex.sh", 'echo "Codex\'s reply will be written to ${INBOUND} (Claude Code reads it)."') &&
           !/RESULT:|host_policy_send|send_live|observe_rollout|powershell\.exe|codex_ipc_client|codex_ipc_autoload/.test(
             manualPreparationPath,
           ),

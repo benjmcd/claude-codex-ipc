@@ -336,6 +336,9 @@ render_reasoning() {  # render_reasoning <thread> <dispatch> <task_path>
 
 # --- Render ---
 i=0
+# <thread>/<dispatch> keys rendered from a certified rollout answer; the footer does not count them
+# as awaiting a reply file.
+declare -A ROLLOUT_ANSWERED=()
 for entry in "${ENTRIES[@]}"; do
     (( i < N )) || break
     i=$(( i + 1 ))
@@ -410,6 +413,7 @@ for entry in "${ENTRIES[@]}"; do
                 [[ "$duplicate_count" =~ ^[0-9]+$ ]] || duplicate_count=0
                 duplicate_note=""; (( duplicate_count > 1 )) && duplicate_note=" | duplicates=${duplicate_count}"
                 echo "=== [$i] ${when} | thread: ${tlabel} | dispatch: ${dispatch} | source=rollout-fallback | ${source_bytes} B${duplicate_note}"
+                ROLLOUT_ANSWERED["${thread}/${dispatch}"]=1
                 echo "    retained task: \"$(to_win "$task_path")\""
                 if [[ "$returned_bytes" -gt 0 ]]; then
                     if ! printf '%s' "$body_base64" | base64 --decode | codex_ipc_render_stream; then
@@ -471,13 +475,24 @@ for entry in "${ENTRIES[@]}"; do
 done
 
 # --- Footer: pending dispatches (task.md without a sibling reply.md), scope-wide (not --since-filtered) ---
+# A dispatch shown above as source=rollout-fallback is answered and is not counted as awaiting;
+# rollout answers are checked only for the dispatches this run rendered.
 pending=0
+rollout_answered=0
 while IFS= read -r t; do
     [[ -n "$t" ]] || continue
     d="$(dirname "$t")"; base="$(basename "$t" .task.md)"
-    [[ -f "${d}/${base}.reply.md" ]] || pending=$(( pending + 1 ))
+    [[ -f "${d}/${base}.reply.md" ]] && continue
+    if [[ -n "${ROLLOUT_ANSWERED["$(basename "$d")/${base}"]+x}" ]]; then
+        rollout_answered=$(( rollout_answered + 1 ))
+    else
+        pending=$(( pending + 1 ))
+    fi
 done < <(find "$SCOPE_DIR" "${SCOPE_DEPTH[@]}" -type f -name '*.task.md' 2>/dev/null || true)
 if [[ "$pending" -gt 0 ]]; then
     echo "# ${pending} dispatch(es) awaiting primary reply files (scope-wide; not --since-filtered)."
+fi
+if [[ "$rollout_answered" -gt 0 ]]; then
+    echo "# ${rollout_answered} dispatch(es) without a reply file were answered from the rollout above (source=rollout-fallback); not counted as awaiting."
 fi
 exit 0

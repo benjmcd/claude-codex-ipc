@@ -2149,6 +2149,20 @@ after="$(manifest)"
   && "$OUT" == *"latest final"* && ! -e "$IPCROOT/$SID/$THREAD/1000000000-1-abcdef0123456789.reply.md" ]] \
   && ok "rollout fallback is labeled, banner-corrected, stdout-only, and read-only" \
   || no "viewer rollout fallback (rc=$RC)"
+# Footer: a dispatch shown as answered from the rollout is not awaiting a primary reply file;
+# a dispatch with neither a reply file nor a rollout answer still is.
+[[ "$OUT" != *"awaiting primary reply files"* \
+  && "$OUT" == *"# 1 dispatch(es) without a reply file were answered from the rollout above"* ]] \
+  && ok "the footer does not count a rollout-answered dispatch as awaiting a reply file" \
+  || no "viewer footer counts a rollout-answered dispatch as awaiting"
+printf 'task' > "$IPCROOT/$SID/$THREAD/1000000009-1-abcdef0123456789.task.md"
+FOOTER_OUT="$(CODEX_IPC_ROOT="$IPCROOT" CODEX_IPC_SESSIONS_ROOT="$SESSIONS" \
+  CLAUDE_CODE_SESSION_ID="$SID" bash "$VIEWER" 2>&1)"; RC=$?
+rm -f "$IPCROOT/$SID/$THREAD/1000000009-1-abcdef0123456789.task.md"
+[[ $RC -eq 0 && "$FOOTER_OUT" == *"# 1 dispatch(es) awaiting primary reply files"* \
+  && "$FOOTER_OUT" == *"# 1 dispatch(es) without a reply file were answered from the rollout above"* ]] \
+  && ok "an unanswered dispatch is still counted as awaiting beside a rollout-answered one" \
+  || no "viewer footer miscounts mixed dispatches (rc=$RC)"
 printf 'PRIMARY-CONFLICT' > "$IPCROOT/$SID/$THREAD/1000000000-1-abcdef0123456789.reply.md"
 OUT="$(CODEX_IPC_ROOT="$IPCROOT" CODEX_IPC_SESSIONS_ROOT="$SESSIONS" \
   CLAUDE_CODE_SESSION_ID="$SID" bash "$VIEWER" 2>&1)"; RC=$?

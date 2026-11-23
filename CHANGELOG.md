@@ -49,6 +49,13 @@ All notable changes to this project will be documented in this file.
   confirmation=not-attempted` and prints the pickup line; previously it reported
   `failed-closed -- reason=router-pipe-failure -- confirmation=unknown` with no pickup. The
   method-version fixture records the 26.1117.4957.0 observation.
+- Added `--reply-mode file|final-message` for `--ipc` dispatches (default `file`, explicit only).
+  `final-message` is for a lane that cannot write the transport root: the envelope says
+  `Reply mode: final-message.`, names no reply file and asks for the full result in the final
+  agent message, which the `--accept-rollout-fallback` waiter certifies and the viewer renders.
+  The default envelope is byte-for-byte unchanged. The reply viewer's footer no longer counts a
+  dispatch it rendered as `source=rollout-fallback` as awaiting a primary reply file; it reports
+  those separately.
 
 ## [0.1.14] — 2026-10-03
 

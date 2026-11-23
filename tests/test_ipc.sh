@@ -1343,6 +1343,39 @@ assert_wait_hint_then_result(){ # $1 label
   [[ -n "$wln" && -n "$rln" && "$wln" -lt "$rln" ]] && ok "$label: WAIT precedes RESULT" || no "$label: WAIT/RESULT order (w=$wln r=$rln)"
 }
 
+echo "== 31b. --reply-mode final-message makes the final message the reply and records the mode =="
+# For a lane that cannot write the transport root (a managed sandbox), the envelope asks for the
+# reply in the final agent message instead of a reply file, and says so in its own text. The
+# default (file) envelope is unchanged.
+: > "$TMP/nodeargs.log"
+run "$REPO" "sessFinalMsg" --ipc "$UUID" --reply-mode final-message --allow-any-thread "review the sandboxed change and reply"
+FINAL_IPC=$(find "$IPCROOT/sessFinalMsg/$UUID" -name '*.task.md' 2>/dev/null | head -1)
+if [[ -n "$FINAL_IPC" ]] \
+  && grep -Fq "Reply mode: final-message." "$FINAL_IPC" \
+  && grep -Fq "Do NOT write a reply file for this handoff" "$FINAL_IPC" \
+  && grep -Fq "the full substantive result" "$FINAL_IPC" \
+  && ! grep -Fq "attempt to write the printed reply path exactly once" "$FINAL_IPC" \
+  && ! grep -Fq ".reply.md" "$FINAL_IPC"; then
+  ok "final-message envelope asks for the reply in the final message and names no reply file"
+else
+  no "final-message envelope is wrong"
+fi
+assert_recovery_guidance "$FINAL_IPC" "final-message --ipc"
+if [[ -n "$E1_IPC" ]] && ! grep -Fq "Reply mode:" "$E1_IPC" && ! grep -Fq "Reply mode:" "$E1_FD"; then
+  ok "the default envelope carries no reply-mode line"
+else
+  no "the default envelope changed"
+fi
+run "$REPO" "sessFinalBad" --ipc "$UUID" --reply-mode bogus "task"
+[[ $RC -ne 0 && "$OUT" == *"ERROR: --reply-mode requires file or final-message (got 'bogus')."* \
+  && -z "$(find "$IPCROOT/sessFinalBad" -name '*.task.md' 2>/dev/null)" ]] \
+  && ok "an unknown reply mode fails before any envelope is written" || no "bad reply mode (rc=$RC)"
+run "$REPO" "sessFinalTwice" --ipc "$UUID" --reply-mode file --reply-mode final-message "task"
+[[ $RC -ne 0 && "$OUT" == *"ERROR: --reply-mode may be supplied only once."* ]] \
+  && ok "a repeated reply mode fails closed" || no "repeated reply mode (rc=$RC)"
+run "$REPO" "sessFinalFd" --reply-mode final-message "task"
+[[ $RC -ne 0 && -z "$(find "$IPCROOT/sessFinalFd" -name '*.task.md' 2>/dev/null)" ]] \
+  && ok "reply mode is --ipc only: a file-drop invocation writes nothing" || no "file-drop reply mode (rc=$RC)"
 echo "== 32. A3 wait hint: renderer-owned success prints WAIT: before the final RESULT =="
 fgreset always-ok ok 0 rollout-hit
 fgrun_stdout --ipc "$UUIDF" "t32 renderer wait hint"

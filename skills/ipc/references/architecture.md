@@ -197,6 +197,13 @@ ambient live settings and rejects explicit live-only host/foreground flags befor
 transport default remains `~/.claude/ipc`; relocating `CODEX_IPC_ROOT` to a target-writable location
 is an operator choice and every participant must use the same explicit root.
 
+`--reply-mode final-message` (any `--ipc` delivery) is the alternative that keeps the transport root,
+`host-policy.json` and every other lane's envelopes out of lane write access: the envelope replaces
+its reply-file request with `Reply mode: final-message.` and asks for the full result in the final
+agent message, which the `--accept-rollout-fallback` waiter certifies and the dual-source viewer
+renders. The default `file` mode envelope is byte-for-byte unchanged. Nothing detects a lane's
+sandbox; the dispatcher chooses the mode.
+
 ### Live Desktop IPC injection (`--ipc`, optional, EXPERIMENTAL)
 
 Provenance: this transport was validated against a live Codex Desktop in the private predecessor
