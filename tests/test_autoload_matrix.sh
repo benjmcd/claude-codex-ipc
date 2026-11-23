@@ -776,6 +776,139 @@ for scenario in config-only payload-only unknown-prefix missing-value empty-valu
     native_policy_case "$scenario" false
 done
 
+# R28: Desktop builds that start the app-server from the GUI's Electron Node utility process
+# (node.mojom.NodeService) rather than from the main process. Synthetic tree shaped like the
+# observed layout: runtime beside the app, exec-server under the GUI, the Windows sandbox
+# helper under the app-server, and a package-runtime node.exe helper that is never a candidate.
+MOCK_UTILITY_TREE="$(node <<'NODE'
+const gui = "C:\\Alt\\Host\\app\\ChatGPT.exe";
+const runtime = "C:\\Alt\\Host\\runtime\\codex.exe";
+const processes = [
+  { pid: 861, parentPid: 999, name: "ChatGPT.exe", executable: gui,
+    commandLine: `"${gui}" --user-data-dir="C:\\Alt\\Data"` },
+  { pid: 862, parentPid: 861, name: "ChatGPT.exe", executable: gui,
+    commandLine: `"${gui}" --type=utility --utility-sub-type=node.mojom.NodeService --lang=en-US` },
+  { pid: 863, parentPid: 862, name: "codex.exe", executable: runtime,
+    commandLine: `${runtime} -c features.fixture=true app-server --analytics-default-enabled` },
+  { pid: 864, parentPid: 863, name: "codex.exe", executable: runtime,
+    commandLine: `"${runtime}" --__codex-windows-mxc` },
+  { pid: 865, parentPid: 861, name: "codex.exe", executable: runtime,
+    commandLine: `${runtime} -c features.fixture=true -c "fixture.login=\\"value\\"" exec-server --fixture` },
+  { pid: 866, parentPid: 861, name: "ChatGPT.exe", executable: gui, commandLine: `"${gui}" --type=renderer` },
+  { pid: 867, parentPid: 861, name: "node.exe",
+    executable: "C:\\Program Files\\WindowsApps\\OpenAI.CodexPrimaryRuntime_fixture\\dependencies\\node\\bin\\node.exe",
+    commandLine: "node.exe fixture.js" },
+  { pid: 868, parentPid: 861, name: "ChatGPT.exe", executable: gui, commandLine: `"${gui}" --type=gpu-process` },
+];
+console.log(JSON.stringify({ complete: true, packageRootsComplete: true, packageRoots: [], errors: [], processes }));
+NODE
+)"
+utility_policy_case(){
+    local scenario="$1" predicate="$2"
+    local intended='C:\Alt\Host\app\ChatGPT.exe'
+    [[ "$scenario" == package-* ]] && intended=package
+    local inventory
+    inventory="$(printf '%s' "$MOCK_UTILITY_TREE" | node -e '
+      let input = "";
+      process.stdin.on("data", chunk => input += chunk);
+      process.stdin.on("end", () => {
+        const value = JSON.parse(input);
+        const rows = value.processes;
+        const row = id => rows.find(item => item.pid === id);
+        const gui = row(861).executable;
+        switch (process.argv[1]) {
+          case "base": break;
+          case "reverse-order": value.processes.reverse(); break;
+          case "package-gui": {
+            const root = "C:\\Packages\\OpenAI.Codex_fixture";
+            value.packageRoots = [root];
+            for (const id of [861, 862, 866, 868]) {
+              row(id).commandLine = row(id).commandLine.replace(gui, root + "\\app\\ChatGPT.exe");
+              row(id).executable = root + "\\app\\ChatGPT.exe";
+            }
+            for (const id of [863, 864, 865]) {
+              row(id).commandLine = row(id).commandLine.replace(row(id).executable, root + "\\app\\resources\\codex.exe");
+              row(id).executable = root + "\\app\\resources\\codex.exe";
+            }
+            break;
+          }
+          case "launcher-renderer":
+            row(862).commandLine = `"${gui}" --type=renderer --utility-sub-type=node.mojom.NodeService`; break;
+          case "launcher-network":
+            row(862).commandLine = `"${gui}" --type=utility --utility-sub-type=network.mojom.NetworkService`; break;
+          case "launcher-subtype-prefix":
+            row(862).commandLine = `"${gui}" --type=utility --utility-sub-type=node.mojom.NodeServiceHost`; break;
+          case "launcher-other-exe":
+            row(862).executable = "C:\\Other\\ChatGPT.exe";
+            row(862).commandLine = "\"C:\\Other\\ChatGPT.exe\" --type=utility --utility-sub-type=node.mojom.NodeService";
+            break;
+          case "launcher-command-mismatch":
+            row(862).commandLine = "\"C:\\Other\\ChatGPT.exe\" --type=utility --utility-sub-type=node.mojom.NodeService";
+            break;
+          case "launcher-unreadable": row(862).commandLine = null; break;
+          case "launcher-orphan": row(862).parentPid = 998; break;
+          case "launcher-self-cycle": row(862).parentPid = 862; break;
+          case "launcher-under-renderer": row(862).parentPid = 866; break;
+          case "launcher-nested":
+            rows.push({ ...row(862), pid: 869, parentPid: 861 });
+            row(862).parentPid = 869;
+            break;
+          case "launcher-non-candidate-hop":
+            row(863).parentPid = 867;
+            break;
+          case "mxc-orphan": row(864).parentPid = 998; break;
+          case "mxc-prefix": row(864).commandLine = `"${row(864).executable}" --__codex-windows-mxc-v2`; break;
+          case "mxc-wrong-runtime":
+            row(864).executable = "C:\\Other\\codex.exe"; row(864).commandLine = "codex.exe --__codex-windows-mxc"; break;
+          case "unproven-helper":
+            rows.push({ pid: 870, parentPid: 861, name: "codex.exe", executable: row(863).executable, commandLine: "codex.exe serve" });
+            break;
+          case "conflicting-runtime":
+            rows.push({ ...row(863), pid: 871, executable: "C:\\Other\\codex.exe", commandLine: "codex.exe app-server" });
+            break;
+          case "second-store-gui":
+            value.packageRoots = ["C:\\Program Files\\WindowsApps\\OpenAI.Codex_fixture"];
+            rows.push({ pid: 872, parentPid: 999, name: "ChatGPT.exe",
+              executable: value.packageRoots[0] + "\\app\\ChatGPT.exe", commandLine: "ChatGPT.exe" });
+            break;
+          case "second-store-gui-under-intended":
+            value.packageRoots = ["C:\\Program Files\\WindowsApps\\OpenAI.Codex_fixture"];
+            rows.push({ pid: 872, parentPid: 862, name: "ChatGPT.exe",
+              executable: value.packageRoots[0] + "\\app\\ChatGPT.exe", commandLine: "ChatGPT.exe" });
+            break;
+          case "second-same-gui": rows.push({ ...row(861), pid: 873 }); break;
+          case "unreadable-identity":
+            rows.push({ pid: 874, parentPid: 999, name: "ChatGPT.exe", executable: null, commandLine: null });
+            break;
+          default: throw new Error("unknown utility scenario");
+        }
+        console.log(JSON.stringify(value));
+      });
+    ' "$scenario")"
+    POLICY_OUT="$(powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$POLICYWIN" \
+        -Purpose send -IpcRoot "$POLICY_ROOT" -IntendedHost "$intended" \
+        -DryRun -MockInventoryJson "$inventory" 2>&1)"; POLICY_RC=$?
+    assert_policy 0 "R28 NodeService-launched runtime $scenario" "$predicate"
+}
+UTILITY_ACCEPTED='value.sendEligible === true && value.inventory.complete === true &&
+  value.inventory.guiHosts.length === 1 && value.inventory.guiHosts[0].pid === 861 &&
+  [862, 863, 864, 865, 866, 868].every((pid) => value.inventory.appServers.some((item) => item.pid === pid)) &&
+  !value.inventory.guiHosts.concat(value.inventory.appServers).some((item) => item.pid === 867) &&
+  value.activationEligible === false'
+for scenario in base reverse-order package-gui; do
+    utility_policy_case "$scenario" "$UTILITY_ACCEPTED"
+done
+for scenario in launcher-renderer launcher-network launcher-subtype-prefix launcher-other-exe \
+    launcher-command-mismatch launcher-unreadable launcher-orphan launcher-self-cycle \
+    launcher-under-renderer launcher-nested launcher-non-candidate-hop mxc-orphan mxc-prefix \
+    mxc-wrong-runtime unproven-helper conflicting-runtime second-store-gui \
+    second-store-gui-under-intended second-same-gui; do
+    utility_policy_case "$scenario" 'value.sendEligible === false &&
+      value.sendReasons.includes("other-desktop-host-running")'
+done
+utility_policy_case unreadable-identity 'value.sendEligible === false &&
+  value.inventory.complete === false && value.sendReasons.includes("host-inventory-incomplete")'
+
 echo "== S. shared policy activation decision =="
 PKG_CLEAR='{"state":"clear","runningPackageFullName":"OpenAI.Codex_26.707.3563.0_x64__2p2nqsd0c76g0","runningVersion":"26.707.3563.0","higherVersions":[],"evidence":"mock"}'
 PKG_STAGED='{"state":"staged","runningPackageFullName":"OpenAI.Codex_26.707.3563.0_x64__2p2nqsd0c76g0","runningVersion":"26.707.3563.0","higherVersions":["26.708.100.0"],"evidence":"mock"}'

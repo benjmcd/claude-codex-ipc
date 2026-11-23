@@ -788,6 +788,16 @@ function main() {
           contains("scripts/codex_ipc_host_policy.ps1", /eligible\s*=\s*\(\$Inventory\.complete\s+-and\s+\$intendedCount\s+-eq\s+1\s+-and\s+\$otherCount\s+-eq\s+0\)/),
       },
       {
+        label: "the GUI's Node utility process anchors a runtime only as the GUI's direct, same-executable child",
+        file: "scripts/codex_ipc_host_policy.ps1",
+        ok:
+          contains("scripts/codex_ipc_host_policy.ps1", "function Test-CodexIpcNodeServiceLauncher") &&
+          contains("scripts/codex_ipc_host_policy.ps1", "--utility-sub-type=node\\.mojom\\.NodeService(\\s|$)") &&
+          contains("scripts/codex_ipc_host_policy.ps1", /if \(\$parentKey -eq \[string\]\$Process\.pid -or -not \$GuiById\.ContainsKey\(\$parentKey\)\) \{ return \$false \}/) &&
+          contains("scripts/codex_ipc_host_policy.ps1", /-not \[string\]::Equals\(\$path, \$guiPath, \[System\.StringComparison\]::OrdinalIgnoreCase\)\) \{ return \$false \}/) &&
+          contains("scripts/codex_ipc_host_policy.ps1", "'--__codex-windows-mxc'"),
+      },
+      {
         label: "wrapper invokes the send gate inside every live attempt and never activates an alternate host",
         file: "scripts/handoff_to_codex.sh",
         ok:
@@ -967,6 +977,27 @@ function main() {
           contains("scripts/codex_ipc_rollout_reader.mjs", '"rollout-page-superseded"') &&
           contains("scripts/codex_ipc_rollout_reader.mjs", '"page-supersession-unproven"') &&
           matchCount("scripts/codex_ipc_rollout_reader.mjs", /node:sqlite/g) === 0,
+      },
+      {
+        label: "archived (zstd) pages never become record sources, and an archived paginated page is read for the veto or fails it closed",
+        file: "scripts/codex_ipc_rollout_reader.mjs",
+        ok:
+          contains("scripts/codex_ipc_rollout_reader.mjs", "export function parseRolloutArchiveBasename") &&
+          contains("scripts/codex_ipc_rollout_reader.mjs", "(filename.archived ? archives : matches).push(candidate);") &&
+          contains("scripts/codex_ipc_rollout_reader.mjs", "validateCandidate(candidatePath, threadId, { archived })") &&
+          contains("scripts/codex_ipc_rollout_reader.mjs", '"archive-invalid" : "archive-unsupported"'),
+      },
+      {
+        label: "settings-only response items are admitted only in their census shape; steer input stays drift",
+        file: "scripts/codex_ipc_rollout_reader.mjs",
+        ok:
+          contains("scripts/codex_ipc_rollout_reader.mjs", "function settingsResponseItem(envelopeType, payloadType, body)") &&
+          contains("scripts/codex_ipc_rollout_reader.mjs", '["configuration_update", new Set(["type", "reasoning"])]') &&
+          contains("scripts/codex_ipc_rollout_reader.mjs", '["additional_tools", new Set(["type", "id", "role", "tools"])]') &&
+          contains("scripts/codex_ipc_rollout_reader.mjs", "Object.keys(body).every((key) => keys.has(key))") &&
+          contains("scripts/codex_ipc_rollout_reader.mjs", 'body.role === "developer"') &&
+          matchCount("scripts/codex_ipc_rollout_reader.mjs", /native_steer_ownership/g) === 1 &&
+          !contains("scripts/codex_ipc_rollout_reader.mjs", /RESPONSE_TYPES = new Set\(\[[^\]]*"(?:configuration_update|additional_tools)"/),
       },
       {
         label: "observer, waiter, and harvester share the same SQLite-free page assessor",

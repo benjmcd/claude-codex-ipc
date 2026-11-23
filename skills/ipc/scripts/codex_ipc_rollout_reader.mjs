@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import zlib from "node:zlib";
 
 export const DEFAULT_MAX_RECORD_BYTES = 24 * 1024 * 1024;
 const READ_CHUNK_BYTES = 256 * 1024;
@@ -14,6 +15,12 @@ const ROLLOUT_BASENAME_RE = new RegExp(
   `^.+-(${UUID_SOURCE})(?:_(${UUID_SOURCE}))?\\.jsonl$`,
   "i",
 );
+// Codex archives inactive rollout pages in place as `<page name>.jsonl.zst`. An archive is never a
+// record source for this reader; only the page-supersession veto inspects its header.
+const ARCHIVE_SUFFIX_RE = /\.zst$/iu;
+// Compressed prefix read for an archive's first record; grown x4 until the record's newline.
+const ARCHIVE_PREFIX_BYTES = 64 * 1024;
+const ZSTD_BLOCK_MAX_BYTES = 128 * 1024;
 
 export const ROLLOUT_PATH_GUIDANCE =
   "ROLLOUT-PATH: Supply the inspector's database-designated page with --rollout-path <path>.";
@@ -343,6 +350,27 @@ function knownPair(envelopeType, payloadType) {
     return RESPONSE_TYPES.has(payloadType);
   }
   return TYPELESS_ENVELOPES.has(envelopeType) && payloadType === null;
+}
+
+// Settings-only response items, named by a census of the live uncompressed rollout corpus taken
+// 2026-11-23T01:17:45Z (689 files of at most 150 MB, 226,834 records). It found three pairs outside
+// the sets above, all inside turns:
+//   - response_item/configuration_update {type, reasoning:{effort}} - a per-turn settings change;
+//   - response_item/additional_tools {type, id, role:"developer", tools} - a developer tool manifest
+//     written after thread_settings_applied;
+//   - retained_context/native_steer_ownership - carries steer input (items, phase, ui_item.content),
+//     so it stays schema drift.
+// The first two are admitted only in their observed shape: exactly the census payload keys, and
+// for the tool manifest exactly the developer role. They are never retained for correlation (only
+// response_item/agent_message is) and expose no text. Any other key or role remains drift.
+const SETTINGS_RESPONSE_KEYS = new Map([
+  ["configuration_update", new Set(["type", "reasoning"])],
+  ["additional_tools", new Set(["type", "id", "role", "tools"])],
+]);
+function settingsResponseItem(envelopeType, payloadType, body) {
+  const keys = envelopeType === "response_item" ? SETTINGS_RESPONSE_KEYS.get(payloadType) : undefined;
+  if (!keys || !Object.keys(body).every((key) => keys.has(key))) return false;
+  return payloadType !== "additional_tools" || body.role === "developer";
 }
 
 function semanticEventRoleValid(envelopeType, payloadType, payload) {
@@ -986,7 +1014,9 @@ export function normalizeRolloutRecord(value, context = {}) {
     knownPair:
       identityValid &&
       semanticRoleValid &&
-      (knownPair(envelopeType, payloadType) || inertUnknownEnvelope),
+      (knownPair(envelopeType, payloadType) ||
+        settingsResponseItem(envelopeType, payloadType, body) ||
+        inertUnknownEnvelope),
   };
 }
 
@@ -2988,13 +3018,86 @@ function readFirstRecord(filePath, maxRecordBytes = DEFAULT_MAX_RECORD_BYTES) {
     if (bytes > maxRecordBytes) {
       return { ok: false, reason: "record-too-large" };
     }
-    let first = Buffer.concat(chunks);
-    if (first.at(-1) === 13) first = first.subarray(0, first.length - 1);
-    if (first.length >= 3 && first[0] === 0xef && first[1] === 0xbb && first[2] === 0xbf) {
-      first = first.subarray(3);
+    return parseFirstRecord(Buffer.concat(chunks), terminated);
+  } catch (error) {
+    return { ok: false, reason: "unreadable", error };
+  } finally {
+    if (descriptor !== undefined) fs.closeSync(descriptor);
+  }
+}
+
+function parseFirstRecord(bytes, terminated) {
+  let first = bytes;
+  if (first.at(-1) === 13) first = first.subarray(0, first.length - 1);
+  if (first.length >= 3 && first[0] === 0xef && first[1] === 0xbb && first[2] === 0xbf) {
+    first = first.subarray(3);
+  }
+  const text = new TextDecoder("utf-8", { fatal: true }).decode(first);
+  return { ok: true, value: JSON.parse(text), terminated };
+}
+
+// First record of a zstd archive, from a compressed prefix (a frame prefix decodes to a page
+// prefix). Runtimes without zlib zstd (Node before 22.15/23.8) cannot read it and fail closed.
+function readArchiveFirstRecord(filePath, maxRecordBytes = DEFAULT_MAX_RECORD_BYTES) {
+  if (typeof zlib.zstdDecompressSync !== "function") {
+    return { ok: false, reason: "archive-unsupported" };
+  }
+  let descriptor;
+  try {
+    descriptor = fs.openSync(filePath, "r");
+    const size = fs.fstatSync(descriptor).size;
+    // Decodes the first `length` compressed bytes; null when the output would pass the cap. The
+    // cap keeps one zstd block of slack above maxRecordBytes: one more input byte completes at
+    // most one block, so the bisection below always ends on a prefix that either shows the
+    // newline or proves the record too large.
+    const decode = (length) => {
+      const input = Buffer.allocUnsafe(length);
+      const bytesRead = fs.readSync(descriptor, input, 0, length, 0);
+      try {
+        return zlib.zstdDecompressSync(input.subarray(0, bytesRead), {
+          maxOutputLength: maxRecordBytes + ZSTD_BLOCK_MAX_BYTES + 1,
+        });
+      } catch (error) {
+        if (error?.code === "ERR_BUFFER_TOO_LARGE") return null;
+        // A runtime that rejects a truncated frame gets a longer prefix; the whole file is final.
+        if (length >= size) throw error;
+        return Buffer.alloc(0);
+      }
+    };
+    // The first record, a final refusal, or null while this prefix shows no newline yet.
+    const firstRecord = (output, whole) => {
+      const newline = output.indexOf(10);
+      if (newline === -1 ? output.length > maxRecordBytes : newline > maxRecordBytes) {
+        return { ok: false, reason: "record-too-large" };
+      }
+      if (newline !== -1) return parseFirstRecord(output.subarray(0, newline), true);
+      return whole ? parseFirstRecord(output, false) : null;
+    };
+    let low = 0;
+    for (let length = Math.min(ARCHIVE_PREFIX_BYTES, size); ; length = Math.min(length * 4, size)) {
+      const output = decode(length);
+      if (output !== null) {
+        const result = firstRecord(output, length >= size);
+        if (result) return result;
+        low = length;
+        continue;
+      }
+      // A highly compressible tail passed the cap before the newline was seen. Bisect between
+      // the longest prefix that showed no newline and this one.
+      let high = length;
+      while (high - low > 1) {
+        const middle = low + Math.floor((high - low) / 2);
+        const probe = decode(middle);
+        if (probe === null) {
+          high = middle;
+        } else {
+          const result = firstRecord(probe, false);
+          if (result) return result;
+          low = middle;
+        }
+      }
+      return { ok: false, reason: "record-too-large" };
     }
-    const text = new TextDecoder("utf-8", { fatal: true }).decode(first);
-    return { ok: true, value: JSON.parse(text), terminated };
   } catch (error) {
     return { ok: false, reason: "unreadable", error };
   } finally {
@@ -3014,15 +3117,22 @@ export function parseRolloutBasename(filePath) {
   };
 }
 
-function validateCandidate(filePath, threadId) {
+export function parseRolloutArchiveBasename(filePath) {
+  const name = path.basename(filePath);
+  if (!ARCHIVE_SUFFIX_RE.test(name)) return null;
+  const page = parseRolloutBasename(name.slice(0, -".zst".length));
+  return page ? { ...page, archived: true } : null;
+}
+
+function validateCandidate(filePath, threadId, { archived = false } = {}) {
   try {
     const stat = fs.statSync(filePath);
     const exactStat = fs.statSync(filePath, { bigint: true });
     if (!stat.isFile()) {
       return { ok: false, reason: "unreadable", path: filePath };
     }
-    const filename = parseRolloutBasename(filePath);
-    const first = readFirstRecord(filePath);
+    const filename = archived ? parseRolloutArchiveBasename(filePath) : parseRolloutBasename(filePath);
+    const first = archived ? readArchiveFirstRecord(filePath) : readFirstRecord(filePath);
     const payload =
       first.ok &&
       first.value?.type === "session_meta" &&
@@ -3084,6 +3194,7 @@ function validateCandidate(filePath, threadId) {
 
 function findUuidCandidates(root, threadId, options = {}) {
   const matches = [];
+  const archives = [];
   const diagnostics = [];
   const stack = [root];
   while (stack.length > 0) {
@@ -3131,9 +3242,9 @@ function findUuidCandidates(root, threadId, options = {}) {
       ) {
         stack.push(candidate);
       } else if (entry.isFile() || entry.isSymbolicLink()) {
-        const filename = parseRolloutBasename(entry.name);
+        const filename = parseRolloutBasename(entry.name) || parseRolloutArchiveBasename(entry.name);
         if (filename?.rootThreadId === threadId) {
-          matches.push(candidate);
+          (filename.archived ? archives : matches).push(candidate);
         } else if (
           entry.name.toLowerCase().startsWith("rollout-") &&
           entry.name.toLowerCase().includes(threadId) &&
@@ -3144,7 +3255,7 @@ function findUuidCandidates(root, threadId, options = {}) {
       }
     }
   }
-  return { matches, diagnostics, deadlineExceeded: false };
+  return { matches, archives, diagnostics, deadlineExceeded: false };
 }
 
 export function locateRollout(options) {
@@ -3369,7 +3480,12 @@ export function assessRolloutPageSupersession(options = {}) {
 
   const successors = [];
   const seenIdentities = new Set([bound.identityKey]);
-  for (const candidatePath of discovered.matches.sort((left, right) => left.localeCompare(right))) {
+  const sortedPaths = (paths) => [...paths].sort((left, right) => left.localeCompare(right));
+  const pages = [
+    ...sortedPaths(discovered.matches).map((candidatePath) => ({ candidatePath, archived: false })),
+    ...sortedPaths(discovered.archives).map((candidatePath) => ({ candidatePath, archived: true })),
+  ];
+  for (const { candidatePath, archived } of pages) {
     if (now() >= deadlineAt) return unproven("deadline-exceeded");
     // Discovery includes the bound page itself. It was just revalidated above, so skip its
     // ordinary spelling (and any canonical alias) before opening candidates. This preserves the
@@ -3377,10 +3493,15 @@ export function assessRolloutPageSupersession(options = {}) {
     if (canonicalPath(candidatePath) === bound.canonicalPath) continue;
     // Only the paginated filename grammar can carry a direct history_base successor claim.
     // Legacy siblings may be retained predecessors or unrelated fixtures; they cannot supersede
-    // the bound page, so do not open or reclassify them during this narrow veto.
-    if (parseRolloutBasename(path.basename(candidatePath))?.paginated !== true) continue;
-    const candidate = validateCandidate(candidatePath, threadId);
-    if (!candidate.ok) return unproven("candidate-invalid");
+    // the bound page, so do not open or reclassify them during this narrow veto. The same holds
+    // for archived (zstd) legacy siblings; an archived paginated page is read like any other.
+    const name = archived ? parseRolloutArchiveBasename(candidatePath) : parseRolloutBasename(candidatePath);
+    if (name?.paginated !== true) continue;
+    const candidate = validateCandidate(candidatePath, threadId, { archived });
+    if (!candidate.ok) {
+      if (!archived) return unproven("candidate-invalid");
+      return unproven(typeof zlib.zstdDecompressSync === "function" ? "archive-invalid" : "archive-unsupported");
+    }
     if (seenIdentities.has(candidate.identityKey)) continue;
     seenIdentities.add(candidate.identityKey);
     if (candidate.firstRecordTerminated !== true) {

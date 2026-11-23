@@ -527,8 +527,32 @@ function Get-CodexIpcNativeRole {
         if ($null -eq $value -or $value.value -notmatch '^[^=\s]+=.+$') { return $null }
         $token = Read-CodexIpcCommandToken -CommandLine $Process.commandLine -Offset $value.next
     }
-    if ($null -ne $token -and $token.value -cin @('app-server', 'exec-server', 'sandbox')) { return $token.value }
+    # '--__codex-windows-mxc' is the Windows sandbox helper the app-server starts from its own
+    # executable; like every role here it counts only with proven ancestry to the intended GUI.
+    if ($null -ne $token -and $token.value -cin @('app-server', 'exec-server', 'sandbox', '--__codex-windows-mxc')) { return $token.value }
     return $null
+}
+
+function Test-CodexIpcNodeServiceLauncher {
+    param([object]$Process, [hashtable]$GuiById)
+
+    # Some Desktop builds start the app-server from the GUI's Electron Node utility process
+    # (--type=utility --utility-sub-type=node.mojom.NodeService) instead of the main process.
+    # That exact child, running the GUI's own executable and launched directly by a GUI anchor,
+    # is the only GUI-named process allowed between the anchor and its runtime, and the runtime
+    # is registered only from an app-server directly under it. Descendants of the runtime keep
+    # the existing ancestry rules (same-runtime native roles, readable non-candidate hops).
+    $parentKey = [string]$Process.parentPid
+    if ($parentKey -eq [string]$Process.pid -or -not $GuiById.ContainsKey($parentKey)) { return $false }
+    $path = ConvertTo-CodexIpcNormalizedPath -Value $Process.executable
+    $guiPath = ConvertTo-CodexIpcNormalizedPath -Value $GuiById[$parentKey].executable
+    if ($null -eq $path -or $null -eq $guiPath -or
+        -not [string]::Equals($path, $guiPath, [System.StringComparison]::OrdinalIgnoreCase)) { return $false }
+    if ($Process.commandLine -isnot [string]) { return $false }
+    $token = Read-CodexIpcCommandToken -CommandLine $Process.commandLine
+    if ($null -eq $token -or -not (Test-CodexIpcCommandExecutable -Token $token.value -Path $path)) { return $false }
+    return ($Process.commandLine -match '(?i)(^|\s)--type=utility(\s|$)' -and
+        $Process.commandLine -match '(?i)(^|\s)--utility-sub-type=node\.mojom\.NodeService(\s|$)')
 }
 
 function Test-CodexIpcGuiAnchor {
@@ -568,7 +592,8 @@ function Test-CodexIpcRuntimeAncestry {
         }
         $ancestor = $ProcessById[$key]
         if ($null -eq $ancestor.executable -or [string]::IsNullOrWhiteSpace([string]$ancestor.commandLine)) { return $false }
-        if ($CandidateById.ContainsKey($key) -and (
+        if ($CandidateById.ContainsKey($key) -and
+            -not (Test-CodexIpcNodeServiceLauncher -Process $ancestor -GuiById $GuiById) -and (
             -not $NativeRoleById.ContainsKey($key) -or -not [string]::Equals(
                 $path, [string]$ancestor.executable, [System.StringComparison]::OrdinalIgnoreCase))) { return $false }
         $parentId = [long]$ancestor.parentPid
@@ -630,14 +655,21 @@ function Resolve-CodexIpcInventory {
         }
     }
     foreach ($process in @($RawInventory.processes)) {
+        if ($nativeRoleById[[string]$process.pid] -ne 'app-server') { continue }
         $parentKey = [string]$process.parentPid
-        if ($nativeRoleById[[string]$process.pid] -eq 'app-server' -and $guiById.ContainsKey($parentKey)) {
-            $path = ConvertTo-CodexIpcNormalizedPath -Value $process.executable
-            if ($runtimeByGuiId.ContainsKey($parentKey) -and -not [string]::Equals(
-                [string]$runtimeByGuiId[$parentKey], $path, [System.StringComparison]::OrdinalIgnoreCase)) {
-                $runtimeByGuiId[$parentKey] = ''
-            } else { $runtimeByGuiId[$parentKey] = $path }
+        $guiKey = $null
+        if ($guiById.ContainsKey($parentKey)) {
+            $guiKey = $parentKey
+        } elseif ($processById.ContainsKey($parentKey) -and
+            (Test-CodexIpcNodeServiceLauncher -Process $processById[$parentKey] -GuiById $guiById)) {
+            $guiKey = [string]$processById[$parentKey].parentPid
         }
+        if ($null -eq $guiKey) { continue }
+        $path = ConvertTo-CodexIpcNormalizedPath -Value $process.executable
+        if ($runtimeByGuiId.ContainsKey($guiKey) -and -not [string]::Equals(
+            [string]$runtimeByGuiId[$guiKey], $path, [System.StringComparison]::OrdinalIgnoreCase)) {
+            $runtimeByGuiId[$guiKey] = ''
+        } else { $runtimeByGuiId[$guiKey] = $path }
     }
 
     $guiHosts = @()
