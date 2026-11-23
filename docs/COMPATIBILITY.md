@@ -41,6 +41,7 @@ Desktop update, silently. Revalidate experimental features with
 | Stability | **Stable**, read-only by contract (never writes/locks/creates) |
 | Touches live Desktop state | No |
 | Source precedence | A readable regular non-symlink per-dispatch `*.reply.md` is primary; only when it is absent or unreadable may an exactly correlated completed rollout provide stdout-only fallback; otherwise `source=none` is visible |
+| Materialized copy | When no primary exists, a readable regular non-symlink `*.reply.rollout.md` (kept by the opt-in `codex_ipc_wait.mjs --materialize-reply` or `codex_ipc_reply_harvest.mjs --materialize`, with `*.reply.rollout.json` provenance) renders as `source=rollout-materialized`, before any live rollout fallback; its supersession check runs while the rollout is readable, and the footer counts it as answered. The viewer itself still writes nothing |
 
 Rollout observation/fallback requires the requested thread ID to own the selected physical rollout.
 If Desktop remaps that target ID to a differently owned physical rollout, the tools return

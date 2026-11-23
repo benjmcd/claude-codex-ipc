@@ -60,6 +60,10 @@ Paste the printed pickup and run the printed `WAIT:` command. When the reply fil
 named dispatch has a certifiable final message, the waiter returns `done` with
 `replySource=rollout-fallback`; render it with
 `skills/ipc/scripts/codex_ipc_replies.sh --session <sid> -c <uuid> --rollout-path <inspector-page>`.
+The printed `WAIT:` line includes `--materialize-reply`, so that body is also kept beside the
+envelope as `<dispatch>.reply.rollout.md` and stays readable after Codex compresses the page to
+`.jsonl.zst`. A `WAIT_DIAGNOSTIC` line reports `reply-materialized` or
+`reply-materialize-refused` with its reason; the `done` token and exit code are unaffected.
 The public root remains `~/.claude/ipc`. Pointing `CODEX_IPC_ROOT` at a directory the target can
 write is an operator configuration choice, and every participant must use that same explicit root;
 the tool never hard-codes a replacement or predicts writability from stored sandbox settings.

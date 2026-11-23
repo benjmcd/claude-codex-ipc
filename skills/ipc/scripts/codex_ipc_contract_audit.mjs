@@ -1018,6 +1018,25 @@ function main() {
           contains("scripts/codex_ipc_reply_harvest.mjs", 'if (pageAssessment.status === "stale") {'),
       },
       {
+        label: "rollout replies are materialized only by explicit opt-in, after certification, beside the envelope, never over anything",
+        file: "scripts/codex_ipc_reply_harvest.mjs",
+        ok:
+          contains("scripts/codex_ipc_reply_harvest.mjs", "export function materializeDispatch(options)") &&
+          contains("scripts/codex_ipc_reply_harvest.mjs", 'descriptor = fs.openSync(temp, "wx", 0o600);') &&
+          contains("scripts/codex_ipc_reply_harvest.mjs", "fs.linkSync(temp, target);") &&
+          contains("scripts/codex_ipc_reply_harvest.mjs", 'if (lstatOrNull(replyPath)) return materializeRefused("primary-present");') &&
+          contains("scripts/codex_ipc_reply_harvest.mjs", 'return materializeRefused("dispatch-id-reused", harvested.diagnostics);') &&
+          contains("scripts/codex_ipc_reply_harvest.mjs", 'if (harvested.source !== "rollout-fallback") {') &&
+          contains("scripts/codex_ipc_reply_harvest.mjs", 'return materializeRefused("body-too-large", [], { sourceBytes: harvested.sourceBytes });') &&
+          contains("scripts/codex_ipc_reply_harvest.mjs", "export const MATERIALIZED_REPLY_SUFFIX = \".reply.rollout.md\";") &&
+          contains("scripts/codex_ipc_wait.mjs", "--materialize-reply requires --accept-rollout-fallback") &&
+          contains("scripts/codex_ipc_wait.mjs", 'result.replySource === "rollout-fallback") {') &&
+          contains("scripts/handoff_to_codex.sh", "--status-exit-codes --materialize-reply)") &&
+          contains("scripts/handoff_to_codex.sh", "-name '*.reply.rollout.md' -o -name '*.reply.rollout.json'") &&
+          contains("scripts/codex_ipc_replies.sh", 'reply_source="rollout-materialized"') &&
+          !contains("scripts/codex_ipc_replies.sh", "--materialize"),
+      },
+      {
         label: "archived (zstd) pages never become record sources, and an archived paginated page is read for the veto or fails it closed",
         file: "scripts/codex_ipc_rollout_reader.mjs",
         ok:

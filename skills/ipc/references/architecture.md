@@ -43,6 +43,15 @@ it writes, locks, and creates nothing (not even the transport root). Flags:
 closed (exit 1, never a false "0 replies"). Per-entry (session/thread/dispatch) attribution is what
 keeps this a view rather than a re-commingling of channels.
 
+A materialized rollout copy (`<dispatch>.reply.rollout.md`, written only by the opt-in
+`codex_ipc_wait.mjs --materialize-reply` or `codex_ipc_reply_harvest.mjs --materialize` after the
+harvester's fallback certification, with `.reply.rollout.json` provenance) renders as
+`source=rollout-materialized` when no primary `.reply.md` exists; a primary always wins. The
+supersession check runs against it while the rollout is readable, and the footer counts it as
+answered scope-wide. The retention sweep treats it like a reply: an aged task is swept once a reply
+or a copy exists, and aged copies are swept like replies. Writes use an exclusively created
+private temp file hard-linked into place, so an existing file is never replaced.
+
 After each dispatch's body the view prints a labelled section of the recorded reasoning of that
 dispatch's own turn (`--reasoning full|headline|none`, default `full`; items whole unless
 `--reasoning-max-item-chars` caps them; `--reasoning-max-bytes`, 64000 per dispatch by default, is a

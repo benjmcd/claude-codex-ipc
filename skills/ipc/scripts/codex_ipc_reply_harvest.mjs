@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { realpathSync } from "node:fs";
@@ -16,6 +17,10 @@ import {
 
 const DEFAULT_MAX_BYTES = 4096;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// A materialized copy is the whole certified body or nothing: a larger body is refused, never cut.
+export const MATERIALIZE_MAX_BYTES = 4 * 1024 * 1024;
+export const MATERIALIZED_REPLY_SUFFIX = ".reply.rollout.md";
+export const MATERIALIZED_PROVENANCE_SUFFIX = ".reply.rollout.json";
 
 function serializeDiagnostic(item) {
   return JSON.stringify(item).replace(
@@ -371,12 +376,172 @@ export function harvestDispatch(options) {
       ...parsed.diagnostics,
       ...(correlated.diagnostics || []),
     ],
+    ...(options?.includeProvenance
+      ? {
+          provenance: {
+            rolloutPath: located.path,
+            rolloutCanonicalPath: parsed.cursor.canonicalPath,
+            rolloutIdentityKey: parsed.cursor.identityKey,
+            rolloutSize: parsed.cursor.size,
+            turnId: correlated.turnId || null,
+          },
+        }
+      : {}),
+  };
+}
+
+function lstatOrNull(filePath) {
+  try {
+    return fs.lstatSync(filePath);
+  } catch (error) {
+    if (error?.code === "ENOENT") return null;
+    throw error;
+  }
+}
+
+// Publishes bytes at `target` without ever replacing anything there: an exclusively created
+// private temp file is hard-linked into place, and linking fails with EEXIST when the target, or a
+// link or symlink at it, already exists. A rename could silently replace a racing writer's file.
+function publishExclusive(target, bytes) {
+  const temp = path.join(
+    path.dirname(target),
+    `.${path.basename(target)}.${process.pid}.${crypto.randomBytes(6).toString("hex")}.tmp`,
+  );
+  let descriptor;
+  try {
+    descriptor = fs.openSync(temp, "wx", 0o600);
+    fs.writeFileSync(descriptor, bytes);
+    fs.fsyncSync(descriptor);
+    fs.closeSync(descriptor);
+    descriptor = undefined;
+    fs.linkSync(temp, target);
+  } finally {
+    if (descriptor !== undefined) {
+      try { fs.closeSync(descriptor); } catch {}
+    }
+    try { fs.unlinkSync(temp); } catch {}
+  }
+}
+
+function materializeRefused(reason, diagnostics = [], extra = {}) {
+  return { ok: false, status: "refused", reason, diagnostics, ...extra };
+}
+
+// Opt-in only: keeps a certified rollout-fallback body in the Claude-owned transport root, as a
+// sibling of the dispatch's task envelope, so it stays readable after Codex compresses the page.
+// It never writes the primary <dispatch>.reply.md, never overwrites, never follows a symlink, and
+// writes nothing unless the same certification harvestDispatch applies to a fallback passes.
+export function materializeDispatch(options) {
+  const now = options?.now || Date.now;
+  const dispatchId = String(options?.dispatchId || "");
+  const threadId = String(options?.threadId || "").toLowerCase();
+  const replyPath = options?.replyPath;
+  if (!/^[A-Za-z0-9._-]+$/.test(dispatchId) || !UUID_RE.test(threadId) ||
+      typeof replyPath !== "string" || replyPath.length === 0) {
+    return materializeRefused("invalid-arguments");
+  }
+  if (path.basename(replyPath) !== `${dispatchId}.reply.md`) {
+    return materializeRefused("reply-path-mismatch");
+  }
+  const channel = path.dirname(replyPath);
+  const base = path.join(channel, dispatchId);
+  const taskPath = `${base}.task.md`;
+  const bodyPath = `${base}${MATERIALIZED_REPLY_SUFFIX}`;
+  const provenancePath = `${base}${MATERIALIZED_PROVENANCE_SUFFIX}`;
+  try {
+    const directory = lstatOrNull(channel);
+    if (!directory || !directory.isDirectory() || directory.isSymbolicLink()) {
+      return materializeRefused("channel-not-directory");
+    }
+    const task = lstatOrNull(taskPath);
+    if (!task || !task.isFile() || task.isSymbolicLink()) {
+      return materializeRefused("task-envelope-missing");
+    }
+    if (lstatOrNull(replyPath)) return materializeRefused("primary-present");
+    if (lstatOrNull(bodyPath) || lstatOrNull(provenancePath)) {
+      return materializeRefused("materialized-present");
+    }
+  } catch (error) {
+    return materializeRefused("channel-unreadable", [
+      { code: "materialize-stat-failed", errno: error?.code || null },
+    ]);
+  }
+
+  // A caller may only lower the cap (tests do); nothing raises it.
+  const maxBodyBytes = Number.isSafeInteger(options?.maxBodyBytes) && options.maxBodyBytes > 0
+    ? Math.min(options.maxBodyBytes, MATERIALIZE_MAX_BYTES)
+    : MATERIALIZE_MAX_BYTES;
+  const harvested = harvestDispatch({
+    ...options,
+    threadId,
+    dispatchId,
+    replyPath: null,
+    maxBytes: maxBodyBytes + 1,
+    includeProvenance: true,
+  });
+  if ((harvested.duplicateCount || 0) > 1) {
+    return materializeRefused("dispatch-id-reused", harvested.diagnostics);
+  }
+  if (harvested.source !== "rollout-fallback") {
+    return materializeRefused("not-certified", harvested.diagnostics, {
+      harvestReason: harvested.reason || null,
+    });
+  }
+  if (harvested.sourceBytes > maxBodyBytes ||
+      harvested.returnedBytes !== harvested.sourceBytes) {
+    return materializeRefused("body-too-large", [], { sourceBytes: harvested.sourceBytes });
+  }
+  const body = Buffer.from(harvested.bodyBase64, "base64");
+  if (body.length !== harvested.sourceBytes) return materializeRefused("body-length-mismatch");
+  const bodySha256 = crypto.createHash("sha256").update(body).digest("hex");
+  const provenance = {
+    schemaVersion: 1,
+    source: "rollout-materialized",
+    threadId,
+    dispatchId,
+    ...harvested.provenance,
+    bodyBytes: body.length,
+    bodySha256,
+    materializedAt: new Date(now()).toISOString(),
+  };
+
+  // Provenance first, then the body: a present body file always has its provenance beside it.
+  const published = [];
+  try {
+    publishExclusive(provenancePath, Buffer.from(`${JSON.stringify(provenance, null, 2)}\n`, "utf8"));
+    published.push(provenancePath);
+    publishExclusive(bodyPath, body);
+    published.push(bodyPath);
+  } catch (error) {
+    for (const filePath of published) {
+      try { fs.unlinkSync(filePath); } catch {}
+    }
+    return materializeRefused(error?.code === "EEXIST" ? "materialized-present" : "write-failed", [
+      { code: "materialize-write-failed", errno: error?.code || null },
+    ]);
+  }
+  return {
+    ok: true,
+    status: "materialized",
+    bodyPath,
+    provenancePath,
+    bodyBytes: body.length,
+    bodySha256,
+    diagnostics: harvested.diagnostics,
   };
 }
 
 function usage() {
   return `Usage: node codex_ipc_reply_harvest.mjs --thread <uuid|filedrop> --dispatch <id>
        [--reply-path <path>] [--rollout-path <path>] [--max-bytes <n>]
+       node codex_ipc_reply_harvest.mjs --materialize --thread <uuid> --dispatch <id>
+       --reply-path <dir>/<id>.reply.md [--rollout-path <path>]
+
+--materialize writes a certified rollout-fallback body beside the task envelope as
+<id>.reply.rollout.md, with <id>.reply.rollout.json provenance. It never writes or replaces
+<id>.reply.md, never overwrites, and refuses when a primary or a copy exists, the dispatch id
+is reused, the body is not certified, or the body exceeds ${MATERIALIZE_MAX_BYTES} bytes. It prints
+"materialized<TAB>bytes<TAB>sha256" (exit 0) or "refused<TAB>reason" (exit 1).
 
 Environment:
   CODEX_IPC_ROLLOUT_PATH   same validation as --rollout-path; flag wins
@@ -405,10 +570,14 @@ function parseArgs(argv) {
     rolloutPath: process.env.CODEX_IPC_ROLLOUT_PATH || null,
     sessionsRoot: process.env.CODEX_IPC_SESSIONS_ROOT || undefined,
     maxBytes: DEFAULT_MAX_BYTES,
+    materialize: false,
   };
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     switch (arg) {
+      case "--materialize":
+        options.materialize = true;
+        break;
       case "--thread":
         options.threadId = takeValue(argv, ++index, arg);
         break;
@@ -430,6 +599,7 @@ function parseArgs(argv) {
   }
   if (!options.threadId || !options.dispatchId) throw new Error("--thread and --dispatch are required");
   if (!/^[A-Za-z0-9._-]+$/.test(options.dispatchId)) throw new Error("invalid --dispatch");
+  if (options.materialize && !options.replyPath) throw new Error("--materialize requires --reply-path");
   if (options.rolloutPath) options.rolloutPath = normalizeRolloutCliPath(options.rolloutPath);
   return options;
 }
@@ -449,6 +619,18 @@ function main(argv) {
     if (error?.code === "IPC_ROLLOUT_PATH_INVALID") console.error(ROLLOUT_PATH_GUIDANCE);
     console.error(usage());
     process.exitCode = 1;
+    return;
+  }
+  if (options.materialize) {
+    const outcome = materializeDispatch(options);
+    for (const line of rolloutDiagnosticLines(outcome.diagnostics)) console.error(line);
+    emitDiagnostics(outcome.diagnostics);
+    if (outcome.ok) {
+      process.stdout.write(`materialized\t${outcome.bodyBytes}\t${outcome.bodySha256}\n`);
+    } else {
+      process.stdout.write(`refused\t${outcome.reason}\n`);
+      process.exitCode = 1;
+    }
     return;
   }
   const result = harvestDispatch(options);

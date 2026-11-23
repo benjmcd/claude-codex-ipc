@@ -56,6 +56,16 @@ All notable changes to this project will be documented in this file.
   The default envelope is byte-for-byte unchanged. The reply viewer's footer no longer counts a
   dispatch it rendered as `source=rollout-fallback` as awaiting a primary reply file; it reports
   those separately.
+- Rollout-only replies can be kept beside their envelope, because Codex compresses inactive pages
+  to `.jsonl.zst` and archived pages are never read as records. `codex_ipc_reply_harvest.mjs
+  --materialize`, and the waiter's opt-in `--materialize-reply` (now in the printed `WAIT:` line),
+  write a certified rollout-fallback body as `<dispatch>.reply.rollout.md` with
+  `<dispatch>.reply.rollout.json` provenance. They never write or replace `<dispatch>.reply.md`,
+  never overwrite (an exclusively created temp file is hard-linked into place), and refuse when a
+  primary or a copy exists, there is no task envelope, the dispatch id is reused, or the body is
+  uncertified or over 4 MiB. The viewer shows the copy as `source=rollout-materialized`, keeps its
+  supersession check while the rollout is readable, and counts it as answered; the retention sweep
+  treats it like a reply. The viewer and the flagless waiter still write nothing.
 
 ## [0.1.14] — 2026-10-03
 

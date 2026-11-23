@@ -16,6 +16,7 @@ import {
   rolloutDiagnosticLines,
   rolloutPageGuidance,
 } from "./codex_ipc_rollout_reader.mjs";
+import { materializeDispatch } from "./codex_ipc_reply_harvest.mjs";
 
 export const DEFAULT_WAIT_BUDGET_MS = 0;
 export const DEFAULT_WAIT_INTERVAL_MS = 250;
@@ -496,6 +497,11 @@ Options:
   --status-exit-codes       D4 opt-in: map the determination to an exit code (done=0, pending=2,
                             aborted=3, superseded=4, reply-missing=5, unavailable=6). Usage errors
                             stay exit 1 with no token. Flagless stays all-determinations-exit-0.
+  --materialize-reply       Opt-in, with --accept-rollout-fallback and --reply-path or --session:
+                            after done/rollout-fallback, keep the certified body beside the task
+                            envelope as <dispatch>.reply.rollout.md (plus .reply.rollout.json),
+                            via the harvester's --materialize rules. It never writes the primary
+                            reply file; stdout and the exit code are unchanged.
 
 Environment:
   CODEX_IPC_ROLLOUT_PATH      same validation as --rollout-path; flag wins
@@ -542,6 +548,7 @@ export function parseWaitArgs(argv, env = process.env) {
     intervalMs: undefined,
     acceptRolloutFallback: false,
     statusExitCodes: false,
+    materializeReply: false,
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -549,6 +556,9 @@ export function parseWaitArgs(argv, env = process.env) {
     switch (arg) {
       case "--accept-rollout-fallback":
         raw.acceptRolloutFallback = true;
+        break;
+      case "--materialize-reply":
+        raw.materializeReply = true;
         break;
       case "--status-exit-codes":
         raw.statusExitCodes = true;
@@ -595,6 +605,12 @@ export function parseWaitArgs(argv, env = process.env) {
   ) {
     throw new Error("--session must be one path segment");
   }
+  if (raw.materializeReply && !raw.acceptRolloutFallback) {
+    throw new Error("--materialize-reply requires --accept-rollout-fallback");
+  }
+  if (raw.materializeReply && !raw.replyPath && !raw.sessionId) {
+    throw new Error("--materialize-reply requires --reply-path or --session");
+  }
 
   const warnings = [];
   const budgetSource = raw.budgetMs ?? env.CODEX_IPC_WAIT_BUDGET_MS;
@@ -626,6 +642,7 @@ export function parseWaitArgs(argv, env = process.env) {
       ),
       acceptRolloutFallback: raw.acceptRolloutFallback,
       statusExitCodes: raw.statusExitCodes,
+      materializeReply: raw.materializeReply,
       maxRecordBytes: DEFAULT_MAX_RECORD_BYTES,
     },
   };
@@ -657,6 +674,25 @@ async function main(argv) {
       console.error(
         `WAIT_DIAGNOSTIC ${serializeDiagnostic({ code: "reply-source", source: result.replySource })}`,
       );
+    }
+    // Opt-in only. The harvester re-certifies before writing anything; the outcome is one stderr
+    // diagnostic, and stdout and the exit code still describe the wait alone.
+    if (parsed.options.materializeReply && result.token === "done" &&
+        result.replySource === "rollout-fallback") {
+      const resolution = replyPathResolution(parsed.options);
+      const outcome = resolution.status === "resolved"
+        ? materializeDispatch({
+            threadId: parsed.options.threadId,
+            dispatchId: parsed.options.dispatchId,
+            replyPath: resolution.path,
+            rolloutPath: parsed.options.rolloutPath,
+            sessionsRoot: parsed.options.sessionsRoot,
+            maxRecordBytes: parsed.options.maxRecordBytes,
+          })
+        : { ok: false, reason: "reply-path-unresolved" };
+      console.error(`WAIT_DIAGNOSTIC ${serializeDiagnostic(outcome.ok
+        ? { code: "reply-materialized", bytes: outcome.bodyBytes, sha256: outcome.bodySha256 }
+        : { code: "reply-materialize-refused", reason: outcome.reason })}`);
     }
     process.stdout.write(`${result.token}\n`);
     // A6: opt-in only. Flagless leaves process.exitCode unset (0), byte-identical to prior releases.

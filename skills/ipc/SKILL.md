@@ -565,7 +565,16 @@ write the transport root (for example a managed workspace-write sandbox), pass
 asks for the full substantive result in the final agent message, and names no reply file, so the
 lane spends no turn on a denied write. Certify it with the same `--accept-rollout-fallback` waiter
 and read it with the viewer, whose footer does not count a rollout-answered dispatch as awaiting a
-reply file. The mode is explicit only; nothing detects the lane's sandbox. The wrapper dispatch never
+reply file. The mode is explicit only; nothing detects the lane's sandbox. Codex compresses
+inactive rollout pages to `.jsonl.zst`, and archived pages are never read as records, so a
+rollout-only reply would later become unreadable. The printed `WAIT:` line therefore adds
+`--materialize-reply`: after `done`/`rollout-fallback` the waiter keeps the certified body beside
+the envelope as `<dispatch>.reply.rollout.md`, with `<dispatch>.reply.rollout.json` provenance. It
+never writes or replaces `<dispatch>.reply.md`, never overwrites, and refuses when a primary or a
+copy exists, the dispatch id is reused, or the body is uncertified or over the size cap
+(`codex_ipc_reply_harvest.mjs --materialize` does the same explicitly). The viewer shows the copy
+as `source=rollout-materialized`, keeps its supersession check while the rollout is readable, and
+counts the dispatch as answered; the viewer and the flagless waiter still write nothing. The wrapper dispatch never
 changes the target thread's model, reasoning, sandbox, or approval: it omits every version-2
 override field. A direct client `--model`/`--effort` override is a thread-settings change, not a
 per-turn override (see the new-session-mode note below and `docs/COMPATIBILITY.md`); the client

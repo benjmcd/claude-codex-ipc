@@ -34,8 +34,9 @@
 #   CODEX_IPC_RETENTION_DAYS=<n>       prune transport files older than n days on each run.
 #                                      KEEP-ONLY BY DEFAULT: unset, empty and 0 all mean never
 #                                      delete; pruning requires an explicit positive integer.
-#                                      When enabled: aged *.reply.md files, and aged
-#                                      *.task.md files whose same-dispatch *.reply.md exists, are
+#                                      When enabled: aged *.reply.md files, aged materialized
+#                                      *.reply.rollout.md/.json copies, and aged *.task.md files
+#                                      whose same-dispatch reply or materialized copy exists, are
 #                                      deleted. An UNREPLIED *.task.md is NEVER age-deleted: an
 #                                      outstanding dispatch is kept until it is answered, and
 #                                      pairing ambiguity errs toward retention.
@@ -522,14 +523,18 @@ if (( 10#$RETENTION_DAYS > 0 )); then
     if [[ "$RETENTION_SWEEP_OK" -eq 1 ]]; then
         # Aged tasks first, deciding pairing BEFORE any reply is deleted below --
         # otherwise an aged pair's task would misread as unreplied and never sweep.
+        # A materialized rollout copy (*.reply.rollout.md) answers its dispatch like a reply.
         while IFS= read -r -d '' AGED_TASK; do
-            if [[ -f "${AGED_TASK%.task.md}.reply.md" ]]; then
+            if [[ -f "${AGED_TASK%.task.md}.reply.md" || -f "${AGED_TASK%.task.md}.reply.rollout.md" ]]; then
                 rm -f -- "$AGED_TASK" \
                     || echo "WARNING: retention sweep could not delete \"${AGED_TASK}\"." >&2
             fi
         done < <(find "$IPC_ROOT" -type f -name '*.task.md' -mtime +"$RETENTION_DAYS" -print0 2>/dev/null)
-        # Aged replies are terminal artifacts: sweepable unconditionally, as before.
+        # Aged replies, and aged materialized copies with their provenance, are terminal artifacts:
+        # sweepable unconditionally, as before.
         find "$IPC_ROOT" -type f -name '*.reply.md' -mtime +"$RETENTION_DAYS" -delete 2>/dev/null || true
+        find "$IPC_ROOT" -type f \( -name '*.reply.rollout.md' -o -name '*.reply.rollout.json' \) \
+            -mtime +"$RETENTION_DAYS" -delete 2>/dev/null || true
         find "$IPC_ROOT" -mindepth 1 -type d -empty -mtime +"$RETENTION_DAYS" -delete 2>/dev/null || true
     else
         echo "WARNING: refusing retention sweep for dangerous CODEX_IPC_ROOT \"${IPC_ROOT}\"." >&2
@@ -932,7 +937,9 @@ process.stdout.write([state, parent, legacy, rolloutPath, sessionsRoot].join("\t
             --thread "$IPC_CID" --dispatch "$DISPATCH_ID" --reply-path "$INBOUND")
         [[ -z "$INSPECT_ROLLOUT_PATH" ]] || wait_args+=(--rollout-path "$INSPECT_ROLLOUT_PATH")
         [[ -z "$INSPECT_SESSIONS_ROOT" ]] || wait_args+=(--sessions-root "$INSPECT_SESSIONS_ROOT")
-        wait_args+=(--accept-rollout-fallback --budget-ms 1800000 --interval-ms 1000 --status-exit-codes)
+        # --materialize-reply keeps a certified rollout-only reply beside the envelope, so it stays
+        # readable after Codex compresses the page; it never writes the primary reply file.
+        wait_args+=(--accept-rollout-fallback --budget-ms 1800000 --interval-ms 1000 --status-exit-codes --materialize-reply)
         printf 'WAIT:'
         printf ' %q' "${wait_args[@]}"
         printf '\n'

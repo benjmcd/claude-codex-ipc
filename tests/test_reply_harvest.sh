@@ -1916,6 +1916,169 @@ await test("harvester reports a page that grew after its one-shot read as pendin
   assert.ok(result.diagnostics.some((item) => item.code === "page-snapshot-stale"));
 });
 
+// Opt-in materialization: a certified rollout-fallback body is kept beside the task envelope as
+// <dispatch>.reply.rollout.md with .reply.rollout.json provenance, and only then.
+const { materializeDispatch, MATERIALIZE_MAX_BYTES } = await import(pathToFileURL(process.env.HARVESTER));
+const { createHash } = await import("node:crypto");
+const { spawnSync } = await import("node:child_process");
+const materializeThread = "11111111-1111-4111-8111-111111111111";
+
+function materializeChannel(name, { task = true } = {}) {
+  const channel = path.join(tmp, name);
+  fs.mkdirSync(channel, { recursive: true });
+  if (task) fs.writeFileSync(path.join(channel, `${dispatch}.task.md`), "task\n");
+  return {
+    channel,
+    replyPath: path.join(channel, `${dispatch}.reply.md`),
+    bodyPath: path.join(channel, `${dispatch}.reply.rollout.md`),
+    provenancePath: path.join(channel, `${dispatch}.reply.rollout.json`),
+  };
+}
+
+function materializeOptions(paths, extra = {}) {
+  return {
+    dispatchId: dispatch,
+    threadId: materializeThread,
+    replyPath: paths.replyPath,
+    rolloutPath: uniqueBasic,
+    sessionsRoot: uniqueDir,
+    ...extra,
+  };
+}
+
+await test("materialize keeps a certified rollout body beside the envelope with provenance", () => {
+  const paths = materializeChannel("mat-ok");
+  const outcome = materializeDispatch(materializeOptions(paths, { now: () => Date.UTC(2026, 10, 23) }));
+  assert.equal(outcome.ok, true, JSON.stringify(outcome));
+  assert.equal(fs.readFileSync(paths.bodyPath, "utf8"), "latest final");
+  assert.equal(fs.existsSync(paths.replyPath), false, "the primary reply file is never written");
+  const provenance = JSON.parse(fs.readFileSync(paths.provenancePath, "utf8"));
+  assert.equal(provenance.schemaVersion, 1);
+  assert.equal(provenance.source, "rollout-materialized");
+  assert.equal(provenance.threadId, materializeThread);
+  assert.equal(provenance.dispatchId, dispatch);
+  assert.equal(provenance.bodyBytes, Buffer.byteLength("latest final"));
+  assert.equal(
+    provenance.bodySha256,
+    createHash("sha256").update("latest final").digest("hex"),
+  );
+  assert.equal(provenance.bodySha256, outcome.bodySha256);
+  assert.equal(typeof provenance.rolloutIdentityKey, "string");
+  assert.equal(provenance.rolloutSize, fs.statSync(uniqueBasic).size);
+  assert.equal(provenance.materializedAt, "2026-11-23T00:00:00.000Z");
+  assert.deepEqual(
+    fs.readdirSync(paths.channel).sort(),
+    [`${dispatch}.reply.rollout.json`, `${dispatch}.reply.rollout.md`, `${dispatch}.task.md`],
+    "no temporary file is left behind",
+  );
+});
+
+await test("materialize refuses and writes nothing when a primary reply exists", () => {
+  const paths = materializeChannel("mat-primary");
+  fs.writeFileSync(paths.replyPath, "lane reply");
+  const outcome = materializeDispatch(materializeOptions(paths));
+  assert.equal(outcome.ok, false);
+  assert.equal(outcome.reason, "primary-present");
+  assert.equal(fs.existsSync(paths.bodyPath), false);
+  assert.equal(fs.existsSync(paths.provenancePath), false);
+  assert.equal(fs.readFileSync(paths.replyPath, "utf8"), "lane reply");
+});
+
+await test("materialize never overwrites an existing copy or provenance file", () => {
+  const paths = materializeChannel("mat-existing");
+  fs.writeFileSync(paths.bodyPath, "earlier copy");
+  const outcome = materializeDispatch(materializeOptions(paths));
+  assert.equal(outcome.reason, "materialized-present");
+  assert.equal(fs.readFileSync(paths.bodyPath, "utf8"), "earlier copy");
+  assert.equal(fs.existsSync(paths.provenancePath), false);
+  const provenanceOnly = materializeChannel("mat-existing-provenance");
+  fs.writeFileSync(provenanceOnly.provenancePath, "{}\n");
+  const second = materializeDispatch(materializeOptions(provenanceOnly));
+  assert.equal(second.reason, "materialized-present");
+  assert.equal(fs.existsSync(provenanceOnly.bodyPath), false);
+  assert.equal(fs.readFileSync(provenanceOnly.provenancePath, "utf8"), "{}\n");
+});
+
+await test("materialize refuses a symlink at the copy path when the platform allows creating one", () => {
+  const paths = materializeChannel("mat-symlink");
+  const decoy = path.join(tmp, "mat-symlink-decoy.md");
+  fs.writeFileSync(decoy, "decoy");
+  try {
+    fs.symlinkSync(decoy, paths.bodyPath);
+  } catch {
+    return; // Creating symlinks needs a privilege on Windows; the lstat refusal is still covered.
+  }
+  const outcome = materializeDispatch(materializeOptions(paths));
+  assert.equal(outcome.reason, "materialized-present");
+  assert.equal(fs.readFileSync(decoy, "utf8"), "decoy");
+});
+
+await test("materialize refuses without a task envelope, for a mismatched path, and for filedrop", () => {
+  const paths = materializeChannel("mat-no-task", { task: false });
+  assert.equal(materializeDispatch(materializeOptions(paths)).reason, "task-envelope-missing");
+  assert.equal(fs.readdirSync(paths.channel).length, 0);
+  const other = materializeChannel("mat-mismatch");
+  assert.equal(
+    materializeDispatch(materializeOptions(other, { replyPath: path.join(other.channel, "x.reply.md") })).reason,
+    "reply-path-mismatch",
+  );
+  assert.equal(
+    materializeDispatch(materializeOptions(other, { threadId: "filedrop" })).reason,
+    "invalid-arguments",
+  );
+  assert.equal(fs.existsSync(other.bodyPath), false);
+});
+
+await test("materialize refuses a reused dispatch id and an uncertified dispatch", () => {
+  const reused = materializeChannel("mat-reused");
+  const outcome = materializeDispatch(materializeOptions(reused, { rolloutPath: cleanBasic, sessionsRoot: cleanDir }));
+  assert.equal(outcome.reason, "dispatch-id-reused");
+  assert.equal(fs.existsSync(reused.bodyPath), false);
+  const open = materializeChannel("mat-open");
+  const openRollout = path.join(tmp, "mat-open-sessions", `rollout-open-${materializeThread}.jsonl`);
+  fs.mkdirSync(path.dirname(openRollout), { recursive: true });
+  fs.writeFileSync(openRollout, `${basicRecords.slice(0, 3).join("\n")}\n`);
+  const pending = materializeDispatch(materializeOptions(open, {
+    rolloutPath: openRollout,
+    sessionsRoot: path.dirname(openRollout),
+  }));
+  assert.equal(pending.reason, "not-certified");
+  assert.equal(fs.existsSync(open.bodyPath), false);
+  assert.equal(fs.existsSync(open.provenancePath), false);
+});
+
+await test("materialize refuses a body over the cap instead of cutting it", () => {
+  const paths = materializeChannel("mat-cap");
+  const outcome = materializeDispatch(materializeOptions(paths, { maxBodyBytes: 4 }));
+  assert.equal(outcome.reason, "body-too-large");
+  assert.equal(fs.existsSync(paths.bodyPath), false);
+  assert.equal(fs.existsSync(paths.provenancePath), false);
+  assert.ok(MATERIALIZE_MAX_BYTES >= 1024 * 1024);
+  const lowered = materializeDispatch(materializeOptions(materializeChannel("mat-cap-raise"), {
+    maxBodyBytes: MATERIALIZE_MAX_BYTES * 2,
+  }));
+  assert.equal(lowered.ok, true, "a larger requested cap is clamped, not honoured as a raise");
+});
+
+await test("materialize CLI prints materialized once, then refuses the second run", () => {
+  const paths = materializeChannel("mat-cli");
+  const run = () => spawnSync(process.execPath, [
+    process.env.HARVESTER, "--materialize", "--thread", materializeThread, "--dispatch", dispatch,
+    "--reply-path", paths.replyPath, "--rollout-path", uniqueBasic,
+  ], { encoding: "utf8", env: { ...process.env, CODEX_IPC_SESSIONS_ROOT: uniqueDir }, timeout: 15000 });
+  const first = run();
+  assert.equal(first.status, 0, first.stderr);
+  assert.match(first.stdout, /^materialized\t12\t[0-9a-f]{64}\n$/);
+  const second = run();
+  assert.equal(second.status, 1);
+  assert.equal(second.stdout, "refused\tmaterialized-present\n");
+  const usage = spawnSync(process.execPath, [
+    process.env.HARVESTER, "--materialize", "--thread", materializeThread, "--dispatch", dispatch,
+  ], { encoding: "utf8", timeout: 15000 });
+  assert.equal(usage.status, 1);
+  assert.match(usage.stderr, /--materialize requires --reply-path/);
+});
+
 console.log(`RESULT: ${passed} passed, 0 failed`);
 NODE
 then
@@ -2163,6 +2326,38 @@ rm -f "$IPCROOT/$SID/$THREAD/1000000009-1-abcdef0123456789.task.md"
   && "$FOOTER_OUT" == *"# 1 dispatch(es) without a reply file were answered from the rollout above"* ]] \
   && ok "an unanswered dispatch is still counted as awaiting beside a rollout-answered one" \
   || no "viewer footer miscounts mixed dispatches (rc=$RC)"
+# Materialized copy: kept only by the harvester's explicit --materialize. The viewer renders it as
+# its own source, counts the dispatch as answered, writes nothing itself, and still renders the
+# copy after the rollout page is gone (as when Codex compresses it).
+MAT_DISPATCH=1000000000-1-abcdef0123456789
+MAT_CHANNEL="$IPCROOT/$SID/$THREAD"
+CODEX_IPC_SESSIONS_ROOT="$SESSIONS" node "$HARVESTER" --materialize --thread "$THREAD" \
+  --dispatch "$MAT_DISPATCH" --reply-path "$MAT_CHANNEL/$MAT_DISPATCH.reply.md" >/dev/null 2>&1
+MAT_RC=$?
+before="$(manifest)"
+MAT_OUT="$(CODEX_IPC_ROOT="$IPCROOT" CODEX_IPC_SESSIONS_ROOT="$SESSIONS" \
+  CLAUDE_CODE_SESSION_ID="$SID" bash "$VIEWER" 2>&1)"; RC=$?
+after="$(manifest)"
+[[ $MAT_RC -eq 0 && $RC -eq 0 && "$before" == "$after" \
+  && -f "$MAT_CHANNEL/$MAT_DISPATCH.reply.rollout.md" && ! -e "$MAT_CHANNEL/$MAT_DISPATCH.reply.md" \
+  && "$MAT_OUT" == *"source=rollout-materialized"* && "$MAT_OUT" == *"latest final"* \
+  && "$MAT_OUT" != *"source=rollout-fallback"* && "$MAT_OUT" != *"awaiting primary reply files"* \
+  && "$MAT_OUT" != *"answered from the rollout above"* ]] \
+  && ok "a materialized copy renders as its own source, counts as answered, and the viewer writes nothing" \
+  || no "viewer materialized copy (mat_rc=$MAT_RC rc=$RC)"
+MAT_PATHS="$(CODEX_IPC_ROOT="$IPCROOT" CODEX_IPC_SESSIONS_ROOT="$SESSIONS" \
+  CLAUDE_CODE_SESSION_ID="$SID" bash "$VIEWER" --paths-only 2>&1)"
+[[ "$MAT_PATHS" == *$'\trollout-materialized\t'* ]] \
+  && ok "--paths-only labels the materialized copy" || no "paths-only materialized label"
+MAT_ROLLOUT="$SESSIONS/2026/07/09/$(basename "$BASIC")"
+mv "$MAT_ROLLOUT" "$TMP/materialized-rollout-away.jsonl"
+GONE_OUT="$(CODEX_IPC_ROOT="$IPCROOT" CODEX_IPC_SESSIONS_ROOT="$SESSIONS" \
+  CLAUDE_CODE_SESSION_ID="$SID" bash "$VIEWER" 2>&1)"; RC=$?
+mv "$TMP/materialized-rollout-away.jsonl" "$MAT_ROLLOUT"
+[[ $RC -eq 0 && "$GONE_OUT" == *"source=rollout-materialized"* && "$GONE_OUT" == *"latest final"* ]] \
+  && ok "the materialized copy still renders after the rollout page is gone" \
+  || no "materialized copy without its rollout (rc=$RC)"
+rm -f "$MAT_CHANNEL/$MAT_DISPATCH.reply.rollout.md" "$MAT_CHANNEL/$MAT_DISPATCH.reply.rollout.json"
 printf 'PRIMARY-CONFLICT' > "$IPCROOT/$SID/$THREAD/1000000000-1-abcdef0123456789.reply.md"
 OUT="$(CODEX_IPC_ROOT="$IPCROOT" CODEX_IPC_SESSIONS_ROOT="$SESSIONS" \
   CLAUDE_CODE_SESSION_ID="$SID" bash "$VIEWER" 2>&1)"; RC=$?
