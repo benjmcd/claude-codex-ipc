@@ -1834,6 +1834,88 @@ await test("observer rejects agent-only, substring, ambiguous, and malformed evi
   );
 });
 
+await test("observer keeps observing a page that grows after each read and reports pending", async () => {
+  const thread = "11111111-1111-4111-8111-111111111111";
+  const target = path.join(tmp, `rollout-observe-growth-${thread}.jsonl`);
+  fs.writeFileSync(target, `${JSON.stringify({ type: "session_meta", payload: { id: thread } })}\n`);
+  let clock = 0;
+  let reads = 0;
+  const result = await observeRollout(
+    {
+      threadId: thread,
+      dispatchId: "8000000002-8-abcdef0123456789",
+      rolloutPath: target,
+      sessionsRoot: tmp,
+      budgetMs: 20,
+      intervalMs: 10,
+    },
+    {
+      now: () => clock,
+      sleep: async (ms) => { clock += ms; },
+      readRolloutFile: (filePath, options) => {
+        const parsed = readRolloutFile(filePath, options);
+        reads += 1;
+        fs.appendFileSync(
+          filePath,
+          `${JSON.stringify({ type: "event_msg", payload: { type: "token_count", info: { total: reads } } })}\n`,
+        );
+        return parsed;
+      },
+    },
+  );
+  assert.equal(result.token, "rollout-pending", JSON.stringify(result));
+  assert.ok(reads >= 2);
+  assert.equal(result.diagnostics.filter((item) => item.code === "page-snapshot-stale").length, 1);
+  assert.ok(!result.diagnostics.some((item) => item.code === "page-supersession-unproven"));
+});
+
+await test("harvester reports a page that grew after its one-shot read as pending, not unavailable", () => {
+  fs.mkdirSync(path.dirname(uniqueBasic), { recursive: true });
+  const target = path.join(tmp, path.basename(uniqueBasic));
+  fs.copyFileSync(uniqueBasic, target);
+  const resolvedTarget = path.resolve(target);
+  const originalFstat = fs.fstatSync;
+  const originalStat = fs.statSync;
+  let readerRan = false;
+  let grew = false;
+  fs.fstatSync = function injectedFstat(...args) {
+    readerRan = true;
+    return originalFstat.apply(fs, args);
+  };
+  fs.statSync = function injectedStat(filePath, ...args) {
+    // Grow between the completed read and the page assessor's own revalidation, not inside the
+    // reader's post-read size check (which would correctly report not-at-EOF instead).
+    if (
+      readerRan && !grew && path.resolve(String(filePath)) === resolvedTarget &&
+      String(new Error().stack).includes("validateCandidate")
+    ) {
+      grew = true;
+      fs.appendFileSync(
+        target,
+        `${JSON.stringify({ type: "event_msg", payload: { type: "token_count", info: { total: 1 } } })}\n`,
+      );
+    }
+    return originalStat.call(fs, filePath, ...args);
+  };
+  let result;
+  try {
+    result = harvestDispatch({
+      dispatchId: dispatch,
+      replyPath: path.join(tmp, "growth-absent.reply.md"),
+      threadId: "11111111-1111-4111-8111-111111111111",
+      rolloutPath: target,
+      sessionsRoot: tmp,
+    });
+  } finally {
+    fs.fstatSync = originalFstat;
+    fs.statSync = originalStat;
+  }
+  assert.ok(grew, "the injected growth did not run");
+  assert.equal(result.source, "none", JSON.stringify(result));
+  assert.equal(result.reason, "pending", JSON.stringify(result));
+  assert.ok(result.diagnostics.some((item) => item.code === "page-snapshot-stale"));
+});
+
 console.log(`RESULT: ${passed} passed, 0 failed`);
 NODE
 then
@@ -2067,6 +2149,20 @@ after="$(manifest)"
   && "$OUT" == *"latest final"* && ! -e "$IPCROOT/$SID/$THREAD/1000000000-1-abcdef0123456789.reply.md" ]] \
   && ok "rollout fallback is labeled, banner-corrected, stdout-only, and read-only" \
   || no "viewer rollout fallback (rc=$RC)"
+# Footer: a dispatch shown as answered from the rollout is not awaiting a primary reply file;
+# a dispatch with neither a reply file nor a rollout answer still is.
+[[ "$OUT" != *"awaiting primary reply files"* \
+  && "$OUT" == *"# 1 dispatch(es) without a reply file were answered from the rollout above"* ]] \
+  && ok "the footer does not count a rollout-answered dispatch as awaiting a reply file" \
+  || no "viewer footer counts a rollout-answered dispatch as awaiting"
+printf 'task' > "$IPCROOT/$SID/$THREAD/1000000009-1-abcdef0123456789.task.md"
+FOOTER_OUT="$(CODEX_IPC_ROOT="$IPCROOT" CODEX_IPC_SESSIONS_ROOT="$SESSIONS" \
+  CLAUDE_CODE_SESSION_ID="$SID" bash "$VIEWER" 2>&1)"; RC=$?
+rm -f "$IPCROOT/$SID/$THREAD/1000000009-1-abcdef0123456789.task.md"
+[[ $RC -eq 0 && "$FOOTER_OUT" == *"# 1 dispatch(es) awaiting primary reply files"* \
+  && "$FOOTER_OUT" == *"# 1 dispatch(es) without a reply file were answered from the rollout above"* ]] \
+  && ok "an unanswered dispatch is still counted as awaiting beside a rollout-answered one" \
+  || no "viewer footer miscounts mixed dispatches (rc=$RC)"
 printf 'PRIMARY-CONFLICT' > "$IPCROOT/$SID/$THREAD/1000000000-1-abcdef0123456789.reply.md"
 OUT="$(CODEX_IPC_ROOT="$IPCROOT" CODEX_IPC_SESSIONS_ROOT="$SESSIONS" \
   CLAUDE_CODE_SESSION_ID="$SID" bash "$VIEWER" 2>&1)"; RC=$?

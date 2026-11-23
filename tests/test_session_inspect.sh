@@ -2523,6 +2523,46 @@ fi
 [[ $AC7_OK -eq 1 ]] \
   && ok "summary output parses whole, stays within its bar, is documented, and the preflight fence adopts it" \
   || no "an AC7 conjunct failed"
+echo "== 31. archived (zstd) pages are never sources and never make a sessions-root scan ambiguous =="
+# With no DB-designated page, the inspector selects from its own sessions-root scan. Archived
+# pages are skipped by name, as in the reader's discovery; a `.zst` name the archive grammar
+# rejects still marks the candidate set unresolved.
+ARCH_THREAD="11111111-1111-4111-8111-111111111111"
+ARCH_ROOT="$TMP/archived-sessions"
+mkdir -p "$ARCH_ROOT/2026/10/20" "$ARCH_ROOT/2026/11/17"
+ARCH_LIVE="rollout-2026-11-17T01-00-00-${ARCH_THREAD}.jsonl"
+printf '%s\n' "{\"type\":\"session_meta\",\"payload\":{\"id\":\"${ARCH_THREAD}\"}}" \
+  > "$ARCH_ROOT/2026/11/17/$ARCH_LIVE"
+printf 'archived bytes are not read' \
+  > "$ARCH_ROOT/2026/10/20/rollout-2026-10-20T01-00-00-${ARCH_THREAD}.jsonl.zst"
+printf 'archived bytes are not read' \
+  > "$ARCH_ROOT/2026/10/20/rollout-2026-10-20T01-00-00-${ARCH_THREAD}_33333333-3333-4333-8333-333333333333.jsonl.zst"
+arch_selection() {
+  "$NODE_BIN" "$INSPECT" --thread "$ARCH_THREAD" --summary --db "$TMP/archived-absent.sqlite" \
+    --sessions-root "$ARCH_ROOT" 2>/dev/null | "$NODE_BIN" -e '
+let text = "";
+process.stdin.on("data", (chunk) => { text += chunk; }).on("end", () => {
+  const value = JSON.parse(text);
+  const selection = value.rollout?.selection || {};
+  const primary = value.rollout?.primary?.path || "";
+  console.log([
+    selection.status,
+    selection.reason,
+    selection.rejectedCandidateCount ?? "-",
+    value.rollout?.candidates?.length ?? "-",
+    primary.split(/[\\/]/).pop() || "-",
+  ].join(" "));
+});'
+}
+ARCH_OUT="$(arch_selection)"
+[[ "$ARCH_OUT" == "found single-candidate - 1 $ARCH_LIVE" ]] \
+  && ok "archived root and paginated siblings leave the live page as the single candidate" \
+  || no "archived siblings changed selection: $ARCH_OUT"
+printf 'malformed archive' > "$ARCH_ROOT/2026/10/20/rollout-2026-10-20T02-00-00-${ARCH_THREAD}.json.zst"
+ARCH_OUT="$(arch_selection)"
+[[ "$ARCH_OUT" == "ambiguous candidate-set-unresolved 1 1 -" ]] \
+  && ok "a .zst name the archive grammar rejects still leaves the candidate set unresolved" \
+  || no "malformed archive name was not flagged: $ARCH_OUT"
 echo ""
 echo "RESULT: $PASS passed, $FAIL failed"
 [[ $FAIL -eq 0 ]] && echo "ALL GREEN" || echo "FAILURES PRESENT"

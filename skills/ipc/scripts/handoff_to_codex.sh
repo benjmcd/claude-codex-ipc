@@ -78,8 +78,8 @@ case "${1:-}" in
             '  handoff_to_codex.sh "<task>"                       file-drop (writes an envelope; prints a pickup line)' \
             '  handoff_to_codex.sh --request-goal [--] "<task>"  file-drop with an explicit goal-setup request' \
             '  handoff_to_codex.sh --ipc <conversationId> "<task>" live delivery into an existing Desktop thread' \
-            '  handoff_to_codex.sh --ipc <conversationId> --deliver manual [--request-goal] -- "<task>"' \
-            '  handoff_to_codex.sh --ipc <conversationId> [--deliver live] [--request-goal] [--autoload off|codex-uri] [--intended-host package|ABSOLUTE-EXE] [--foreground-policy defer|switch|restore-if-known] [--ack-foreground-switch] -- "<task>"' \
+            '  handoff_to_codex.sh --ipc <conversationId> --deliver manual [--reply-mode file|final-message] [--request-goal] -- "<task>"' \
+            '  handoff_to_codex.sh --ipc <conversationId> [--deliver live] [--reply-mode file|final-message] [--request-goal] [--autoload off|codex-uri] [--intended-host package|ABSOLUTE-EXE] [--foreground-policy defer|switch|restore-if-known] [--ack-foreground-switch] -- "<task>"' \
             '  handoff_to_codex.sh -h | --help | -v | --version' \
             '' \
             'NOTES:' \
@@ -95,6 +95,8 @@ case "${1:-}" in
             '  inspect, replace, or otherwise change an existing goal.' \
             '  --deliver manual writes the same thread-bound envelope, inspects the target, and prints' \
             '  pickup + WAIT instructions without contacting the Desktop pipe, host helper, or opener.' \
+            '  --reply-mode final-message (--ipc only) asks for the reply in the final agent message, not' \
+            '  a reply file, for a target that cannot write the transport root; the envelope records it.' \
             '  Transport root: ${CODEX_IPC_ROOT:-~/.claude/ipc}. Envelopes are kept by default.' \
             '  --app/--open/--exec were removed in v0.1.8 (No Codex CLI).' \
             '' \
@@ -287,6 +289,11 @@ TASK=""
 REQUEST_GOAL=0
 DELIVERY="live"
 DELIVERY_FLAG_PRESENT=0
+# --reply-mode (--ipc only): file (default) asks the target to write the per-dispatch reply file;
+# final-message makes its final agent message the reply, for a lane that cannot write the
+# transport root. Explicit only: nothing detects the target's sandbox.
+REPLY_MODE="file"
+REPLY_MODE_FLAG_PRESENT=0
 
 # --- Foreground policy for live Desktop IPC (--ipc only; see SKILL.md) ---
 # defer (default): never navigate the visible Codex app; switch: navigate it to the
@@ -360,6 +367,22 @@ case "${1:-}" in
                             exit 1;;
                     esac
                     DELIVERY_FLAG_PRESENT=1; shift 2;;
+                --reply-mode)
+                    if [[ $# -lt 2 ]]; then
+                        echo "ERROR: --reply-mode requires a value (file|final-message)." >&2
+                        exit 1
+                    fi
+                    if [[ "$REPLY_MODE_FLAG_PRESENT" -eq 1 ]]; then
+                        echo "ERROR: --reply-mode may be supplied only once." >&2
+                        exit 1
+                    fi
+                    case "$2" in
+                        file|final-message) REPLY_MODE="$2" ;;
+                        *)
+                            echo "ERROR: --reply-mode requires file or final-message (got '$2')." >&2
+                            exit 1;;
+                    esac
+                    REPLY_MODE_FLAG_PRESENT=1; shift 2;;
                 --foreground-policy)
                     if [[ -z "${2:-}" ]]; then
                         echo "ERROR: --foreground-policy requires a value (defer|switch|restore-if-known)." >&2
@@ -384,7 +407,7 @@ case "${1:-}" in
                     TASK_AFTER_DASHDASH=1; shift; break;;
                 --*)
                     echo "ERROR: unknown --ipc flag '$1'." >&2
-                    echo "Usage: $0 --ipc <conversationId> [--deliver live|manual] [--request-goal] [--autoload off|codex-uri] [--intended-host package|ABSOLUTE-EXE] [--foreground-policy defer|switch|restore-if-known] [--ack-foreground-switch] [--] \"<task>\"" >&2
+                    echo "Usage: $0 --ipc <conversationId> [--deliver live|manual] [--reply-mode file|final-message] [--request-goal] [--autoload off|codex-uri] [--intended-host package|ABSOLUTE-EXE] [--foreground-policy defer|switch|restore-if-known] [--ack-foreground-switch] [--] \"<task>\"" >&2
                     exit 1;;
                 *)
                     break;;
@@ -594,17 +617,29 @@ if [[ "${CODEX_IPC_INCLUDE_TRANSCRIPT:-0}" == "1" ]]; then
 fi
 
 # --- Build handoff payload ---
-WORKDIR="${PROJECT_ROOT:-$PWD}"
-read -r -d '' PAYLOAD <<EOF || true
-# Handoff from Claude Code -> Codex
-
-Generated: ${STAMP} on branch \`${BRANCH}\` (dispatch ${DISPATCH_ID})
-
-## How to use this file
-You (Codex) have been handed follow-up work from a Claude Code session.
-Read the **Task** below${GOAL_REQUEST_CLAUSE}, then complete it
-in the associated workspace at:
-  ${WORKDIR}
+# Reply section: the file mode text is unchanged; final-message mode (--reply-mode) replaces it
+# and records the mode in the envelope's own "Reply mode: final-message." line.
+if [[ "$REPLY_MODE" == "final-message" ]]; then
+    read -r -d '' REPLY_SECTION <<EOF || true
+Reply mode: final-message. When finished, put your complete reply/result in your final agent
+message. Do NOT write a reply file for this handoff: this lane may be unable to write the transport
+root, so the dispatcher reads your final agent message from this thread's rollout instead.
+Finish the substantive work and inspect the complete result first, and self-verify it; then put
+the full substantive result (not a pointer to where it is) in your final agent message and
+complete the turn. A calculation, command-construction, or parse failure must be reported as its
+actual failure. The opt-in
+codex_ipc_wait.mjs --accept-rollout-fallback path certifies named-dispatch completion and
+replySource=rollout-fallback but intentionally emits no body. The dispatcher must retrieve and render
+the body with the existing read-only dual-source scripts/codex_ipc_replies.sh viewer. The viewer caps
+display at 4096 bytes by default; if it reports truncation, rerun it with a sufficient --max-bytes.
+EOF
+    read -r -d '' REPLY_ID_NOTE <<EOF || true
+In your final agent message, include your Codex session/conversation id if it is available to
+you. (If it is not exposed to you, that is fine: for --ipc handoffs Claude already knows it as the
+conversationId.)
+EOF
+else
+    read -r -d '' REPLY_SECTION <<EOF || true
 When finished, write your reply/result to this per-dispatch reply file (create it):
   ${INBOUND}
 Use that absolute path exactly. It is unique to this handoff, so your reply is
@@ -624,6 +659,26 @@ codex_ipc_wait.mjs --accept-rollout-fallback path certifies named-dispatch compl
 replySource=rollout-fallback but intentionally emits no body. The dispatcher must retrieve and render
 the body with the existing read-only dual-source scripts/codex_ipc_replies.sh viewer. The viewer caps
 display at 4096 bytes by default; if it reports truncation, rerun it with a sufficient --max-bytes.
+EOF
+    read -r -d '' REPLY_ID_NOTE <<EOF || true
+When you reply in ${INBOUND}, include your Codex session/conversation id if it is available to
+you. (If it is not exposed to you, that is fine: for --ipc handoffs Claude already knows it as the
+conversationId, and can otherwise locate your rollout under ~/.codex/sessions/ by this handoff.)
+EOF
+fi
+
+WORKDIR="${PROJECT_ROOT:-$PWD}"
+read -r -d '' PAYLOAD <<EOF || true
+# Handoff from Claude Code -> Codex
+
+Generated: ${STAMP} on branch \`${BRANCH}\` (dispatch ${DISPATCH_ID})
+
+## How to use this file
+You (Codex) have been handed follow-up work from a Claude Code session.
+Read the **Task** below${GOAL_REQUEST_CLAUSE}, then complete it
+in the associated workspace at:
+  ${WORKDIR}
+${REPLY_SECTION}
 
 ## Branch
 ${BRANCH}  (merge target: ${MAIN_BRANCH})
@@ -647,9 +702,7 @@ CODEX_IPC_INCLUDE_TRANSCRIPT=1; if it is a path, the JSONL is large -- grep or t
 relevant part; it may include context unrelated to this task):
   ${TRANSCRIPT_NOTE}
 
-When you reply in ${INBOUND}, include your Codex session/conversation id if it is available to
-you. (If it is not exposed to you, that is fine: for --ipc handoffs Claude already knows it as the
-conversationId, and can otherwise locate your rollout under ~/.codex/sessions/ by this handoff.)
+${REPLY_ID_NOTE}
 EOF
 
 # --- Payload advisories (non-fatal; STDERR ONLY; exit code unchanged) ---
@@ -866,6 +919,14 @@ process.stdout.write([state, parent, legacy, rolloutPath, sessionsRoot].join("\t
 ' "$IPC_CID"
     }
     # Safe manual preparation and accepted live sends share one correlation-complete WAIT line.
+    print_reply_route() {
+        if [[ "$REPLY_MODE" == "final-message" ]]; then
+            echo "Codex's reply is its final agent message (reply mode final-message; no reply file is written)."
+            echo "Certify it with the WAIT line below; read it with scripts/codex_ipc_replies.sh."
+        else
+            echo "Codex's reply will be written to ${INBOUND} (Claude Code reads it)."
+        fi
+    }
     print_wait_hint() {
         local -a wait_args=(node "${SCRIPT_DIR}/codex_ipc_wait.mjs"
             --thread "$IPC_CID" --dispatch "$DISPATCH_ID" --reply-path "$INBOUND")
@@ -947,7 +1008,7 @@ process.stdout.write([state, parent, legacy, rolloutPath, sessionsRoot].join("\t
         echo "MANUAL: thread-bound envelope is ready for operator pickup."
         echo "Open the thread in your intended Desktop host's window, then paste:"
         echo "    read \"${OUTBOUND}\" and proceed"
-        echo "Codex's reply will be written to ${INBOUND} (Claude Code reads it)."
+        print_reply_route
         if [[ -z "$INSPECT_ROLLOUT_PATH" ]]; then
             echo "ROLLOUT-PATH: Supply the inspector's database-designated page with --rollout-path <path>." >&2
         fi
@@ -1173,6 +1234,48 @@ const exact =
 process.exit(exact ? 0 : 1);
 ' "$IPC_CID"
     }
+    # Prints the connect error code and succeeds only for the client's exact connect-phase
+    # failure: no request was sent, so the router never saw this dispatch.
+    router_connect_failure() {
+        printf '%s' "$IPC_OUTPUT" | node --input-type=module -e '
+import fs from "node:fs";
+let value;
+try {
+  value = JSON.parse(fs.readFileSync(0, "utf8"));
+} catch {
+  process.exit(1);
+}
+const target = String(process.argv[1] || "").toLowerCase();
+const code = value?.connectError?.code;
+const exact =
+  value?.ok === false &&
+  value?.phase === "connect" &&
+  String(value?.targetThreadId || "").toLowerCase() === target &&
+  Array.isArray(value?.sentRequests) &&
+  value.sentRequests.length === 0 &&
+  !("response" in value) &&
+  typeof code === "string" &&
+  /^[A-Z][A-Z0-9_]{1,31}$/.test(code);
+if (!exact) process.exit(1);
+console.log(code);
+' "$IPC_CID"
+    }
+    # Pre-write: the client never connected, so nothing was sent and pickup is safe. Codex
+    # Desktop 26.1117 builds serve no router pipe, which shows up here as ENOENT. Exits when the
+    # last attempt was a connect-phase failure; returns otherwise.
+    report_router_connect_failure_if_any() {
+        local connect_code
+        connect_code=$(router_connect_failure) || return 0
+        if [[ "$connect_code" == "ENOENT" ]]; then
+            echo "RESULT: gui-unowned -- reason=router-absent -- confirmation=not-attempted" >&2
+            echo "(No Desktop IPC router pipe is present; Codex Desktop 26.1117 and later serve none. Nothing was sent.)" >&2
+        else
+            echo "RESULT: gui-unowned -- reason=router-unreachable -- confirmation=not-attempted" >&2
+            echo "(The router pipe could not be connected (${connect_code}); nothing was sent.)" >&2
+        fi
+        fallback
+        exit 1
+    }
     print_router_response() {
         # The client pretty-prints its document with `response` LAST, after the echoed
         # `sentRequests`, so a twenty-line clip of the whole document ends inside the request echo
@@ -1236,7 +1339,7 @@ console.log(JSON.stringify({
         fi
         CONFIRMATION=$(observe_rollout)
         echo "[ Delivered into live thread ${IPC_CID}. It should appear in your Codex Desktop GUI. ]"
-        echo "Codex's reply will be written to ${INBOUND} (Claude Code reads it)."
+        print_reply_route
         print_confirmation_disclaimer
         print_wait_hint
         echo "RESULT: gui-delivered -- reason=renderer-owned -- confirmation=${CONFIRMATION}"
@@ -1246,6 +1349,7 @@ console.log(JSON.stringify({
         report_host_policy_refusal
         exit 1
     fi
+    report_router_connect_failure_if_any
     if ! authoritative_no_client; then
         # Router/pipe-level failure (app closed, timeout, protocol drift). This is
         # POST-ATTEMPT: the follower frame is written before the response is awaited,
@@ -1351,7 +1455,7 @@ console.log(JSON.stringify({
             [[ "$FOREGROUND_POLICY" == "switch" ]] && DELIVER_REASON="foreground-switched"
             CONFIRMATION=$(observe_rollout)
             echo "[ Delivered into live thread ${IPC_CID}. It should appear in your Codex Desktop GUI. ]"
-            echo "Codex's reply will be written to ${INBOUND} (Claude Code reads it)."
+            print_reply_route
             print_confirmation_disclaimer
             print_wait_hint
             echo "RESULT: gui-delivered -- reason=${DELIVER_REASON} -- confirmation=${CONFIRMATION}"
@@ -1361,6 +1465,9 @@ console.log(JSON.stringify({
             report_host_policy_refusal
             exit 1
         fi
+        # Every earlier attempt ended in an authoritative no-client-found, so a pre-write
+        # connect failure here still proves non-admission.
+        report_router_connect_failure_if_any
         # Retry ONLY on the authoritative "thread not loaded" answer. Any other
         # failure (timeout, closed pipe, protocol drift) is post-attempt and may have
         # already admitted the task -- retrying it is the duplicate-execution defect

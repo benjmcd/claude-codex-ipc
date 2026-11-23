@@ -35,8 +35,6 @@ while IFS= read -r _git_var; do
 done < <(compgen -e)
 REPO_ROOT="$(cd "$TDIR/.." && pwd)"
 export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0="$REPO_ROOT"
-# The last commit before reasoning visibility. The unchanged-paths leg compares against it.
-PRE_REASONING_REF="e4c8431a"
 
 TMP="$(mktemp -d)" && [[ -n "$TMP" && -d "$TMP" ]] || { echo "FATAL: no temp dir" >&2; exit 1; }
 trap 'rm -rf "$TMP"' EXIT
@@ -275,19 +273,26 @@ else
   no ".zst handling"
 fi
 
-echo "== 8. unchanged paths: waiter, harvester, reader and wrapper are the pre-feature bytes =="
+echo "== 8. unchanged paths: waiter, harvester, reader and wrapper do not use the reasoning module =="
+# These body, certification and binding files change for their own reasons, so a byte pin to a
+# pre-feature commit goes stale with every later fix. The durable invariant is structural: none of
+# them imports or names the reasoning module or any of its exports, which are read from the module
+# itself so a new export is covered too. It needs no git history, so it also runs in an export.
 UNCHANGED=(codex_ipc_wait.mjs codex_ipc_reply_harvest.mjs codex_ipc_rollout_reader.mjs codex_ipc_rollout_observe.mjs handoff_to_codex.sh)
-if git -C "$REPO_ROOT" cat-file -e "${PRE_REASONING_REF}^{commit}" 2>/dev/null; then
-  DRIFT=0
+REASONING_EXPORTS="$(sed -nE 's/^export (async )?(function|const|let|class) ([A-Za-z_$][A-Za-z0-9_$]*).*/\3/p' \
+  "$SCRIPTS/codex_ipc_reasoning.mjs" | sort -u | paste -sd'|' -)"
+if [[ -z "$REASONING_EXPORTS" ]]; then
+  no "the reasoning module's exports could not be read"
+else
+  LEAKS=""
   for name in "${UNCHANGED[@]}"; do
-    if ! git -C "$REPO_ROOT" show "${PRE_REASONING_REF}:skills/ipc/scripts/$name" 2>/dev/null | cmp -s - "$SCRIPTS/$name"; then
-      DRIFT=1; echo "    changed: $name"
+    if [[ ! -f "$SCRIPTS/$name" ]] || grep -Eq "codex_ipc_reasoning|\\b(${REASONING_EXPORTS})\\b" "$SCRIPTS/$name"; then
+      LEAKS+=" $name"
     fi
   done
-  [[ $DRIFT -eq 0 ]] && ok "${#UNCHANGED[@]} body, certification and binding files are byte-identical to ${PRE_REASONING_REF}" \
-    || no "a body/certification file changed"
-else
-  echo "  (${PRE_REASONING_REF} unreachable in this checkout: byte identity not asserted here)"
+  [[ -z "$LEAKS" ]] \
+    && ok "the ${#UNCHANGED[@]} body, certification and binding files neither import nor name the reasoning module" \
+    || no "missing, or referencing the reasoning module:$LEAKS"
 fi
 if grep -q 'const RETAINED_EVENT_TYPES = new Set(\[$' "$SCRIPTS/codex_ipc_rollout_reader.mjs" \
    && [[ "$(sed -n '/^const RETAINED_EVENT_TYPES = new Set(\[$/,/^\]);$/p' "$SCRIPTS/codex_ipc_rollout_reader.mjs" | tr -d ' \n')" \
@@ -376,18 +381,7 @@ if cmp -s "$TMP/view-stripped.txt" "$TMP/view-none.txt" \
 else
   no "viewer section (body=$BODY_LINE section=$SECTION_LINE)"; diff "$TMP/view-stripped.txt" "$TMP/view-none.txt" | head -6
 fi
-if git -C "$REPO_ROOT" cat-file -e "${PRE_REASONING_REF}^{commit}" 2>/dev/null; then
-  OLDV="$TMP/old-viewer"; mkdir -p "$OLDV"
-  for name in codex_ipc_replies.sh codex_ipc_safe_render.sh codex_ipc_reply_harvest.mjs codex_ipc_rollout_reader.mjs codex_ipc_session_inspect.mjs codex_ipc_db_read.mjs; do
-    git -C "$REPO_ROOT" show "${PRE_REASONING_REF}:skills/ipc/scripts/$name" > "$OLDV/$name" 2>/dev/null
-  done
-  view "$OLDV/codex_ipc_replies.sh" > "$TMP/view-old.txt"
-  if cmp -s "$TMP/view-old.txt" "$TMP/view-none.txt"; then
-    ok "--reasoning none output is byte-identical to the ${PRE_REASONING_REF} viewer"
-  else
-    no "--reasoning none differs from the pre-feature viewer"; diff "$TMP/view-old.txt" "$TMP/view-none.txt" | head -6
-  fi
-fi
+# The invariant (the reasoning section is the only difference from --reasoning none) is the test above.
 printf 'An ordinary reply.\n' > "$IPC/$SID/$INJ_THREAD/$DISPATCH.reply.md"
 view "$VIEWER" > "$TMP/view-reply.txt"
 if grep -q 'source=reply-file' "$TMP/view-reply.txt" && ! grep -q 'REPLY-SUPERSEDED\]' "$TMP/view-reply.txt" \

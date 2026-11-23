@@ -363,6 +363,13 @@ request may still have occurred. After an
 ambiguous post-attempt result (`confirmation=unknown`) pickup is suppressed and resending is
 forbidden — the turn may already have been admitted.
 
+Codex Desktop 26.1117 and later serve no IPC router (`\\.\pipe\codex-ipc` was removed upstream;
+26.1111 still served it). A live send there reports
+`RESULT: gui-unowned -- reason=router-absent -- confirmation=not-attempted` with the pickup line:
+the client found no pipe and sent nothing. Any other connect-phase failure reports
+`reason=router-unreachable` the same way. On those builds use `--deliver manual` and paste the
+pickup line.
+
 When the target is unowned and Codex itself is the operator's foreground window, a **foreground
 policy** applies (default `defer` — never navigate the visible app). Canonical grammar:
 
@@ -552,7 +559,13 @@ violation. On the dispatcher side, the opt-in `codex_ipc_wait.mjs --accept-rollo
 on a known-UUID `--ipc` dispatch certifies named-dispatch `done` with
 `replySource=rollout-fallback` but intentionally emits no body. Retrieve and render the full final
 message with the existing read-only dual-source `scripts/codex_ipc_replies.sh` viewer; flagless
-invocation stays file-primary and filedrop is not auto-recoverable. The wrapper dispatch never
+invocation stays file-primary and filedrop is not auto-recoverable. When the target lane cannot
+write the transport root (for example a managed workspace-write sandbox), pass
+`--reply-mode final-message` with `--ipc`: the envelope then says `Reply mode: final-message.`,
+asks for the full substantive result in the final agent message, and names no reply file, so the
+lane spends no turn on a denied write. Certify it with the same `--accept-rollout-fallback` waiter
+and read it with the viewer, whose footer does not count a rollout-answered dispatch as awaiting a
+reply file. The mode is explicit only; nothing detects the lane's sandbox. The wrapper dispatch never
 changes the target thread's model, reasoning, sandbox, or approval: it omits every version-2
 override field. A direct client `--model`/`--effort` override is a thread-settings change, not a
 per-turn override (see the new-session-mode note below and `docs/COMPATIBILITY.md`); the client

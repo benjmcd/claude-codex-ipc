@@ -187,6 +187,10 @@ function assessRolloutSupersession(options) {
       true,
     );
   }
+  // The page grew after this one-shot read: the snapshot is stale, not the page's authority lost.
+  if (pageAssessment.status === "stale") {
+    return supersessionAssessment("pending", diagnostics, true);
+  }
   if (pageAssessment.status !== "current") {
     return supersessionAssessment("unavailable", diagnostics, true);
   }
@@ -301,8 +305,9 @@ export function harvestDispatch(options) {
     };
   }
   if (pageAssessment.status !== "current") {
+    // A stale snapshot (the page grew after this one-shot read) is pending, never unavailable.
     return {
-      ...none("unavailable", [
+      ...none(pageAssessment.status === "stale" ? "pending" : "unavailable", [
         ...located.diagnostics,
         ...pageGuidance,
         ...parsed.diagnostics,

@@ -1,6 +1,10 @@
 # Handoff from Claude Code -> Codex
 <!-- EXAMPLE ONLY: this is a synthetic illustration of the payload handoff_to_codex.sh
-     generates. All ids/paths below are placeholders, not real values. -->
+     generates. All ids/paths below are placeholders, not real values. This is the default
+     (file) reply mode. With `--ipc <uuid> --reply-mode final-message`, the paragraphs from
+     "When finished" through "--max-bytes." are replaced by one that begins
+     "Reply mode: final-message." and asks for the full result in the final agent message, with
+     no reply file named; the closing session-id note names the final message instead. -->
 
 Generated: 2026-01-01 12:00:00 UTC on branch `feature/example` (dispatch 1735732800-12345-0123456789abcdef)
 

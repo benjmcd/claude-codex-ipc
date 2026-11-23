@@ -197,6 +197,13 @@ ambient live settings and rejects explicit live-only host/foreground flags befor
 transport default remains `~/.claude/ipc`; relocating `CODEX_IPC_ROOT` to a target-writable location
 is an operator choice and every participant must use the same explicit root.
 
+`--reply-mode final-message` (any `--ipc` delivery) is the alternative that keeps the transport root,
+`host-policy.json` and every other lane's envelopes out of lane write access: the envelope replaces
+its reply-file request with `Reply mode: final-message.` and asks for the full result in the final
+agent message, which the `--accept-rollout-fallback` waiter certifies and the dual-source viewer
+renders. The default `file` mode envelope is byte-for-byte unchanged. Nothing detects a lane's
+sandbox; the dispatcher chooses the mode.
+
 ### Live Desktop IPC injection (`--ipc`, optional, EXPERIMENTAL)
 
 Provenance: this transport was validated against a live Codex Desktop in the private predecessor
@@ -214,6 +221,14 @@ IPC router named pipe (`\\.\pipe\codex-ipc`, `thread-follower-start-turn`). This
 **private Codex Desktop internals** and can break in any Codex Desktop update; revalidate with
 `codex_ipc_revalidate.mjs` (and, if needed, a controlled `codex_ipc_write_proof.mjs` run) after
 updates.
+
+Codex Desktop 26.1117 and later serve no router pipe; the router was removed upstream after
+26.1111. The client lists the Windows pipe namespace before connecting and reports a missing pipe,
+or any other connect-phase failure, as a structured `phase: "connect"` result with no sent
+requests. Every frame is written only after connect, so the wrapper maps that exact structure to
+`gui-unowned -- reason=router-absent|router-unreachable -- confirmation=not-attempted` and prints
+the pickup line. A connect claim that carries a request or names another thread stays
+`failed-closed -- reason=router-pipe-failure -- confirmation=unknown`.
 
 Every live `--ipc` send reports exactly one result:
 

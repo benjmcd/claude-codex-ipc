@@ -35,7 +35,10 @@ Codex; never auto-switched), `foreground-restore-unproven` (restore-if-known is 
 `autoload-incomplete` (poll window expired), `target-not-found`/`target-archived`/
 `target-non-root`/`target-model-empty`/`target-inspection-ambiguous` (positive target proof
 required before any maintained-wrapper live attempt),
-`router-pipe-failure`, `foreground-switch-unacknowledged`, `invalid-foreground-policy`.
+`router-pipe-failure`, `foreground-switch-unacknowledged`, `invalid-foreground-policy`,
+`router-absent` (no router pipe: Codex Desktop 26.1117 and later serve none; nothing was sent,
+so the pickup line is printed — use `--deliver manual`), `router-unreachable` (the pipe could not
+be connected; nothing was sent, pickup printed).
 The target snapshot is run once before the first live attempt and reused across auto-load recovery;
 the host inventory still runs fresh before each send or retry. `target-non-root` may print a known
 parent UUID. Legacy null-source rows continue only as warned `legacy-root-assumed` targets when

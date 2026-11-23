@@ -31,6 +31,31 @@ All notable changes to this project will be documented in this file.
   `--all-turns` and `--reasoning headline|none` change it. The reply viewer prints a labelled
   section of each dispatch's own turn after the body. Waiter, harvester, reader, completion
   certification and marker binding are unchanged; `recentItems` and `--summary` are unchanged.
+- A bound rollout page that grows after a certifying read is now a stale snapshot, not lost
+  authority. Same-identity growth whose old end is still a record boundary makes the page
+  assessor report `stale` (`page-snapshot-stale`, `bound-page-grew`) after the successor scan.
+  The waiter and the post-send observer keep polling and never certify or confirm on it; the
+  harvester reports `pending`. A shrink, a rewritten end, a successor page or an identity change
+  stays unproven. Previously a page appended mid-turn ended the wait as `unavailable`.
+- The session inspector's own sessions-root scan skips zstd-archived pages (`*.jsonl.zst`), as
+  the reader's discovery does, so an archived sibling no longer leaves the candidate set
+  unresolved when no database-designated page exists. A `.zst` name the archive grammar rejects
+  is still flagged.
+- Live `--ipc` reports a missing Desktop router as pre-write non-admission. Codex Desktop 26.1117
+  serves no `\\.\pipe\codex-ipc` (the router was removed upstream after 26.1111). The client
+  lists the Windows pipe namespace before connecting and reports a missing pipe, or any other
+  connect-phase failure, as a structured `phase: "connect"` result with no sent requests. The
+  wrapper maps that exact structure to `gui-unowned -- reason=router-absent|router-unreachable --
+  confirmation=not-attempted` and prints the pickup line; previously it reported
+  `failed-closed -- reason=router-pipe-failure -- confirmation=unknown` with no pickup. The
+  method-version fixture records the 26.1117.4957.0 observation.
+- Added `--reply-mode file|final-message` for `--ipc` dispatches (default `file`, explicit only).
+  `final-message` is for a lane that cannot write the transport root: the envelope says
+  `Reply mode: final-message.`, names no reply file and asks for the full result in the final
+  agent message, which the `--accept-rollout-fallback` waiter certifies and the viewer renders.
+  The default envelope is byte-for-byte unchanged. The reply viewer's footer no longer counts a
+  dispatch it rendered as `source=rollout-fallback` as awaiting a primary reply file; it reports
+  those separately.
 
 ## [0.1.14] — 2026-10-03
 

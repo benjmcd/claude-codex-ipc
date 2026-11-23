@@ -344,8 +344,11 @@ export async function waitForCompletion(options, injected = {}) {
   let readerAtCompleteEof = false;
   let pageGuidanceRecorded = false;
 
-  const pageIsCurrent = (lifecycle) => {
-    if (!candidatePath || !cursor) return false;
+  let staleSnapshotRecorded = false;
+  // "current" may certify; "stale" (the page grew after this read) keeps polling and never
+  // certifies; anything else is terminal.
+  const pageStatus = (lifecycle) => {
+    if (!candidatePath || !cursor) return "unproven";
     const assessment = assessPage({
       threadId: options.threadId,
       rolloutPath: candidatePath,
@@ -356,8 +359,13 @@ export async function waitForCompletion(options, injected = {}) {
       deadlineAt,
       now,
     });
+    if (assessment.status === "stale") {
+      if (!staleSnapshotRecorded) diagnostics.push(...(assessment.diagnostics || []));
+      staleSnapshotRecorded = true;
+      return "stale";
+    }
     diagnostics.push(...(assessment.diagnostics || []));
-    return assessment.status === "current";
+    return assessment.status === "current" ? "current" : "unproven";
   };
 
   for (let iteration = 0; iteration < maxIterations; iteration += 1) {
@@ -397,7 +405,7 @@ export async function waitForCompletion(options, injected = {}) {
         inspectNoGrowth(candidatePath, cursor).unchanged;
       if (unchangedWithoutCertification) {
         const lifecycle = dispatchLifecycle(records, diagnostics, options.dispatchId);
-        if (!pageIsCurrent(lifecycle)) return { token: "unavailable", diagnostics };
+        if (pageStatus(lifecycle) === "unproven") return { token: "unavailable", diagnostics };
       } else {
         const parsed = readRollout(candidatePath, {
           ...(cursor ? { cursor } : {}),
@@ -427,8 +435,11 @@ export async function waitForCompletion(options, injected = {}) {
 
         if (readerAtCompleteEof) {
           const lifecycle = dispatchLifecycle(records, diagnostics, options.dispatchId);
-          if (!pageIsCurrent(lifecycle)) return { token: "unavailable", diagnostics };
-          const resolved = resolveCompletion(lifecycle, options);
+          const page = pageStatus(lifecycle);
+          if (page === "unproven") return { token: "unavailable", diagnostics };
+          const resolved = page === "current"
+            ? resolveCompletion(lifecycle, options)
+            : { token: "pending", diagnostics: [] };
           if (resolved.token !== "pending") {
             return {
               token: resolved.token,

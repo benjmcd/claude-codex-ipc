@@ -3451,8 +3451,22 @@ export function assessRolloutPageSupersession(options = {}) {
   if (options.expectedIdentityKey && bound.identityKey !== options.expectedIdentityKey) {
     return unproven("bound-page-identity-changed");
   }
+  // A live page is append-only: at the same identity, growth past the caller's snapshot whose end
+  // is still a record boundary makes that snapshot stale, not the page's authority lost. The
+  // successor scan below still runs, so a successor vetoes exactly as before; a clean scan reports
+  // "stale" instead of "current", and no caller certifies on a stale snapshot. A shrink or a
+  // non-boundary end stays unproven, and the reader's content anchor rechecks the prefix on the
+  // caller's next read.
+  let grewSinceSnapshot = false;
   if (Number.isSafeInteger(options.expectedSize) && bound.size !== options.expectedSize) {
-    return unproven("bound-page-size-changed");
+    if (
+      options.expectedSize < 0 ||
+      bound.size < options.expectedSize ||
+      !cutoffIsRecordBoundary(rolloutPath, options.expectedSize)
+    ) {
+      return unproven("bound-page-size-changed");
+    }
+    grewSinceSnapshot = true;
   }
   const boundPageId = bound.pageId || bound.ownerId;
   if (!UUID_RE.test(boundPageId || "")) return unproven("bound-page-id-invalid");
@@ -3525,7 +3539,14 @@ export function assessRolloutPageSupersession(options = {}) {
     successors.push({ candidate, cutoff });
   }
 
-  if (successors.length === 0) return pageAssessment("current");
+  if (successors.length === 0) {
+    if (!grewSinceSnapshot) return pageAssessment("current");
+    return pageAssessment("stale", "page-snapshot-stale", {
+      reason: "bound-page-grew",
+      expectedSize: options.expectedSize,
+      size: bound.size,
+    });
+  }
   if (successors.length !== 1) {
     return unproven("successor-ambiguous", { successorCount: successors.length });
   }

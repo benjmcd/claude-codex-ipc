@@ -711,6 +711,18 @@ function main() {
           contains("SKILL.md", "--accept-rollout-fallback"),
       },
       {
+        label: "final-message reply mode is explicit, --ipc only, names no reply file, and records itself in the envelope",
+        file: "scripts/handoff_to_codex.sh",
+        ok:
+          contains("scripts/handoff_to_codex.sh", 'REPLY_MODE="file"') &&
+          contains("scripts/handoff_to_codex.sh", "file|final-message) REPLY_MODE=\"$2\" ;;") &&
+          contains("scripts/handoff_to_codex.sh", "Reply mode: final-message. When finished, put your complete reply/result in your final agent") &&
+          contains("scripts/handoff_to_codex.sh", "Do NOT write a reply file for this handoff") &&
+          contains("scripts/codex_ipc_replies.sh", 'ROLLOUT_ANSWERED["${thread}/${dispatch}"]=1') &&
+          contains("SKILL.md", "--reply-mode final-message") &&
+          contains("references/handoff-template.md", "Final-message reply mode"),
+      },
+      {
         label: "handoff template carries the denied-reply completion obligation",
         file: "references/handoff-template.md",
         ok:
@@ -828,6 +840,20 @@ function main() {
           contains("scripts/codex_ipc_autoload.ps1", "mock-inputs-require-dry-run") &&
           contains("scripts/codex_ipc_autoload.ps1", "Test-CodexAlternateForeground") &&
           contains("scripts/codex_ipc_autoload.ps1", "foreground-alternate-host"),
+      },
+      {
+        label: "a connect-phase failure is pre-write non-admission only in its exact structure, on the first attempt and every retry",
+        file: "scripts/handoff_to_codex.sh",
+        ok:
+          contains("scripts/codex_ipc_client.mjs", "if (routerPipePresent(opts.pipePath) === false) {") &&
+          contains("scripts/codex_ipc_client.mjs", 'phase: "connect",') &&
+          contains("scripts/codex_ipc_client.mjs", "sentRequests: [],") &&
+          contains("scripts/handoff_to_codex.sh", 'value?.phase === "connect" &&') &&
+          contains("scripts/handoff_to_codex.sh", "value.sentRequests.length === 0 &&") &&
+          contains("scripts/handoff_to_codex.sh", "RESULT: gui-unowned -- reason=router-absent -- confirmation=not-attempted") &&
+          contains("scripts/handoff_to_codex.sh", "RESULT: gui-unowned -- reason=router-unreachable -- confirmation=not-attempted") &&
+          initialLiveSendPath.includes("report_router_connect_failure_if_any") &&
+          postAutoloadRetryPath.includes("report_router_connect_failure_if_any"),
       },
       {
         label: "wrapper pins the complete host and activation refusal vocabulary and the multi-cause no-client observation",
@@ -979,6 +1005,19 @@ function main() {
           matchCount("scripts/codex_ipc_rollout_reader.mjs", /node:sqlite/g) === 0,
       },
       {
+        label: "append-only growth of the bound page is a stale snapshot that never certifies; a shrink stays unproven",
+        file: "scripts/codex_ipc_rollout_reader.mjs",
+        ok:
+          contains("scripts/codex_ipc_rollout_reader.mjs", "!cutoffIsRecordBoundary(rolloutPath, options.expectedSize)") &&
+          contains("scripts/codex_ipc_rollout_reader.mjs", 'return unproven("bound-page-size-changed");') &&
+          contains("scripts/codex_ipc_rollout_reader.mjs", 'return pageAssessment("stale", "page-snapshot-stale", {') &&
+          contains("scripts/codex_ipc_wait.mjs", 'if (assessment.status === "stale") {') &&
+          contains("scripts/codex_ipc_wait.mjs", 'const resolved = page === "current"') &&
+          contains("scripts/codex_ipc_rollout_observe.mjs", 'if (assessment.status === "stale") {') &&
+          contains("scripts/codex_ipc_rollout_observe.mjs", 'if (page === "current" && admissionObserved && !hardReadFailure) {') &&
+          contains("scripts/codex_ipc_reply_harvest.mjs", 'if (pageAssessment.status === "stale") {'),
+      },
+      {
         label: "archived (zstd) pages never become record sources, and an archived paginated page is read for the veto or fails it closed",
         file: "scripts/codex_ipc_rollout_reader.mjs",
         ok:
@@ -1051,11 +1090,12 @@ function main() {
           manualPreparationPath.length > 0 &&
           [
             "read \\\"${OUTBOUND}\\\" and proceed",
-            "Codex's reply will be written to ${INBOUND}",
+            "print_reply_route",
             "ROLLOUT-PATH: Supply the inspector's database-designated page with --rollout-path <path>.",
             "print_wait_hint",
             "exit 0",
           ].every((anchor) => manualPreparationPath.includes(anchor)) &&
+          contains("scripts/handoff_to_codex.sh", 'echo "Codex\'s reply will be written to ${INBOUND} (Claude Code reads it)."') &&
           !/RESULT:|host_policy_send|send_live|observe_rollout|powershell\.exe|codex_ipc_client|codex_ipc_autoload/.test(
             manualPreparationPath,
           ),
