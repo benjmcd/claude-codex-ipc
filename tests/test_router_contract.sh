@@ -147,7 +147,7 @@ fs.realpathSync.native = function (value, ...rest) {
 syncBuiltinESMExports();
 `);
   for (const name of [
-    "codex_ipc_client.mjs", "codex_ipc_reply_harvest.mjs",
+    "codex_ipc_client.mjs", "codex_ipc_queue.mjs", "codex_ipc_reply_harvest.mjs",
     "codex_ipc_rollout_observe.mjs", "codex_ipc_wait.mjs", "codex_ipc_write_proof.mjs",
   ]) {
     const target = path.join(scripts, name);
@@ -181,7 +181,7 @@ syncBuiltinESMExports();
       check(`${name}: ${label} rejects invalid option`, () =>
         usageError(run([...prefix, entry, "--guard-invalid-option"])));
     }
-    if (["codex_ipc_client.mjs", "codex_ipc_write_proof.mjs"].includes(name)) {
+    if (["codex_ipc_client.mjs", "codex_ipc_queue.mjs", "codex_ipc_write_proof.mjs"].includes(name)) {
       check(`${name}: alias help executes`, () => {
         const result = run([aliased, "--help"]);
         assert.equal(result.status, 0, result.stderr);
@@ -604,8 +604,18 @@ case "$name" in
         ;;
       unknown) printf '%s\n' '{"ok":false,"error":"router-contract-changed"}'; exit 1 ;;
       malformed) printf '%s\n' '{malformed'; exit 1 ;;
+      queue-*)
+        # --deliver queue never runs the router client; this records it if it ever does.
+        printf 'client invoked: %s\n' "$ROUTER_CASE" >> "$TOOL_LOG.client"
+        printf '%s\n' '{"ok":false,"error":"queue-case-client"}'; exit 1 ;;
       *) printf '%s\n' '{"ok":false,"error":"missing-router-case"}'; exit 1 ;;
     esac
+    ;;
+  codex_ipc_queue.mjs)
+    if [[ "${ROUTER_CASE:-}" == "queue-helper-garbage" ]]; then
+      printf '%s\n' 'not a helper document'; exit 1
+    fi
+    exec "$REAL_NODE" "$@"
     ;;
   codex_ipc_rollout_observe.mjs)
     printf '%s\n' 'rollout-hit'
@@ -668,6 +678,7 @@ if [[ "${script##*/}" == "codex_ipc_host_policy.ps1" ]]; then
     routerless-unversioned) echo '{"schemaVersion":1,"ok":true,"purpose":"send","configuration":{"valid":true,"autoload":{"value":"codex-uri","source":"environment"},"intendedHost":{"kind":"package","executable":null,"source":"default"}},"inventory":{"complete":true,"guiHosts":[{"matchesIntended":true}],"appServers":[]},"sendEligible":true,"sendReasons":[],"activationEligible":false,"activationReasons":["not-checked"],"intendedHostVersion":null,"routerExpected":false}' ;;
     router-malformed-expectation) echo '{"schemaVersion":1,"ok":true,"purpose":"send","configuration":{"valid":true,"autoload":{"value":"codex-uri","source":"environment"},"intendedHost":{"kind":"package","executable":null,"source":"default"}},"inventory":{"complete":true,"guiHosts":[{"matchesIntended":true}],"appServers":[]},"sendEligible":true,"sendReasons":[],"activationEligible":false,"activationReasons":["not-checked"],"intendedHostVersion":"26.1117.4957.0","routerExpected":"no"}' ;;
     router-expected-host) echo '{"schemaVersion":1,"ok":true,"purpose":"send","configuration":{"valid":true,"autoload":{"value":"codex-uri","source":"environment"},"intendedHost":{"kind":"package","executable":null,"source":"default"}},"inventory":{"complete":true,"guiHosts":[{"matchesIntended":true}],"appServers":[]},"sendEligible":true,"sendReasons":[],"activationEligible":false,"activationReasons":["not-checked"],"intendedHostVersion":"26.1111.9664.0","routerExpected":true}' ;;
+    queue-*) printf '%s\n' "${QUEUE_POLICY_JSON:-}" ;;
     *)
       echo '{"schemaVersion":1,"ok":true,"purpose":"send","configuration":{"valid":true,"autoload":{"value":"codex-uri","source":"environment"},"intendedHost":{"kind":"package","executable":null,"source":"default"}},"inventory":{"complete":true,"guiHosts":[{"matchesIntended":true}],"appServers":[]},"sendEligible":true,"sendReasons":[],"activationEligible":false,"activationReasons":["not-checked"]}'
       ;;
@@ -841,6 +852,387 @@ for _pickup_case in router-absent router-unreachable; do
   fi
 done
 unset _pickup_case _pickup_out
+
+echo "== 3c. --deliver queue: runtime queue delivery classification =="
+# The runtime is a fake codex.exe that the real helper launches exactly as it would the real one.
+# On Windows it is a copy of node.exe that a --require preload turns into the fake, because Windows
+# cannot launch a script as an executable without a shell; elsewhere it is a shebang script. Every
+# case has its own HOME/USERPROFILE with a fixture queue store, so the real ~/.codex is never read,
+# and the router client and the PATH `codex` tripwire must stay untouched throughout.
+QUEUE_DIR="$TMP/queue-runtime"
+mkdir -p "$QUEUE_DIR" || fatal "could not create the fake runtime directory"
+QUEUE_FAKE_JS="$QUEUE_DIR/fake_runtime.cjs"
+QUEUE_RUNTIME_LOG="$TMP/queue-runtime.log"
+QUEUE_QID="0f0f0001-0000-4000-8000-000000000001"
+QUEUE_OTHER_THREAD="00000000-0000-4000-8000-000000000000"
+cat > "$QUEUE_FAKE_JS" <<'EOF'
+"use strict";
+const fs = require("node:fs");
+const path = require("node:path");
+// Preloaded: node.exe running as codex.exe takes "queue" as its main script path.
+const preloaded = path.basename(process.execPath).toLowerCase() === "codex.exe";
+const scripted = path.basename(process.argv[1] || "") === "fake_runtime.cjs";
+if (preloaded || scripted) {
+  const args = preloaded
+    ? [path.basename(process.argv[1] || ""), ...process.argv.slice(2)]
+    : process.argv.slice(2);
+  fs.appendFileSync(process.env.QUEUE_RUNTIME_LOG, JSON.stringify({ args, cwd: process.cwd() }) + "\n");
+  const thread = args[args.indexOf("--thread") + 1];
+  const qid = process.env.QUEUE_QID;
+  const out = (text) => fs.writeSync(1, text);
+  switch (process.env.FAKE_RUNTIME_MODE) {
+    case "success": out(`Queued message ${qid} for thread ${thread}.\n`); process.exit(0); break;
+    case "crlf": out(`Queued message ${qid} for thread ${thread}.\r\n`); process.exit(0); break;
+    case "nonzero":
+      fs.writeSync(2, "Error: failed to queue session message: synthetic thread not found\n");
+      process.exit(1); break;
+    case "garbage": out("something unexpected\n"); process.exit(0); break;
+    case "extra-line":
+      out("note: an extra line\n");
+      out(`Queued message ${qid} for thread ${thread}.\n`);
+      process.exit(0); break;
+    case "mismatch":
+      out(`Queued message ${qid} for thread ${process.env.QUEUE_OTHER_THREAD}.\n`); process.exit(0); break;
+    case "hang": Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 60000); process.exit(0); break;
+    default: fs.writeSync(2, "fake runtime: no mode\n"); process.exit(97);
+  }
+}
+EOF
+[[ $? -eq 0 ]] || fatal "could not materialize the fake runtime"
+QUEUE_WINDOWS=0
+[[ "$("$NODE_BIN" -p process.platform 2>/dev/null)" == "win32" ]] && QUEUE_WINDOWS=1
+native_path(){ if [[ $QUEUE_WINDOWS -eq 1 ]]; then cygpath -w "$1"; else printf '%s\n' "$1"; fi; }
+QUEUE_RUNTIME="$QUEUE_DIR/codex.exe"
+QUEUE_NODE_OPTIONS=""
+if [[ $QUEUE_WINDOWS -eq 1 ]]; then
+  cp "$NODE_BIN" "$QUEUE_RUNTIME" || fatal "could not create the fake runtime executable"
+  QUEUE_NODE_OPTIONS="--require=\"$(cygpath -m "$QUEUE_FAKE_JS")\""
+else
+  printf '#!/usr/bin/env bash\nexec "$REAL_NODE" "%s" "$@"\n' "$QUEUE_FAKE_JS" > "$QUEUE_RUNTIME" \
+    && chmod +x "$QUEUE_RUNTIME" || fatal "could not create the fake runtime script"
+fi
+QUEUE_RUNTIME_NATIVE="$(native_path "$QUEUE_RUNTIME")"
+QUEUE_RUNTIME_LOG_NATIVE="$(native_path "$QUEUE_RUNTIME_LOG")"
+mkdir -p "$QUEUE_DIR/not-a-runtime" && printf 'not an executable\n' > "$QUEUE_DIR/not-a-runtime/codex.exe" \
+  || fatal "could not create the non-executable runtime fixture"
+
+queue_store_fixture(){
+  "$NODE_BIN" -e '
+const { DatabaseSync } = require("node:sqlite");
+const fs = require("node:fs");
+const path = require("node:path");
+fs.mkdirSync(path.dirname(process.argv[1]), { recursive: true });
+const db = new DatabaseSync(process.argv[1]);
+db.exec("create table queued_items (id text primary key not null, thread_id text not null, " +
+  "payload_json text not null, queue_order integer not null, created_at_ms integer not null, " +
+  "updated_at_ms integer not null)");
+db.close();' "$(native_path "$1")" 2>/dev/null || fatal "could not create a fixture queue store"
+}
+# queue_policy <runtime-status|absent> <executable|-> [sendEligible] [reasons]
+queue_policy(){
+  "$NODE_BIN" -e '
+const [status, executable, eligible = "true", reasons = ""] = process.argv.slice(1);
+const doc = { schemaVersion: 1, ok: true, purpose: "send",
+  configuration: { valid: true, autoload: { value: "off", source: "default" },
+    intendedHost: { kind: "package", executable: null, source: "default" } },
+  inventory: { complete: true, guiHosts: [{ matchesIntended: true }], appServers: [] },
+  sendEligible: eligible === "true", sendReasons: reasons ? reasons.split(",") : [],
+  activationEligible: false, activationReasons: ["activation-not-evaluated"],
+  intendedHostVersion: "26.1117.31558.0", routerExpected: false };
+if (status !== "absent") {
+  doc.intendedRuntime = { status, executable: executable === "-" ? null : executable };
+}
+process.stdout.write(JSON.stringify(doc));' "$@"
+}
+
+QUEUE_N=0
+QUEUE_OUT=""
+QUEUE_CASE_ROOT=""
+QUEUE_FLAGS=()
+QUEUE_STORE=1
+QUEUE_POLICY=""
+# run_queue_case <router-case> <runtime-mode> <rc> <exact RESULT or ERROR line> <label> [NAME=VALUE ...]
+run_queue_case(){
+  local scenario="$1" mode="$2" expected_rc="$3" expected_line="$4" label="$5" rc
+  shift 5
+  QUEUE_N=$((QUEUE_N + 1))
+  QUEUE_CASE_ROOT="$TMP/queue-case-$QUEUE_N"
+  mkdir -p "$QUEUE_CASE_ROOT/ipc" "$QUEUE_CASE_ROOT/home" || fatal "could not create queue case $QUEUE_N"
+  [[ "$QUEUE_STORE" -eq 1 ]] && queue_store_fixture "$QUEUE_CASE_ROOT/home/.codex/queue_1.sqlite"
+  : > "$QUEUE_RUNTIME_LOG"
+  QUEUE_OUT="$(env -u CODEX_HOME -u CODEX_IPC_AUTOLOAD -u CODEX_IPC_INTENDED_HOST -u QUEUE_ID \
+    PATH="$STUB_BIN:$PATH" REAL_NODE="$NODE_BIN" ROUTER_CASE="$scenario" \
+    TOOL_LOG="$TOOL_LOG" POLICY_LOG="$POLICY_LOG" QUEUE_POLICY_JSON="$QUEUE_POLICY" \
+    QUEUE_RUNTIME_LOG="$QUEUE_RUNTIME_LOG_NATIVE" QUEUE_QID="$QUEUE_QID" \
+    QUEUE_OTHER_THREAD="$QUEUE_OTHER_THREAD" FAKE_RUNTIME_MODE="$mode" \
+    NODE_OPTIONS="$QUEUE_NODE_OPTIONS" \
+    HOME="$QUEUE_CASE_ROOT/home" USERPROFILE="$(native_path "$QUEUE_CASE_ROOT/home")" \
+    CLAUDE_SESSION_ID="33333333-3333-4333-8333-333333333333" \
+    CODEX_IPC_ROOT="$QUEUE_CASE_ROOT/ipc" CODEX_IPC_RETENTION_DAYS=0 \
+    "$@" \
+    bash "$WRAPPER" --ipc "$THREAD" --deliver queue ${QUEUE_FLAGS[@]+"${QUEUE_FLAGS[@]}"} -- "$TASK_TEXT" 2>&1)"
+  rc=$?
+  if [[ $rc -eq $expected_rc ]] && printf '%s\n' "$QUEUE_OUT" | grep -Fqx "$expected_line"; then
+    ok "$label"
+  else
+    no "$label (rc=$rc)"
+    printf '%s\n' "$QUEUE_OUT" | sed -n '1,40p'
+  fi
+}
+queue_runtime_ran(){ [[ -s "$QUEUE_RUNTIME_LOG" ]]; }
+queue_out_has(){ printf '%s\n' "$QUEUE_OUT" | grep -Fq -- "$1"; }
+queue_out_has_wait(){ printf '%s\n' "$QUEUE_OUT" | grep -q '^WAIT:'; }
+# A refusal before the runtime ran keeps the pickup line; it prints no WAIT and no ambiguity.
+assert_queue_not_attempted(){
+  if ! queue_runtime_ran && queue_out_has "FALLBACK -- file-drop is ready" \
+    && ! queue_out_has "AMBIGUOUS" && ! queue_out_has_wait; then
+    ok "$1: the runtime did not run and the pickup line is offered"
+  else
+    no "$1: not-attempted shape is wrong"
+    printf '%s\n' "$QUEUE_OUT" | sed -n '1,30p'
+  fi
+}
+# After the runtime ran, anything but its exact success line is unknown: no pickup, no WAIT.
+assert_queue_unknown(){
+  if queue_runtime_ran && ! queue_out_has "FALLBACK -- file-drop is ready" \
+    && queue_out_has "AMBIGUOUS" && queue_out_has "do not resend" && ! queue_out_has_wait; then
+    ok "$1: the runtime ran, so pickup is suppressed and the outcome stays unknown"
+  else
+    no "$1: unknown shape is wrong"
+    printf '%s\n' "$QUEUE_OUT" | sed -n '1,30p'
+  fi
+}
+
+QUEUE_POLICY="$(queue_policy resolved "$QUEUE_RUNTIME_NATIVE")"
+run_queue_case queue-success success 0 \
+  "RESULT: queued -- reason=runtime-accepted -- confirmation=pending -- queueId=$QUEUE_QID" \
+  "a routerless (26.1117+) host queues the pickup line and reports the queue id"
+_queue_envelope="$(find "$QUEUE_CASE_ROOT/ipc" -name '*.task.md' -type f)"
+_queue_dispatch="$(basename "$_queue_envelope" .task.md)"
+if [[ $QUEUE_WINDOWS -eq 1 ]]; then _queue_envelope="$(cygpath -m "$_queue_envelope")"; fi
+if "$NODE_BIN" -e '
+const fs = require("node:fs");
+const [log, thread, envelope] = process.argv.slice(1);
+const lines = fs.readFileSync(log, "utf8").split("\n").filter(Boolean);
+if (lines.length !== 1) process.exit(1);
+const { args, cwd } = JSON.parse(lines[0]);
+const expected = ["queue", "--thread", thread, "--message", `read "${envelope}" and proceed`];
+process.exit(JSON.stringify(args) === JSON.stringify(expected) && cwd.includes(thread) ? 0 : 1);
+' "$QUEUE_RUNTIME_LOG_NATIVE" "$THREAD" "$_queue_envelope"; then
+  ok "the runtime ran once with exactly queue --thread <id> --message <pickup line> (no --resume, --remote or -c)"
+else
+  no "the runtime argv is not exactly the queue command"
+  cat "$QUEUE_RUNTIME_LOG"
+fi
+if printf '%s\n' "$QUEUE_OUT" | grep '^WAIT:' | grep -Fq -- "--queue-id $QUEUE_QID" \
+  && printf '%s\n' "$QUEUE_OUT" | grep '^WAIT:' | grep -Fq -- "--dispatch $_queue_dispatch" \
+  && printf '%s\n' "$QUEUE_OUT" | grep '^WAIT:' | grep -Fq -- "--materialize-reply"; then
+  ok "the WAIT line carries the dispatch, --materialize-reply and --queue-id"
+else
+  no "the queue WAIT line is wrong"
+  printf '%s\n' "$QUEUE_OUT" | grep '^WAIT:'
+fi
+if queue_out_has "POLICY: delivery=queue intended-host=package (source: default) runtime=resolved" \
+  && ! queue_out_has "$QUEUE_RUNTIME_NATIVE" && ! queue_out_has "FALLBACK -- file-drop is ready"; then
+  ok "the queue POLICY line names the runtime status, never its path, and no pickup is printed"
+else
+  no "queue success output leaks the runtime path or offers pickup"
+  printf '%s\n' "$QUEUE_OUT" | sed -n '1,30p'
+fi
+unset _queue_envelope _queue_dispatch
+
+run_queue_case queue-crlf crlf 0 \
+  "RESULT: queued -- reason=runtime-accepted -- confirmation=pending -- queueId=$QUEUE_QID" \
+  "a CRLF-terminated success line is the same success"
+_policy_lines_before="$(wc -l < "$POLICY_LOG")"
+QUEUE_FLAGS=(--intended-host package --reply-mode final-message)
+run_queue_case queue-intended-host success 0 \
+  "RESULT: queued -- reason=runtime-accepted -- confirmation=pending -- queueId=$QUEUE_QID" \
+  "--intended-host and --reply-mode combine with --deliver queue"
+QUEUE_FLAGS=()
+if tail -n +"$((_policy_lines_before + 1))" "$POLICY_LOG" | grep -q -- '-Purpose send .*-IntendedHost package' \
+  && queue_out_has "reply mode final-message"; then
+  ok "the queue route asks the shared send policy for the named intended host"
+else
+  no "the queue route did not pass --intended-host to the host policy"
+fi
+unset _policy_lines_before
+
+run_queue_case queue-nonzero nonzero 1 \
+  "RESULT: failed-closed -- reason=queue-runtime-failed -- confirmation=unknown" \
+  "a nonzero runtime exit is post-attempt unknown, never not-attempted"
+assert_queue_unknown "nonzero exit"
+queue_out_has "synthetic thread not found" && ok "bounded runtime diagnostics are shown" \
+  || no "runtime diagnostics were not shown"
+run_queue_case queue-garbage garbage 1 \
+  "RESULT: failed-closed -- reason=queue-output-unrecognized -- confirmation=unknown" \
+  "unrecognized runtime output is unknown"
+assert_queue_unknown "garbage output"
+run_queue_case queue-extra-line extra-line 1 \
+  "RESULT: failed-closed -- reason=queue-output-unrecognized -- confirmation=unknown" \
+  "a success line with extra output is not exact, so it is unknown"
+assert_queue_unknown "extra output"
+run_queue_case queue-mismatch mismatch 1 \
+  "RESULT: failed-closed -- reason=queue-thread-mismatch -- confirmation=unknown" \
+  "a success line for another thread is unknown, never success"
+assert_queue_unknown "thread mismatch"
+queue_out_has "queue item $QUEUE_QID for thread $QUEUE_OTHER_THREAD" \
+  && ok "a thread mismatch names the reported item and thread" || no "thread mismatch was not named"
+run_queue_case queue-timeout hang 1 \
+  "RESULT: failed-closed -- reason=queue-timeout -- confirmation=unknown" \
+  "a runtime that outlives the timeout is unknown" CODEX_IPC_QUEUE_TIMEOUT_MS=1500
+assert_queue_unknown "timeout"
+run_queue_case queue-helper-garbage success 1 \
+  "RESULT: failed-closed -- reason=queue-helper-failure -- confirmation=unknown" \
+  "an unreadable helper document is unknown, because the runtime may have run"
+if ! queue_out_has "FALLBACK -- file-drop is ready" && queue_out_has "AMBIGUOUS" && ! queue_out_has_wait; then
+  ok "helper failure suppresses pickup and WAIT"
+else
+  no "helper failure shape is wrong"
+fi
+
+QUEUE_POLICY="$(queue_policy ambiguous -)"
+run_queue_case queue-runtime-ambiguous success 1 \
+  "RESULT: queue-unavailable -- reason=runtime-ambiguous -- confirmation=not-attempted" \
+  "two runtime executables under the intended host refuse before any run"
+assert_queue_not_attempted "ambiguous runtime"
+QUEUE_POLICY="$(queue_policy missing -)"
+run_queue_case queue-runtime-missing success 1 \
+  "RESULT: queue-unavailable -- reason=runtime-missing -- confirmation=not-attempted" \
+  "no proven runtime refuses before any run"
+assert_queue_not_attempted "missing runtime"
+QUEUE_POLICY="$(queue_policy absent -)"
+run_queue_case queue-runtime-unreported success 1 \
+  "RESULT: queue-unavailable -- reason=host-policy-invalid -- confirmation=not-attempted" \
+  "policy output without the intended runtime refuses"
+assert_queue_not_attempted "unreported runtime"
+QUEUE_POLICY='{"schemaVersion":1,"ok":true,"purpose":"send","configuration":{"valid":true,"autoload":{"value":"off","source":"default"},"intendedHost":{"kind":"package","executable":null,"source":"default"}},"inventory":{"complete":true,"guiHosts":[{"matchesIntended":true}],"appServers":[]},"sendEligible":true,"sendReasons":[],"activationEligible":false,"activationReasons":[],"intendedHostVersion":"26.1117.31558.0","routerExpected":false,"intendedRuntime":{"status":"resolved","executable":"codex.exe"}}'
+run_queue_case queue-runtime-relative success 1 \
+  "RESULT: queue-unavailable -- reason=host-policy-invalid -- confirmation=not-attempted" \
+  "a relative runtime path is malformed policy, never a PATH lookup"
+assert_queue_not_attempted "relative runtime"
+QUEUE_POLICY="$(queue_policy resolved "$(native_path "$QUEUE_DIR/absent/codex.exe")")"
+run_queue_case queue-runtime-file-absent success 1 \
+  "RESULT: queue-unavailable -- reason=runtime-missing -- confirmation=not-attempted" \
+  "a runtime path with no file behind it refuses before any run"
+assert_queue_not_attempted "absent runtime file"
+QUEUE_POLICY="$(queue_policy resolved "$(native_path "$QUEUE_DIR/not-a-runtime/codex.exe")")"
+run_queue_case queue-runtime-unlaunchable success 1 \
+  "RESULT: queue-unavailable -- reason=runtime-launch-failed -- confirmation=not-attempted" \
+  "a runtime that cannot be started never ran, so pickup stays safe"
+assert_queue_not_attempted "unlaunchable runtime"
+QUEUE_POLICY="$(queue_policy resolved "$QUEUE_RUNTIME_NATIVE" false intended-host-not-running)"
+run_queue_case queue-host-not-running success 1 \
+  "RESULT: queue-unavailable -- reason=intended-host-not-running -- confirmation=not-attempted" \
+  "the queue route keeps the shared send gate (intended host must run alone)"
+assert_queue_not_attempted "host not running"
+QUEUE_POLICY="$(queue_policy resolved "$QUEUE_RUNTIME_NATIVE" false other-desktop-host-running)"
+run_queue_case queue-other-host success 1 \
+  "RESULT: queue-unavailable -- reason=other-desktop-host-running -- confirmation=not-attempted" \
+  "another Desktop host refuses the queue route"
+assert_queue_not_attempted "other host"
+QUEUE_POLICY="$(queue_policy resolved "$QUEUE_RUNTIME_NATIVE")"
+QUEUE_STORE=0
+run_queue_case queue-store-absent success 1 \
+  "RESULT: queue-unavailable -- reason=queue-store-absent -- confirmation=not-attempted" \
+  "a Codex home without a queue store refuses (the runtime would create one)"
+assert_queue_not_attempted "absent queue store"
+QUEUE_STORE=1
+mkdir -p "$TMP/elsewhere/.codex" || fatal "could not create the other Codex home"
+run_queue_case queue-codex-home success 1 \
+  "RESULT: queue-unavailable -- reason=codex-home-mismatch -- confirmation=not-attempted" \
+  "a CODEX_HOME other than the inspected home refuses" CODEX_HOME="$(native_path "$TMP/elsewhere/.codex")"
+assert_queue_not_attempted "CODEX_HOME mismatch"
+
+_policy_lines_before="$(wc -l < "$POLICY_LOG")"
+run_queue_case no-client-archived success 1 \
+  "RESULT: failed-closed -- reason=target-archived -- confirmation=not-attempted" \
+  "an archived target refuses before the host policy or the runtime"
+if ! queue_runtime_ran && ! queue_out_has "FALLBACK -- file-drop is ready" \
+  && [[ "$(wc -l < "$POLICY_LOG")" -eq "$_policy_lines_before" ]]; then
+  ok "a target refusal offers no pickup and consults no host policy"
+else
+  no "target refusal shape is wrong"
+fi
+run_queue_case no-client-orphan success 1 \
+  "RESULT: failed-closed -- reason=target-inspection-ambiguous -- confirmation=not-attempted" \
+  "an untrusted target row refuses the queue route"
+unset _policy_lines_before
+
+QUEUE_FLAGS=(--autoload codex-uri)
+run_queue_case queue-flag-autoload success 1 \
+  "ERROR: --deliver queue cannot be combined with --autoload, --foreground-policy or --ack-foreground-switch." \
+  "--deliver queue refuses activation flags"
+QUEUE_FLAGS=(--foreground-policy switch --ack-foreground-switch)
+run_queue_case queue-flag-foreground success 1 \
+  "ERROR: --deliver queue cannot be combined with --autoload, --foreground-policy or --ack-foreground-switch." \
+  "--deliver queue refuses foreground flags"
+QUEUE_FLAGS=()
+if [[ -z "$(find "$TMP/queue-case-$((QUEUE_N - 1))" "$TMP/queue-case-$QUEUE_N" -name '*.task.md' 2>/dev/null)" ]] \
+  && ! queue_runtime_ran; then
+  ok "flag refusals happen before any envelope or runtime"
+else
+  no "a flag refusal wrote an envelope or ran the runtime"
+fi
+_bad_deliver="$(env PATH="$STUB_BIN:$PATH" REAL_NODE="$NODE_BIN" HOME="$TMP/bad-deliver" \
+  CODEX_IPC_ROOT="$TMP/bad-deliver/ipc" bash "$WRAPPER" --ipc "$THREAD" --deliver bogus -- x 2>&1)"
+printf '%s\n' "$_bad_deliver" | grep -Fqx "ERROR: --deliver requires live, manual or queue (got 'bogus')." \
+  && ok "an unknown --deliver value names all three modes" || no "unknown --deliver message is wrong"
+unset _bad_deliver
+
+if [[ ! -s "$TOOL_LOG.client" ]] || ! grep -q 'client invoked: queue-' "$TOOL_LOG.client"; then
+  ok "no --deliver queue case ran the router client"
+else
+  no "a --deliver queue case ran the router client"
+fi
+if [[ ! -f "$TOOL_LOG" ]] || ! grep -q 'codex invoked' "$TOOL_LOG"; then
+  ok "no --deliver queue case ran a codex found on PATH"
+else
+  no "a codex found on PATH was invoked"
+fi
+
+# The manual route never adds --queue-id, even with an inherited QUEUE_ID in the environment.
+_manual_out="$(env PATH="$STUB_BIN:$PATH" REAL_NODE="$NODE_BIN" ROUTER_CASE=acceptance QUEUE_ID="$QUEUE_QID" \
+  TOOL_LOG="$TOOL_LOG" POLICY_LOG="$POLICY_LOG" HOME="$TMP/manual-queue-id/home" \
+  CLAUDE_SESSION_ID="33333333-3333-4333-8333-333333333333" CODEX_IPC_ROOT="$TMP/manual-queue-id/ipc" \
+  CODEX_IPC_RETENTION_DAYS=0 bash "$WRAPPER" --ipc "$THREAD" --deliver manual -- "$TASK_TEXT" 2>&1)"
+if printf '%s\n' "$_manual_out" | grep -q '^WAIT:' && ! printf '%s\n' "$_manual_out" | grep -Fq -- "--queue-id"; then
+  ok "manual WAIT lines never carry --queue-id, even with QUEUE_ID inherited"
+else
+  no "manual WAIT line picked up a queue id"
+  printf '%s\n' "$_manual_out" | grep '^WAIT:'
+fi
+unset _manual_out
+
+echo "== 3d. queue helper: exact success-line parsing and bounded diagnostics =="
+if QUEUE_HELPER="$(dirname "$WRAPPER")/codex_ipc_queue.mjs" "$NODE_BIN" --input-type=module -e '
+import assert from "node:assert/strict";
+import { pathToFileURL } from "node:url";
+const { parseQueuedOutput, excerpt, sendToQueue } = await import(pathToFileURL(process.env.QUEUE_HELPER).href);
+const q = "0f0f0001-0000-4000-8000-000000000001";
+const t = "22222222-2222-4222-8222-222222222222";
+assert.deepEqual(parseQueuedOutput(`Queued message ${q} for thread ${t}.\n`), { queueId: q, threadId: t });
+assert.deepEqual(parseQueuedOutput(`Queued message ${q.toUpperCase()} for thread ${t}.`), { queueId: q, threadId: t });
+for (const bad of ["", "\n", `Queued message ${q} for thread ${t}`, `Queued message ${q} for thread ${t}.\n\n`,
+  `x\nQueued message ${q} for thread ${t}.\n`, ` Queued message ${q} for thread ${t}.`,
+  `Queued message not-a-uuid for thread ${t}.`, `Queued message ${q} for thread ${t}. extra`]) {
+  assert.equal(parseQueuedOutput(bad), null, JSON.stringify(bad));
+}
+assert.deepEqual(excerpt("\u001b[31mError:\u001b[0m bad\r\nline\u0007 two\n\n"), ["Error: bad", "line two"]);
+assert.equal(excerpt("x\n".repeat(20)).length, 6);
+assert.ok(Buffer.byteLength(excerpt("y".repeat(5000)).join("")) <= 600);
+let spawned = false;
+const refused = sendToQueue({ runtime: "codex.exe", threadId: t, message: "m" },
+  { env: {}, spawnSync: () => { spawned = true; } });
+assert.equal(refused.outcome, "not-attempted");
+assert.equal(refused.reason, "runtime-missing");
+assert.equal(spawned, false, "a relative runtime is never launched or looked up");
+' >/dev/null 2>"$TMP/queue-helper.err"; then
+  ok "the helper accepts only the exact success sentence and bounds runtime diagnostics"
+else
+  no "queue helper unit checks"
+  sed -n '1,30p' "$TMP/queue-helper.err"
+fi
 
 echo "== 3b. real client: a connect-phase failure is structured and sends nothing =="
 # A random pipe name that no process serves. On Windows the client finds it absent in the pipe
