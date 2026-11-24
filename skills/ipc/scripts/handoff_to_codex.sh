@@ -13,6 +13,10 @@
 #       [--deliver live|manual] [--request-goal] \
 #       [--autoload off|codex-uri] [--intended-host package|ABSOLUTE-EXE] \
 #       [--foreground-policy defer|switch|restore-if-known] [--ack-foreground-switch] [--] "task"
+#   ./scripts/handoff_to_codex.sh --ipc <conversationId> --deliver queue \
+#       [--reply-mode file|final-message] [--request-goal] [--intended-host package|ABSOLUTE-EXE] [--] "task"
+#       # queue the pickup line with the intended Desktop host's own runtime (`codex.exe queue`);
+#       # the recommended thread-bound path on Codex Desktop 26.1117+, which serves no IPC router
 #
 # The file-drop default is the recommended path: it appears in the Codex Desktop GUI (your own session
 # reads the file) and has zero effect on any other running Codex session.
@@ -63,6 +67,8 @@
 #   CODEX_IPC_OBSERVE_BUDGET_MS=<n>    post-acceptance rollout observation cap
 #                                      (default 20000; measurement-informed)
 #   CODEX_IPC_OBSERVE_INTERVAL_MS=<n>  positive rollout observation interval override
+#   CODEX_IPC_QUEUE_TIMEOUT_MS=<n>     --deliver queue runtime timeout (default 30000); a timeout
+#                                      reports confirmation=unknown, never not-attempted
 
 set -euo pipefail
 
@@ -80,6 +86,7 @@ case "${1:-}" in
             '  handoff_to_codex.sh --request-goal [--] "<task>"  file-drop with an explicit goal-setup request' \
             '  handoff_to_codex.sh --ipc <conversationId> "<task>" live delivery into an existing Desktop thread' \
             '  handoff_to_codex.sh --ipc <conversationId> --deliver manual [--reply-mode file|final-message] [--request-goal] -- "<task>"' \
+            '  handoff_to_codex.sh --ipc <conversationId> --deliver queue [--reply-mode file|final-message] [--request-goal] [--intended-host package|ABSOLUTE-EXE] -- "<task>"' \
             '  handoff_to_codex.sh --ipc <conversationId> [--deliver live] [--reply-mode file|final-message] [--request-goal] [--autoload off|codex-uri] [--intended-host package|ABSOLUTE-EXE] [--foreground-policy defer|switch|restore-if-known] [--ack-foreground-switch] -- "<task>"' \
             '  handoff_to_codex.sh -h | --help | -v | --version' \
             '' \
@@ -96,6 +103,10 @@ case "${1:-}" in
             '  inspect, replace, or otherwise change an existing goal.' \
             '  --deliver manual writes the same thread-bound envelope, inspects the target, and prints' \
             '  pickup + WAIT instructions without contacting the Desktop pipe, host helper, or opener.' \
+            '  --deliver queue (recommended on Codex Desktop 26.1117+, which serves no router) queues the' \
+            '  pickup line with the runtime of the intended host (codex.exe queue, never codex on PATH)' \
+            '  after the same target checks; it never steers, and an unloaded or interrupted thread keeps' \
+            '  the item queued until it is opened. RESULT: queued ... -- queueId=<id> plus WAIT on success.' \
             '  --reply-mode final-message (--ipc only) asks for the reply in the final agent message, not' \
             '  a reply file, for a target that cannot write the transport root; the envelope records it.' \
             '  Transport root: ${CODEX_IPC_ROOT:-~/.claude/ipc}. Envelopes are kept by default.' \
@@ -295,6 +306,8 @@ DELIVERY_FLAG_PRESENT=0
 # transport root. Explicit only: nothing detects the target's sandbox.
 REPLY_MODE="file"
 REPLY_MODE_FLAG_PRESENT=0
+# Set only by a successful --deliver queue send; never inherited from the environment.
+QUEUE_ID=""
 
 # --- Foreground policy for live Desktop IPC (--ipc only; see SKILL.md) ---
 # defer (default): never navigate the visible Codex app; switch: navigate it to the
@@ -354,7 +367,7 @@ case "${1:-}" in
                     REQUEST_GOAL=1; shift;;
                 --deliver)
                     if [[ $# -lt 2 ]]; then
-                        echo "ERROR: --deliver requires a value (live|manual)." >&2
+                        echo "ERROR: --deliver requires a value (live|manual|queue)." >&2
                         exit 1
                     fi
                     if [[ "$DELIVERY_FLAG_PRESENT" -eq 1 ]]; then
@@ -362,9 +375,9 @@ case "${1:-}" in
                         exit 1
                     fi
                     case "$2" in
-                        live|manual) DELIVERY="$2" ;;
+                        live|manual|queue) DELIVERY="$2" ;;
                         *)
-                            echo "ERROR: --deliver requires live or manual (got '$2')." >&2
+                            echo "ERROR: --deliver requires live, manual or queue (got '$2')." >&2
                             exit 1;;
                     esac
                     DELIVERY_FLAG_PRESENT=1; shift 2;;
@@ -408,7 +421,7 @@ case "${1:-}" in
                     TASK_AFTER_DASHDASH=1; shift; break;;
                 --*)
                     echo "ERROR: unknown --ipc flag '$1'." >&2
-                    echo "Usage: $0 --ipc <conversationId> [--deliver live|manual] [--reply-mode file|final-message] [--request-goal] [--autoload off|codex-uri] [--intended-host package|ABSOLUTE-EXE] [--foreground-policy defer|switch|restore-if-known] [--ack-foreground-switch] [--] \"<task>\"" >&2
+                    echo "Usage: $0 --ipc <conversationId> [--deliver live|manual|queue] [--reply-mode file|final-message] [--request-goal] [--autoload off|codex-uri] [--intended-host package|ABSOLUTE-EXE] [--foreground-policy defer|switch|restore-if-known] [--ack-foreground-switch] [--] \"<task>\"" >&2
                     exit 1;;
                 *)
                     break;;
@@ -431,6 +444,14 @@ case "${1:-}" in
            { [[ "$FOREGROUND_POLICY_SOURCE" == "flag" ]] || [[ "$ACK_SOURCE" == "flag" ]] ||
              [[ "$HOST_AUTOLOAD_FLAG_PRESENT" -eq 1 ]] || [[ "$HOST_INTENDED_HOST_FLAG_PRESENT" -eq 1 ]]; }; then
             echo "ERROR: --deliver manual cannot be combined with live-only host or foreground flags." >&2
+            exit 1
+        fi
+        # Queue delivery resolves the intended host (so --intended-host applies) but never
+        # activates or navigates the App, so activation and foreground flags are refused.
+        if [[ "$DELIVERY" == "queue" ]] &&
+           { [[ "$FOREGROUND_POLICY_SOURCE" == "flag" ]] || [[ "$ACK_SOURCE" == "flag" ]] ||
+             [[ "$HOST_AUTOLOAD_FLAG_PRESENT" -eq 1 ]]; }; then
+            echo "ERROR: --deliver queue cannot be combined with --autoload, --foreground-policy or --ack-foreground-switch." >&2
             exit 1
         fi
         ;;
@@ -937,6 +958,8 @@ process.stdout.write([state, parent, legacy, rolloutPath, sessionsRoot].join("\t
             --thread "$IPC_CID" --dispatch "$DISPATCH_ID" --reply-path "$INBOUND")
         [[ -z "$INSPECT_ROLLOUT_PATH" ]] || wait_args+=(--rollout-path "$INSPECT_ROLLOUT_PATH")
         [[ -z "$INSPECT_SESSIONS_ROOT" ]] || wait_args+=(--sessions-root "$INSPECT_SESSIONS_ROOT")
+        # Queue delivery only: the waiter reports an item that stays queued (non-terminal).
+        [[ -z "$QUEUE_ID" ]] || wait_args+=(--queue-id "$QUEUE_ID")
         # --materialize-reply keeps a certified rollout-only reply beside the envelope, so it stays
         # readable after Codex compresses the page; it never writes the primary reply file.
         wait_args+=(--accept-rollout-fallback --budget-ms 1800000 --interval-ms 1000 --status-exit-codes --materialize-reply)
@@ -1030,7 +1053,12 @@ process.stdout.write([state, parent, legacy, rolloutPath, sessionsRoot].join("\t
     HOST_AUTOLOAD_SOURCE=""
     HOST_INTENDED_KIND_EFFECTIVE=""
     HOST_INTENDED_SOURCE=""
+    HOST_RUNTIME_STATUS=""
+    HOST_RUNTIME_PATH=""
+    # host_policy_send [queue]: the shared send gate. With `queue` (--deliver queue) a routerless
+    # host is expected rather than refused, and the intended host's proven runtime is required.
     host_policy_send() {
+        local route="${1:-live}"
         HOST_POLICY_REFUSAL=0
         HOST_POLICY_REFUSAL_REASON=""
         HOST_POLICY_REASON_LIST=""
@@ -1038,6 +1066,8 @@ process.stdout.write([state, parent, legacy, rolloutPath, sessionsRoot].join("\t
         HOST_AUTOLOAD_SOURCE=""
         HOST_INTENDED_KIND_EFFECTIVE=""
         HOST_INTENDED_SOURCE=""
+        HOST_RUNTIME_STATUS=""
+        HOST_RUNTIME_PATH=""
 
         local policy_script="${SCRIPT_DIR}/codex_ipc_host_policy.ps1"
         local policy_win ipc_root_win policy_stderr policy_status policy_fields structured_reason
@@ -1136,6 +1166,29 @@ if (hostVersion !== undefined && hostVersion !== null &&
   process.exit(1);
 }
 if (routerExpected === false && typeof hostVersion !== "string") process.exit(1);
+// intendedRuntime: the proven runtime executable of the one intended GUI, which --deliver queue
+// runs. Older policy output has none; the queue route then refuses.
+const runtime = value.intendedRuntime;
+let runtimeStatus = "absent";
+let runtimePath = "-";
+if (runtime !== undefined && runtime !== null) {
+  if (typeof runtime !== "object" || Array.isArray(runtime) ||
+      !["resolved", "ambiguous", "missing", "not-evaluated"].includes(runtime.status)) {
+    process.exit(1);
+  }
+  if (runtime.status === "resolved") {
+    if (typeof runtime.executable !== "string" ||
+        !/^(?:[A-Za-z]:[\\/]|\\\\|\/)/.test(runtime.executable) ||
+        /[\u0000-\u001f\u007f]/.test(runtime.executable)) {
+      process.exit(1);
+    }
+    runtimePath = runtime.executable;
+  } else if (runtime.executable !== null) {
+    process.exit(1);
+  }
+  if (value.sendEligible === true && runtime.status === "not-evaluated") process.exit(1);
+  runtimeStatus = runtime.status;
+}
 process.stdout.write([
   autoload.value,
   autoload.source,
@@ -1145,6 +1198,8 @@ process.stdout.write([
   reasons.join(",") || "-",
   routerExpected === true ? "true" : routerExpected === false ? "false" : "unknown",
   typeof hostVersion === "string" ? hostVersion : "-",
+  runtimeStatus,
+  runtimePath,
 ].join("\t"));
 ' 2>/dev/null) || policy_fields=""
         if [[ -z "$policy_fields" ]]; then
@@ -1157,9 +1212,16 @@ process.stdout.write([
         local send_eligible router_expected host_version
         IFS=$'\t' read -r HOST_AUTOLOAD_EFFECTIVE HOST_AUTOLOAD_SOURCE \
             HOST_INTENDED_KIND_EFFECTIVE HOST_INTENDED_SOURCE send_eligible \
-            HOST_POLICY_REASON_LIST router_expected host_version <<< "$policy_fields"
+            HOST_POLICY_REASON_LIST router_expected host_version \
+            HOST_RUNTIME_STATUS HOST_RUNTIME_PATH <<< "$policy_fields"
         [[ "$HOST_POLICY_REASON_LIST" == "-" ]] && HOST_POLICY_REASON_LIST=""
-        echo "POLICY: autoload=${HOST_AUTOLOAD_EFFECTIVE} (source: ${HOST_AUTOLOAD_SOURCE}) intended-host=${HOST_INTENDED_KIND_EFFECTIVE} (source: ${HOST_INTENDED_SOURCE})"
+        [[ "$HOST_RUNTIME_PATH" == "-" ]] && HOST_RUNTIME_PATH=""
+        if [[ "$route" == "queue" ]]; then
+            # Paths stay out of wrapper output; the runtime is named only by its status.
+            echo "POLICY: delivery=queue intended-host=${HOST_INTENDED_KIND_EFFECTIVE} (source: ${HOST_INTENDED_SOURCE}) runtime=${HOST_RUNTIME_STATUS}"
+        else
+            echo "POLICY: autoload=${HOST_AUTOLOAD_EFFECTIVE} (source: ${HOST_AUTOLOAD_SOURCE}) intended-host=${HOST_INTENDED_KIND_EFFECTIVE} (source: ${HOST_INTENDED_SOURCE})"
+        fi
         if [[ "$send_eligible" != "true" ]]; then
             HOST_POLICY_REFUSAL=1
             case ",${HOST_POLICY_REASON_LIST}," in
@@ -1172,8 +1234,9 @@ process.stdout.write([
         fi
         # A proven 26.1117+ intended host serves no router, so a server of that pipe name could only
         # be another process. Refuse before the client runs: zero pipe contact, pickup is safe.
-        # An unknown version keeps the client's connect-phase handling.
-        if [[ "$router_expected" == "false" ]]; then
+        # An unknown version keeps the client's connect-phase handling. Queue delivery never
+        # contacts the pipe, so a routerless host is exactly the host it is for.
+        if [[ "$route" != "queue" && "$router_expected" == "false" ]]; then
             HOST_POLICY_REFUSAL=1
             HOST_POLICY_REFUSAL_REASON="router-absent"
             HOST_POLICY_REASON_LIST="intended host ${host_version} is a Codex Desktop 26.1117+ build, which serves no IPC router"
@@ -1358,6 +1421,138 @@ console.log(JSON.stringify({
         echo "(Rollout confirmation reflects bounded pickup observation only; it does not confirm" >&2
         echo " completion or reply-file success.)" >&2
     }
+    # --- Runtime queue delivery (--deliver queue) ---
+    # Codex Desktop 26.1117+ serves no IPC router. Its runtime keeps a durable per-thread queue,
+    # and the App's queue service starts a queued item as a normal user turn (turn_trigger "queue")
+    # once the thread is loaded and idle. The pickup line is queued with the intended host's OWN
+    # runtime executable, which the shared host policy proves from the app-server under the one
+    # intended GUI: a different build could migrate the state databases under the App, and `codex`
+    # on PATH is never used. One attempt, no retry:
+    #   not-attempted  a preflight refusal, or the process never started: nothing was queued, so
+    #                  the pickup line is safe.
+    #   unknown        the runtime ran and anything but its exact success line followed: the item
+    #                  may be queued and would start by itself, so pickup is suppressed and
+    #                  resending is forbidden.
+    # It never steers: a busy thread runs the item after its current turn, and an unloaded thread or
+    # one whose last turn was interrupted keeps it queued until the thread is opened in the App.
+    if [[ "$DELIVERY" == "queue" ]]; then
+        report_queue_unavailable() {
+            echo "RESULT: queue-unavailable -- reason=$1 -- confirmation=not-attempted" >&2
+            [[ -z "${2:-}" ]] || echo "$2" >&2
+            fallback
+            exit 1
+        }
+        report_queue_unknown() {
+            echo "RESULT: failed-closed -- reason=$1 -- confirmation=unknown" >&2
+            fallback_ambiguous
+            echo "A queued item starts by itself once the thread is idle. To learn whether this one ran," >&2
+            echo "run codex_ipc_wait.mjs for thread ${IPC_CID} and dispatch ${DISPATCH_ID}; do not resend." >&2
+            exit 1
+        }
+        if ! host_policy_send queue; then
+            echo "HOST-WARNING: queue delivery refused by host policy (${HOST_POLICY_REASON_LIST:-$HOST_POLICY_REFUSAL_REASON})." >&2
+            report_queue_unavailable "$HOST_POLICY_REFUSAL_REASON"
+        fi
+        case "$HOST_RUNTIME_STATUS" in
+            resolved) : ;;
+            ambiguous)
+                report_queue_unavailable runtime-ambiguous \
+                    "(The intended host runs more than one runtime executable; refusing to choose one.)" ;;
+            missing)
+                report_queue_unavailable runtime-missing \
+                    "(No runtime app-server was proven under the intended host.)" ;;
+            *)
+                report_queue_unavailable host-policy-invalid \
+                    "(The host policy did not report the intended host's runtime.)" ;;
+        esac
+        echo "Queueing the pickup line for thread ${IPC_CID} with the intended host's runtime..."
+        QUEUE_OUTPUT=""
+        QUEUE_STDERR=""
+        if QUEUE_STDERR=$(mktemp); then
+            QUEUE_OUTPUT=$(node "${SCRIPT_DIR}/codex_ipc_queue.mjs" send \
+                --runtime "$HOST_RUNTIME_PATH" --thread "$IPC_CID" \
+                --message "read \"${OUTBOUND}\" and proceed" \
+                --cwd "$(to_win "$CHANNEL_DIR")" 2>"$QUEUE_STDERR") || true
+            if [[ -s "$QUEUE_STDERR" ]]; then
+                echo "QUEUE-WARNING: queue helper diagnostics were suppressed." >&2
+            fi
+            rm -f "$QUEUE_STDERR"
+        else
+            # Nothing ran: the helper is the only thing that starts the runtime.
+            report_queue_unavailable queue-helper-unavailable "(Could not allocate the helper diagnostics capture.)"
+        fi
+        # The helper's document is re-checked here: success needs the exact outcome, a UUID queue
+        # id and the target thread. Runtime stderr comes back as a few bounded, sanitized lines.
+        QUEUE_FIELDS=$(printf '%s' "$QUEUE_OUTPUT" | node --input-type=module -e '
+import fs from "node:fs";
+let value;
+try { value = JSON.parse(fs.readFileSync(0, "utf8")); } catch { process.exit(1); }
+const target = String(process.argv[1] || "").toLowerCase();
+const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const token = /^[a-z][a-z0-9-]{1,63}$/;
+if (value?.schemaVersion !== 1 || !["queued", "not-attempted", "unknown"].includes(value.outcome) ||
+    typeof value.reason !== "string" || !token.test(value.reason)) {
+  process.exit(1);
+}
+const queueId = typeof value.queueId === "string" && uuid.test(value.queueId) ? value.queueId : "-";
+const reported = typeof value.reportedThreadId === "string" && uuid.test(value.reportedThreadId)
+  ? value.reportedThreadId
+  : "-";
+if (value.outcome === "queued" &&
+    (value.reason !== "runtime-accepted" || queueId === "-" || reported !== target)) {
+  process.exit(1);
+}
+const exit = Number.isSafeInteger(value.exitCode) ? String(value.exitCode) : "-";
+const signal = typeof value.signal === "string" && /^SIG[A-Z0-9]+$/.test(value.signal) ? value.signal : "-";
+const lines = Array.isArray(value.runtimeStderr)
+  ? value.runtimeStderr.filter((line) => typeof line === "string").slice(0, 6)
+  : [];
+process.stdout.write([value.outcome, value.reason, queueId, reported, exit, signal].join("\t") + "\n");
+for (const line of lines) {
+  process.stdout.write(line.replace(/[\u0000-\u001f\u007f-\u009f]/gu, "").slice(0, 600) + "\n");
+}
+' "$IPC_CID") || QUEUE_FIELDS=""
+        if [[ -z "$QUEUE_FIELDS" ]]; then
+            # The helper may have started the runtime before failing, so this is not non-admission.
+            report_queue_unknown queue-helper-failure
+        fi
+        IFS=$'\t' read -r Q_OUTCOME Q_REASON Q_ID Q_THREAD Q_EXIT Q_SIGNAL <<< "$(printf '%s\n' "$QUEUE_FIELDS" | sed -n '1p')"
+        Q_RUNTIME_STDERR="$(printf '%s\n' "$QUEUE_FIELDS" | sed -n '2,$p')"
+        case "$Q_OUTCOME" in
+            queued)
+                QUEUE_ID="$Q_ID"
+                echo "[ Queued for thread ${IPC_CID} as queue item ${QUEUE_ID}. It starts when that thread is loaded and idle in the intended host. ]"
+                print_reply_route
+                echo "(Queue confirmation means the runtime stored the pickup line; it does not confirm that a" >&2
+                echo " turn started or finished. A busy thread runs it after its current turn; a thread that is" >&2
+                echo " not loaded, or whose last turn was interrupted, keeps it queued until it is opened.)" >&2
+                if [[ -z "$INSPECT_ROLLOUT_PATH" ]]; then
+                    echo "ROLLOUT-PATH: Supply the inspector's database-designated page with --rollout-path <path>." >&2
+                fi
+                print_wait_hint
+                echo "RESULT: queued -- reason=runtime-accepted -- confirmation=pending -- queueId=${QUEUE_ID}"
+                exit 0
+                ;;
+            not-attempted)
+                report_queue_unavailable "$Q_REASON" "(The runtime did not run; nothing was queued.)"
+                ;;
+            unknown)
+                echo "QUEUE: the runtime ran (exit ${Q_EXIT}, signal ${Q_SIGNAL}); its outcome is not the exact success line." >&2
+                if [[ "$Q_REASON" == "queue-thread-mismatch" ]]; then
+                    echo "QUEUE: the runtime reported queue item ${Q_ID} for thread ${Q_THREAD}, not ${IPC_CID}." >&2
+                    echo "       If that is wrong, remove the item from that thread's queue in the App." >&2
+                fi
+                if [[ -n "$Q_RUNTIME_STDERR" ]]; then
+                    echo "Runtime diagnostics (bounded):" >&2
+                    printf '%s\n' "$Q_RUNTIME_STDERR" | sed 's/^/  | /' >&2
+                fi
+                report_queue_unknown "$Q_REASON"
+                ;;
+            *)
+                report_queue_unknown queue-helper-failure
+                ;;
+        esac
+    fi
     echo "Injecting pickup line into live Desktop thread ${IPC_CID} via IPC router..."
     if send_live; then
         if ! authoritative_success; then

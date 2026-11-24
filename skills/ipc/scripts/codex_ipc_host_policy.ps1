@@ -671,6 +671,17 @@ function Resolve-CodexIpcInventory {
             $runtimeByGuiId[$guiKey] = ''
         } else { $runtimeByGuiId[$guiKey] = $path }
     }
+    # Each GUI anchor's proven runtime, as recorded above: one app-server executable launched by the
+    # anchor or by its NodeService utility child. Two different executables leave it ambiguous.
+    $guiRuntimes = @()
+    foreach ($guiKey in @($runtimeByGuiId.Keys | Sort-Object { [long]$_ })) {
+        $runtimePath = [string]$runtimeByGuiId[$guiKey]
+        $guiRuntimes += [pscustomobject][ordered]@{
+            guiPid = [long]$guiKey
+            status = if ([string]::IsNullOrEmpty($runtimePath)) { 'ambiguous' } else { 'resolved' }
+            executable = if ([string]::IsNullOrEmpty($runtimePath)) { $null } else { $runtimePath }
+        }
+    }
 
     $guiHosts = @()
     $appServers = @()
@@ -741,7 +752,36 @@ function Resolve-CodexIpcInventory {
         packageRoots = @($RawInventory.packageRoots)
         guiHosts = @($guiHosts)
         appServers = @($appServers)
+        guiRuntimes = @($guiRuntimes)
     }
+}
+
+# The runtime that serves the one intended GUI host: the executable of the app-server proven above
+# (launched by the GUI or by its NodeService utility child). Delivery that runs the runtime itself
+# (--deliver queue) uses exactly this file, never a codex found on PATH, so the App's own build is
+# the only one that touches its state databases. Without exactly one intended GUI the runtime is
+# not evaluated; no proven app-server is 'missing'; two different executables are 'ambiguous'.
+function Get-CodexIpcIntendedRuntime {
+    param([object]$Inventory)
+
+    $status = 'resolved'
+    $executable = $null
+    $intended = @($Inventory.guiHosts | Where-Object { $_.matchesIntended })
+    $entries = @()
+    if ($intended.Count -eq 1) {
+        $entries = @($Inventory.guiRuntimes | Where-Object { [long]$_.guiPid -eq [long]$intended[0].pid })
+    }
+    if ($intended.Count -ne 1) {
+        $status = 'not-evaluated'
+    } elseif ($entries.Count -eq 0) {
+        $status = 'missing'
+    } elseif ($entries.Count -ne 1 -or $entries[0].status -ne 'resolved' -or
+        [string]::IsNullOrWhiteSpace([string]$entries[0].executable)) {
+        $status = 'ambiguous'
+    } else {
+        $executable = [string]$entries[0].executable
+    }
+    return [pscustomobject][ordered]@{ status = $status; executable = $executable }
 }
 
 # Codex Desktop builds from 26.1117 serve no IPC router: no process of that build listens on
@@ -1170,6 +1210,7 @@ function Invoke-CodexIpcHostPolicyCli {
     $activationReasons = @()
     $intendedHostVersion = $null
     $routerExpected = $null
+    $intendedRuntime = $null
     if ($purpose -eq 'send' -or $purpose -eq 'activation') {
         $rawInventory = if ($mockInventoryPresent) {
             ConvertFrom-CodexIpcMockInventory -Json $mockInventoryJson
@@ -1187,6 +1228,7 @@ function Invoke-CodexIpcHostPolicyCli {
             $intendedHostVersion = Get-CodexIpcHostVersion -Executable $intendedEntries[0].executable
             $routerExpected = Test-CodexIpcRouterExpected -Version $intendedHostVersion
         }
+        $intendedRuntime = Get-CodexIpcIntendedRuntime -Inventory $inventory
         if ($purpose -eq 'send') {
             $activationEligible = $false
             $activationReasons = @('activation-not-evaluated')
@@ -1228,6 +1270,7 @@ function Invoke-CodexIpcHostPolicyCli {
         activationReasons = @($activationReasons)
         intendedHostVersion = $intendedHostVersion
         routerExpected = $routerExpected
+        intendedRuntime = $intendedRuntime
         limitations = @('inventory-does-not-prove-thread-ownership')
     }
 }

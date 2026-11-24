@@ -32,6 +32,18 @@ Desktop update, silently. Revalidate experimental features with
 | Touches live Desktop state | No. It writes the transport envelope, reads target state, and prints operator pickup plus WAIT instructions |
 | Result contract | Safe preparation exits 0 with no live `RESULT:`; unsafe state retains the envelope and prints no actionable pickup |
 
+## Runtime queue handoff (`--ipc <uuid> --deliver queue`)
+
+| | |
+|---|---|
+| Supported OS | Windows (Git Bash/MSYS) with a running Codex Desktop host whose runtime has the `codex queue` command (proven on 26.1117.31558) |
+| Dependencies | Manual-handoff dependencies plus `powershell.exe` for the shared host policy; the intended host's own runtime `codex.exe`, which the policy proves from the app-server under the intended GUI. `codex` on PATH is never used |
+| Stability | **New.** Hermetic tests use a fake runtime; the real runtime's success sentence and the queue service's start timing are proven by live acceptance only |
+| Touches live Desktop state | Yes: one item in the target thread's durable queue (`queue_1.sqlite`), written by the App's own runtime. No pipe contact, no activation, no navigation |
+| Result contract | `queued -- reason=runtime-accepted -- confirmation=pending -- queueId=<uuid>` plus `WAIT:`; `queue-unavailable -- confirmation=not-attempted` plus pickup when the runtime never ran; `failed-closed -- confirmation=unknown` with no pickup after it ran without the exact success line |
+| Limits | Never steers: a busy thread runs the item after its current turn; an unloaded thread or one whose last turn was interrupted keeps it until the thread is opened. The turn is attributed to the user (`turn_trigger: "queue"`) |
+| Fallback | `--deliver manual` and a pasted pickup line |
+
 ## Reply viewer (`codex_ipc_replies.sh`)
 
 | | |
@@ -140,9 +152,11 @@ The provenance and live observations below are dated records. The retained `Live
 
 ## Removed in v0.1.8: `--app` / `--open` / `--exec`
 
-The CLI-backed modes were removed in v0.1.8 ("No Codex CLI"). The wrapper no longer invokes the
-`codex` binary on any path. Use the default file-drop handoff, or `--ipc <conversationId>` for live
-Desktop delivery; there is no headless execution path in this tool.
+The CLI-backed modes were removed in v0.1.8 ("No Codex CLI"). The wrapper never invokes a `codex`
+found on PATH; the only Codex binary it starts is the intended host's own runtime, for the single
+`queue` command of `--deliver queue`. Use the default file-drop handoff, or
+`--ipc <conversationId>` for thread-bound Desktop delivery; there is no headless execution path in
+this tool.
 
 ## Validation tooling (`codex_ipc_revalidate.mjs`, `codex_ipc_write_proof.mjs`, `codex_ipc_contract_audit.mjs`)
 

@@ -24,6 +24,7 @@ const REQUIRED_FILES = [
   "scripts/codex_ipc_client.mjs",
   "scripts/codex_ipc_owner_probe.mjs",
   "scripts/codex_ipc_probe.mjs",
+  "scripts/codex_ipc_queue.mjs",
   "scripts/codex_ipc_autoload.ps1",
   "scripts/codex_ipc_host_policy.ps1",
   "scripts/codex_ipc_revalidate.mjs",
@@ -575,9 +576,11 @@ function main() {
     ]),
     check("REQ-017", "No Codex CLI: legacy CLI-backed modes fail before transport access or child launch.", [
       {
-        label: "SKILL.md states the no-CLI wrapper contract",
+        label: "SKILL.md states the no-CLI wrapper contract and its one runtime exception",
         file: "SKILL.md",
-        ok: contains("SKILL.md", "The IPC tooling does not invoke the Codex CLI"),
+        ok:
+          contains("SKILL.md", "The IPC tooling does not invoke the Codex CLI from PATH.") &&
+          contains("SKILL.md", "Only `--deliver queue` starts a Codex binary"),
       },
       {
         label: "all removed modes have stable errors before transport initialization",
@@ -1234,6 +1237,78 @@ function main() {
           contains("references/troubleshooting.md", "Retry creates another rollout page"),
       },
     ], "Static installed-skill evidence only. Aliases are path inputs, not compatibility or authority claims; hermetic component tests prove precedence and validation."),
+    check("REQ-027", "Runtime queue delivery runs only the intended host's proven runtime, once, and never claims non-admission after it ran.", [
+      {
+        label: "host policy reports a runtime only from the app-server it proved under the one intended GUI",
+        file: "scripts/codex_ipc_host_policy.ps1",
+        ok:
+          contains("scripts/codex_ipc_host_policy.ps1", "function Get-CodexIpcIntendedRuntime") &&
+          contains("scripts/codex_ipc_host_policy.ps1", "guiRuntimes = @($guiRuntimes)") &&
+          contains("scripts/codex_ipc_host_policy.ps1", "intendedRuntime = $intendedRuntime") &&
+          contains("scripts/codex_ipc_host_policy.ps1", "foreach ($guiKey in @($runtimeByGuiId.Keys"),
+      },
+      {
+        label: "the helper launches exactly queue --thread --message from an absolute runtime file, with a timeout and no shell",
+        file: "scripts/codex_ipc_queue.mjs",
+        ok:
+          contains("scripts/codex_ipc_queue.mjs",
+            'spawn(runtime, ["queue", "--thread", threadId.toLowerCase(), "--message", message], {') &&
+          contains("scripts/codex_ipc_queue.mjs", "!path.isAbsolute(runtime) || !regularFile(runtime)") &&
+          contains("scripts/codex_ipc_queue.mjs", "timeout: timeoutMs,") &&
+          !contains("scripts/codex_ipc_queue.mjs", /shell:\s*true/) &&
+          !contains("scripts/codex_ipc_queue.mjs", /"--(?:resume|remote|config)"|"-c"/),
+      },
+      {
+        label: "only a launch with no process is not-attempted; every outcome after the runtime ran is unknown unless exact",
+        file: "scripts/codex_ipc_queue.mjs",
+        ok:
+          contains("scripts/codex_ipc_queue.mjs", "if (child.error && !child.pid) {") &&
+          contains("scripts/codex_ipc_queue.mjs", 'return result("unknown", "queue-timeout"') &&
+          contains("scripts/codex_ipc_queue.mjs", 'return result("unknown", "queue-runtime-failed"') &&
+          contains("scripts/codex_ipc_queue.mjs", 'return result("unknown", "queue-output-unrecognized"') &&
+          contains("scripts/codex_ipc_queue.mjs", 'return result("unknown", "queue-thread-mismatch"') &&
+          contains("scripts/codex_ipc_queue.mjs", "if (body.length === 0 || /[\\r\\n]/u.test(body)) return null;"),
+      },
+      {
+        label: "the wrapper's queue route follows the target gate, keeps the shared send gate, expects a routerless host, and suppresses pickup after the runtime ran",
+        file: "scripts/handoff_to_codex.sh",
+        ok:
+          handoffText.indexOf('echo "MANUAL: thread-bound envelope is ready for operator pickup."') > 0 &&
+          handoffText.indexOf('if [[ "$DELIVERY" == "queue" ]]; then\n        report_queue_unavailable()') >
+            handoffText.indexOf('echo "MANUAL: thread-bound envelope is ready for operator pickup."') &&
+          contains("scripts/handoff_to_codex.sh", "if ! host_policy_send queue; then") &&
+          contains("scripts/handoff_to_codex.sh", 'if [[ "$route" != "queue" && "$router_expected" == "false" ]]; then') &&
+          contains("scripts/handoff_to_codex.sh", 'echo "RESULT: queue-unavailable -- reason=$1 -- confirmation=not-attempted" >&2') &&
+          contains("scripts/handoff_to_codex.sh", 'echo "RESULT: failed-closed -- reason=$1 -- confirmation=unknown" >&2') &&
+          contains("scripts/handoff_to_codex.sh", 'echo "RESULT: queued -- reason=runtime-accepted -- confirmation=pending -- queueId=${QUEUE_ID}"') &&
+          (() => {
+            // After the runtime ran: the ambiguity notice, never the pickup line.
+            const body = handoffText.match(/report_queue_unknown\(\) \{\n([\s\S]*?)\n        \}\n/)?.[1] || "";
+            return body.includes("fallback_ambiguous") && body.includes("exit 1") &&
+              !/^\s*fallback\s*$/m.test(body);
+          })(),
+      },
+      {
+        label: "the waiter's queue check is opt-in and lazily loads the read-only store reader, so the waiter stays free of node:sqlite",
+        file: "scripts/codex_ipc_wait.mjs",
+        ok:
+          contains("scripts/codex_ipc_wait.mjs", 'await import(new URL("./codex_ipc_queue.mjs", import.meta.url))') &&
+          contains("scripts/codex_ipc_wait.mjs", "if (!options.queueItemId) return null;") &&
+          contains("scripts/codex_ipc_wait.mjs", "if (queueCheck) await queueCheck(records);") &&
+          matchCount("scripts/codex_ipc_wait.mjs", /node:sqlite/g) === 0 &&
+          contains("scripts/codex_ipc_queue.mjs", "new DatabaseSync(dbPath, { readOnly: true })"),
+      },
+      {
+        label: "SKILL.md documents queue delivery, its limits, the version-skew rule and the manual fallback",
+        file: "SKILL.md",
+        ok:
+          contains("SKILL.md", "--deliver queue") &&
+          contains("SKILL.md", "It never steers") &&
+          contains("SKILL.md", "Version-skew rule") &&
+          contains("SKILL.md", "`queued-not-started`") &&
+          contains("SKILL.md", "RESULT: queued -- reason=runtime-accepted -- confirmation=pending -- queueId=<uuid>"),
+      },
+    ], "Static evidence backed by hermetic tests with a fake runtime and fixture queue stores. The live queue service's start timing and the real runtime's success sentence are proven only by live acceptance on a scratch thread."),
   ];
 
   const ok = Object.values(files).every((item) => item.ok) &&

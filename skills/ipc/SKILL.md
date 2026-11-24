@@ -66,11 +66,13 @@ cwd, recency, or project name.
 
 ## Workspace-scoped handoff artifacts
 
-The IPC tooling does not invoke the Codex CLI. As of v0.1.8 the `--app`, `--open` and `--exec`
-modes are removed: they fail with a stable error before any transport access or child launch.
-Delivery is the file-drop default, thread-bound manual pickup with
-`--ipc <uuid> --deliver manual`, or live `--ipc` injection into a Desktop GUI thread. None shells
-out to a `codex` binary.
+The IPC tooling does not invoke the Codex CLI from PATH. As of v0.1.8 the `--app`, `--open` and
+`--exec` modes are removed: they fail with a stable error before any transport access or child
+launch. Delivery is the file-drop default, thread-bound manual pickup with
+`--ipc <uuid> --deliver manual`, runtime queue delivery with `--ipc <uuid> --deliver queue`, or live
+`--ipc` injection into a Desktop GUI thread. Only `--deliver queue` starts a Codex binary: the
+intended Desktop host's own runtime executable, proven by the shared host policy, running
+`queue --thread <uuid> --message <pickup line>` once. No route looks up `codex` on PATH.
 
 The IPC transport envelope (the `.task.md`/`.reply.md` pair) is deliberately machine-local under
 `${CODEX_IPC_ROOT:-~/.claude/ipc}` — that is the ONE exception to the rule below. Envelopes and
@@ -95,7 +97,8 @@ constraints, and context — so the handoff is self-contained and needs no follo
 
 Before using existing-session `/ipc`, run the read-only inspector to preview the target. The
 wrapper independently runs that inspector exactly once after publishing the thread-bound envelope.
-Manual delivery exits after that snapshot; live delivery reuses it across any guarded auto-load
+Manual delivery exits after that snapshot; queue delivery runs the shared host policy once before
+its single runtime run; live delivery reuses the snapshot across any guarded auto-load
 recovery; the shared host policy still runs fresh immediately before every send or retry. Selecting
 `--ipc <uuid>` with the default delivery or explicit `--deliver live` is itself the live-delivery
 acknowledgement; `--deliver manual` makes no live attempt. The wrapper supplies the client's
@@ -253,6 +256,60 @@ or `RESULT:` line. Explicit live-only `--autoload`, `--intended-host`, `--foregr
 `--ack-foreground-switch` flags are refused with `--deliver manual`; ambient live settings are
 irrelevant because no live path is entered.
 
+### Runtime queue delivery (`--deliver queue`)
+
+On Codex Desktop 26.1117 and later, which serve no IPC router, this is the recommended
+thread-bound path. Nobody pastes the pickup line:
+
+```bash
+"${CLAUDE_SKILL_DIR}/scripts/handoff_to_codex.sh" --ipc <conversationId> --deliver queue -- "<task>"
+```
+
+The wrapper writes the same envelope and runs the same target inspection as the other routes:
+missing, archived, non-root, empty-model and ambiguous targets refuse with
+`confirmation=not-attempted` and no pickup. It then runs the shared host policy's send gate
+(a complete inventory, exactly one intended GUI host, no other Desktop host) and queues the pickup
+line in the thread's durable runtime queue with
+`<runtime> queue --thread <uuid> --message <pickup line>`, once, with a timeout
+(`CODEX_IPC_QUEUE_TIMEOUT_MS`, default 30000). The App's queue service
+starts the item as an ordinary user turn (`turn_trigger: "queue"`) once the thread is loaded and
+idle. `--intended-host`, `--reply-mode` and `--request-goal` apply; `--autoload`,
+`--foreground-policy` and `--ack-foreground-switch` are refused before the envelope is written.
+
+Version-skew rule: only the intended host's own runtime may run the queue command, because a
+different build could migrate the state databases under the running App. The host policy reports
+it as `intendedRuntime`: the app-server executable it proved under the one intended GUI, launched by
+the GUI itself or by its `node.mojom.NodeService` utility child. A missing or ambiguous runtime
+refuses; `codex` on PATH is never used, and the runtime path is never printed. Preflight also
+refuses a `CODEX_HOME` other than the inspected home (`codex-home-mismatch`) and a Codex home
+without `queue_1.sqlite` (`queue-store-absent`), since the runtime would otherwise write where the
+inspection never looked, or create a store.
+
+Results, one per run:
+
+- `RESULT: queued -- reason=runtime-accepted -- confirmation=pending -- queueId=<uuid>` (exit 0).
+  The runtime printed exactly `Queued message <uuid> for thread <target>.`. The usual `WAIT:` line
+  follows, with `--queue-id <uuid>` added. `pending` means stored, not started.
+- `RESULT: queue-unavailable -- reason=<token> -- confirmation=not-attempted` (exit 1). The runtime
+  never ran: a host-policy refusal, `runtime-missing`, `runtime-ambiguous`,
+  `runtime-launch-failed` (no process started), `queue-store-absent` or `codex-home-mismatch`. The
+  manual pickup line is printed as the fallback.
+- `RESULT: failed-closed -- reason=<token> -- confirmation=unknown` (exit 1), with
+  `queue-runtime-failed`, `queue-timeout`, `queue-output-unrecognized`, `queue-thread-mismatch` or
+  `queue-helper-failure`. The runtime ran (or may have) and its exact success line did not follow,
+  so the item may already be queued and would start by itself. Pickup and `WAIT:` are suppressed,
+  resending is forbidden, and bounded runtime diagnostics are shown; run the waiter for that
+  dispatch to learn whether it ran.
+
+It never steers: a busy thread runs the item after its current turn. A thread that is not loaded
+(for example after an App restart, before it is opened) or whose last turn was interrupted keeps
+the item queued until the thread is opened in the App, and the operator can remove a queued item
+there. The App shows the turn as a normal user message. With `--queue-id`, the waiter reads the
+queue store read-only and prints one non-terminal `queued-not-started` diagnostic as soon as the
+item has been queued for 30 s with no turn carrying the dispatch; the token and exit code are
+unchanged. The queue id travels only in the `RESULT:` and `WAIT:` lines, because the envelope is
+create-once. Fallback: `--deliver manual`, then paste the printed pickup line.
+
 On Windows PowerShell, run the `.sh` wrapper through Git Bash.
 
 Goal setup is off by default. Add `--request-goal` before the task only when the operator
@@ -338,7 +395,9 @@ prove future admission, completion, or reply writability.
 Every live `--ipc` send reports exactly one machine-parseable result:
 `RESULT: gui-delivered|gui-unowned|failed-closed -- reason=<token> -- confirmation=<token>`.
 Successful manual preparation reports no `RESULT:` because it certifies neither admission nor
-completion; use its printed pickup and `WAIT:` lines.
+completion; use its printed pickup and `WAIT:` lines. `--deliver queue` reports
+`RESULT: queued|queue-unavailable|failed-closed -- reason=<token> -- confirmation=<token>`, and a
+success appends `-- queueId=<uuid>` (see Runtime queue delivery).
 After router acceptance, confirmation is:
 
 - `rollout-hit`: the exact dispatch task basename was observed in a rollout user message. This
@@ -370,8 +429,8 @@ When the host policy proves the intended host is a 26.1117+ build (its own `owl-
 `AppVersion`, else its Store package version), the wrapper refuses before the client runs, with
 zero pipe contact, because any server of that name on such a host is not the Desktop's. For a
 host of unknown version the client still finds no pipe and sends nothing; any other
-connect-phase failure reports `reason=router-unreachable` the same way. On those builds use `--deliver manual` and paste the
-pickup line.
+connect-phase failure reports `reason=router-unreachable` the same way. On those builds use
+`--deliver queue`; `--deliver manual` with a pasted pickup line remains the fallback.
 
 When the target is unowned and Codex itself is the operator's foreground window, a **foreground
 policy** applies (default `defer` — never navigate the visible app). Canonical grammar:
@@ -513,13 +572,14 @@ Local path aliases are intentionally component-scoped:
 | Component | Existing option / supported alias | Precedence |
 |---|---|---|
 | Inspector | `--sessions-root` / `CODEX_IPC_SESSIONS_ROOT` | Flag, nonempty environment, existing home default |
-| Waiter | `--rollout-path` / `CODEX_IPC_ROLLOUT_PATH`; `--sessions-root` / `CODEX_IPC_SESSIONS_ROOT` | Flag, nonempty environment, existing default/discovery |
+| Waiter | `--rollout-path` / `CODEX_IPC_ROLLOUT_PATH`; `--sessions-root` / `CODEX_IPC_SESSIONS_ROOT`; `--queue-db` / `CODEX_IPC_QUEUE_DB` (only with `--queue-id`) | Flag, nonempty environment, existing default/discovery |
 | Observer | `--rollout-path` / `CODEX_IPC_ROLLOUT_PATH`; `--sessions-root` / `CODEX_IPC_SESSIONS_ROOT` | Flag, nonempty environment, existing default/discovery |
 | Harvester | `--rollout-path` / `CODEX_IPC_ROLLOUT_PATH`; existing `CODEX_IPC_SESSIONS_ROOT` | Rollout flag wins; retained aliases do not add authority |
 
 The reply viewer has no independent path environment option, although its harvester child inherits
 the process environment; prefer the viewer's explicit page flags. `CODEX_HOME` is not a supported
-alias, and no configured path establishes page or owner authority.
+alias, and no configured path establishes page or owner authority. `--deliver queue` refuses a
+`CODEX_HOME` that names a home other than the inspected one.
 
 A bounded example (30-minute budget, opt-in rollout fallback):
 `node scripts/codex_ipc_wait.mjs --thread <uuid> --dispatch <dispatchId> --reply-path <path>
