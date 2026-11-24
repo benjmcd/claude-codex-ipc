@@ -33,6 +33,7 @@ const RUNTIME_NAMES = new Set(["codex.exe", "codex"]);
 const OUTPUT_LIMIT_BYTES = 1024 * 1024;
 const EXCERPT_BYTES = 600;
 const EXCERPT_LINES = 6;
+const REPLACEMENT_CHARACTER = String.fromCharCode(0xfffd);
 
 // The Codex home the inspector read (USERPROFILE, else HOME, plus .codex). The runtime writes the
 // queue under CODEX_HOME when that is set, so a different CODEX_HOME would send the item to a
@@ -73,7 +74,9 @@ export function excerpt(text) {
   for (const line of lines.slice(0, EXCERPT_LINES)) {
     const room = EXCERPT_BYTES - bytes;
     if (room <= 0) break;
-    const slice = Buffer.from(line, "utf8").subarray(0, room).toString("utf8").replace(/�$/u, "");
+    let slice = Buffer.from(line, "utf8").subarray(0, room).toString("utf8");
+    // A cut inside a multibyte character decodes to the replacement character; drop it.
+    while (slice.endsWith(REPLACEMENT_CHARACTER)) slice = slice.slice(0, -1);
     kept.push(slice);
     bytes += Buffer.byteLength(slice, "utf8");
   }

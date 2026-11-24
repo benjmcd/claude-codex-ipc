@@ -1221,6 +1221,9 @@ for (const bad of ["", "\n", `Queued message ${q} for thread ${t}`, `Queued mess
 assert.deepEqual(excerpt("\u001b[31mError:\u001b[0m bad\r\nline\u0007 two\n\n"), ["Error: bad", "line two"]);
 assert.equal(excerpt("x\n".repeat(20)).length, 6);
 assert.ok(Buffer.byteLength(excerpt("y".repeat(5000)).join("")) <= 600);
+const cut = excerpt("a" + "é".repeat(400))[0];
+assert.equal(Buffer.byteLength(cut), 599, "a cut never keeps half a character");
+assert.ok(!cut.endsWith(String.fromCharCode(0xfffd)));
 let spawned = false;
 const refused = sendToQueue({ runtime: "codex.exe", threadId: t, message: "m" },
   { env: {}, spawnSync: () => { spawned = true; } });
