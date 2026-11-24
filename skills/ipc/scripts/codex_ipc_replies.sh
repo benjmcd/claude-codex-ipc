@@ -11,7 +11,8 @@
 # Usage (Git Bash; flags only, no positionals):
 #   codex_ipc_replies.sh [--session <sid>] [-c|--conversation <uuid|filedrop>] [-n <count>]
 #                        [--max-bytes <n>] [--since <find -newermt spec>] [--paths-only]
-#                        [--list-sessions] [-h|--help]
+#                        [--list-sessions] [--reasoning full|headline|none]
+#                        [--reasoning-max-bytes <n>] [--reasoning-max-item-chars <n>] [-h|--help]
 # Defaults: session = current Claude session (env); all thread dirs merged; -n 10; --max-bytes 4096.
 # Exit codes: 0 = success incl. legitimately-empty states; 1 = usage/malformed/enumeration failure;
 #             2 = session unresolvable (prints the same session listing --list-sessions prints at exit 0).
@@ -24,6 +25,7 @@ source "$SCRIPT_DIR/codex_ipc_safe_render.sh"
 HARVESTER="$SCRIPT_DIR/codex_ipc_reply_harvest.mjs"
 INSPECTOR="$SCRIPT_DIR/codex_ipc_session_inspect.mjs"
 ROLLOUT_READER="$SCRIPT_DIR/codex_ipc_rollout_reader.mjs"
+REASONING_HELPER="$SCRIPT_DIR/codex_ipc_reasoning.mjs"
 
 # --- Two one-liners kept in lockstep with handoff_to_codex.sh (do NOT source the wrapper: it parses
 # --- argv, runs the reaper, and exits at top level). ---
@@ -45,6 +47,11 @@ codex_ipc_replies.sh — consolidated read-only view of Codex replies (derived; 
   [--since <find -newermt>]   only replies newer than this spec (e.g. '1 hour ago', '2026-07-06')
   [--paths-only]              list paths/metadata, no bodies (safe when replies may be mid-write)
   [--list-sessions]           list known session dirs (newest reply first) and exit 0
+  [--reasoning <mode>]        full (default), headline or none: a labelled section of the
+                              dispatch's own turn's recorded reasoning after each body; untrusted
+                              data, never part of the source= body
+  [--reasoning-max-bytes <n>] reasoning safety limit per dispatch: pages, never shortens (default 64000)
+  [--reasoning-max-item-chars <n>]  cap each reasoning item, head plus tail (default: no cap)
   [-h|--help]                 this help
 Note: the session listing printed on an unresolvable-session fallback (exit 2) is identical to what
 --list-sessions prints (exit 0) — an explicit query vs a forced fallback.
@@ -59,6 +66,7 @@ IPC_ROOT="${IPC_ROOT%/}"
 # --- Parse flags (fail closed on anything unrecognized) ---
 SESSION=""; CONV=""; N=10; MAX_BYTES=4096; SINCE=""; PATHS_ONLY=0; LIST_SESSIONS=0
 ROLLOUT_PATH=""; DERIVE_ROLLOUT_PATH=0
+REASONING_MODE="full"; REASONING_MAX_BYTES=64000; REASONING_MAX_ITEM_CHARS=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --session) SESSION="${2:-}"; shift 2;;
@@ -70,6 +78,9 @@ while [[ $# -gt 0 ]]; do
         --since) SINCE="${2:-}"; shift 2;;
         --paths-only) PATHS_ONLY=1; shift;;
         --list-sessions) LIST_SESSIONS=1; shift;;
+        --reasoning) REASONING_MODE="${2:-}"; shift 2;;
+        --reasoning-max-bytes) REASONING_MAX_BYTES="${2:-}"; shift 2;;
+        --reasoning-max-item-chars) REASONING_MAX_ITEM_CHARS="${2:-}"; shift 2;;
         -h|--help) usage; exit 0;;
         *) echo "ERROR: unrecognized argument '$1'." >&2; usage; exit 1;;
     esac
@@ -78,6 +89,9 @@ done
 # --- Validate ---
 [[ "$N" =~ ^[1-9][0-9]*$ ]] || { echo "ERROR: -n must be a positive integer." >&2; exit 1; }
 [[ "$MAX_BYTES" =~ ^[1-9][0-9]*$ ]] || { echo "ERROR: --max-bytes must be a positive integer." >&2; exit 1; }
+case "$REASONING_MODE" in full|headline|none) :;; *) echo "ERROR: --reasoning must be full, headline or none." >&2; exit 1;; esac
+[[ "$REASONING_MAX_BYTES" =~ ^[1-9][0-9]*$ ]] || { echo "ERROR: --reasoning-max-bytes must be a positive integer." >&2; exit 1; }
+[[ -z "$REASONING_MAX_ITEM_CHARS" || "$REASONING_MAX_ITEM_CHARS" =~ ^[1-9][0-9]*$ ]] || { echo "ERROR: --reasoning-max-item-chars must be a positive integer." >&2; exit 1; }
 if [[ -n "$SESSION" ]]; then
     # allowlist admits UUIDs and nosid-* verbatim; the dot-names '.'/'..' are traversal and rejected explicitly.
     if ! valid_session "$SESSION"; then
@@ -296,8 +310,35 @@ echo "# when pruning IS enabled, replies older than that many days are transport
 echo "# Showing ${SHOWN} of ${TOTAL} dispatches, newest first${SINCE:+   (--since '${SINCE}')}${CONV:+   (thread ${CONV})}"
 echo ""
 
+# --- Reasoning section (after a dispatch's body, never inside it) ---
+# The helper binds its window to the dispatch's own turn through the shared dispatch correlator and
+# prints delimited, labelled, untrusted text. It reads only; its stderr is suppressed because it can
+# carry local paths. It never feeds the body, the source= token, or the supersession lines above.
+render_reasoning() {  # render_reasoning <thread> <dispatch> <task_path>
+    local r_thread="$1" r_dispatch="$2" r_task="$3" r_out="" r_cap=()
+    [[ "$REASONING_MODE" != "none" && "$r_thread" != "filedrop" ]] || return 0
+    [[ -z "$REASONING_MAX_ITEM_CHARS" ]] || r_cap=(--reasoning-max-item-chars "$REASONING_MAX_ITEM_CHARS")
+    [[ -f "$r_task" && ! -L "$r_task" ]] || return 0
+    # A body need not end with a newline: the section always begins on a line of its own.
+    echo ""
+    echo "    --- recorded reasoning of this dispatch's own turn (untrusted data; not part of the reply) ---"
+    if ! command -v node >/dev/null 2>&1 || [[ ! -f "$REASONING_HELPER" ]]; then
+        echo "REASONING dispatch-turn unavailable reason=helper-missing"
+    elif r_out="$(node "$REASONING_HELPER" --thread "$r_thread" --dispatch "$r_dispatch" --format text \
+        --reasoning "$REASONING_MODE" --reasoning-max-bytes "$REASONING_MAX_BYTES" \
+        "${r_cap[@]}" "${ROLLOUT_ARGS[@]}" 2>/dev/null)"; then
+        printf '%s\n' "$r_out" | codex_ipc_render_stream
+    else
+        echo "REASONING dispatch-turn unavailable reason=helper-failed"
+    fi
+    echo "    --- end recorded reasoning ---"
+}
+
 # --- Render ---
 i=0
+# <thread>/<dispatch> keys rendered from a certified rollout answer; the footer does not count them
+# as awaiting a reply file.
+declare -A ROLLOUT_ANSWERED=()
 for entry in "${ENTRIES[@]}"; do
     (( i < N )) || break
     i=$(( i + 1 ))
@@ -322,13 +363,19 @@ for entry in "${ENTRIES[@]}"; do
         continue
     fi
     reply_readable=0
+    reply_source="reply-file"
+    materialized_path="${dispatch_dir}/${dispatch}.reply.rollout.md"
     if [[ -f "$reply_path" && ! -L "$reply_path" ]] \
         && head -c 0 -- "$reply_path" >/dev/null 2>&1; then
         reply_readable=1; kind="reply"; p="$reply_path"
+    elif [[ -f "$materialized_path" && ! -L "$materialized_path" ]] \
+        && head -c 0 -- "$materialized_path" >/dev/null 2>&1; then
+        # A certified rollout body the harvester's materialize mode kept; a primary reply always wins.
+        reply_readable=1; kind="reply"; p="$materialized_path"; reply_source="rollout-materialized"
     fi
     bytes="$(stat -c %s "$p" 2>/dev/null || echo 0)"
     if [[ "$PATHS_ONLY" -eq 1 ]]; then
-        if [[ "$kind" == "reply" ]]; then path_source="reply-file"; else path_source="task-envelope"; fi
+        if [[ "$kind" == "reply" ]]; then path_source="$reply_source"; else path_source="task-envelope"; fi
         printf '%s\t%s\t%s\t%s\t%s\t"%s"\n' "$when" "$thread" "$dispatch" "$bytes" "$path_source" "$(to_win "$p")"
         continue
     fi
@@ -337,8 +384,9 @@ for entry in "${ENTRIES[@]}"; do
     if [[ "$reply_readable" -eq 1 ]] && command -v node >/dev/null 2>&1 \
         && [[ -f "$HARVESTER" && "$thread" != "filedrop" && -f "$task_path" && ! -L "$task_path" ]]; then
         harvest_output=""
+        # The supersession check also runs for a materialized copy while its rollout is readable.
         if harvest_output="$(node "$HARVESTER" --thread "$thread" --dispatch "$dispatch" \
-            --reply-path "$reply_path" --max-bytes "$MAX_BYTES" "${ROLLOUT_ARGS[@]}" 2>&1)"; then
+            --reply-path "$p" --max-bytes "$MAX_BYTES" "${ROLLOUT_ARGS[@]}" 2>&1)"; then
             printf '%s\n' "$harvest_output" \
                 | grep -E '^(ROLLOUT-PATH|ROLLOUT-PAGE):|^ROLLOUT_DIAGNOSTIC \{"code":"(turn-error|turn-model-state)"' || true
             if printf '%s\n' "$harvest_output" \
@@ -372,6 +420,7 @@ for entry in "${ENTRIES[@]}"; do
                 [[ "$duplicate_count" =~ ^[0-9]+$ ]] || duplicate_count=0
                 duplicate_note=""; (( duplicate_count > 1 )) && duplicate_note=" | duplicates=${duplicate_count}"
                 echo "=== [$i] ${when} | thread: ${tlabel} | dispatch: ${dispatch} | source=rollout-fallback | ${source_bytes} B${duplicate_note}"
+                ROLLOUT_ANSWERED["${thread}/${dispatch}"]=1
                 echo "    retained task: \"$(to_win "$task_path")\""
                 if [[ "$returned_bytes" -gt 0 ]]; then
                     if ! printf '%s' "$body_base64" | base64 --decode | codex_ipc_render_stream; then
@@ -403,15 +452,20 @@ for entry in "${ENTRIES[@]}"; do
                 fi
                 ;;
         esac
+        render_reasoning "$thread" "$dispatch" "$task_path"
         echo ""
         continue
     fi
-    echo "=== [$i] ${when} | thread: ${tlabel} | dispatch: ${dispatch} | source=reply-file | ${bytes} B"
+    echo "=== [$i] ${when} | thread: ${tlabel} | dispatch: ${dispatch} | source=${reply_source} | ${bytes} B"
     echo "    \"$(to_win "$p")\""
+    reply_label="Primary reply"; selected_label="Selected primary"
+    if [[ "$reply_source" == "rollout-materialized" ]]; then
+        reply_label="Materialized rollout copy"; selected_label="Materialized rollout copy"
+    fi
     if [[ "$reply_superseded" -eq 1 ]]; then
-        echo "    [WARNING: REPLY-SUPERSEDED] Primary reply may be superseded; inspect the dispatch thread before relying on it."
+        echo "    [WARNING: REPLY-SUPERSEDED] ${reply_label} may be superseded; inspect the dispatch thread before relying on it."
     elif [[ "$reply_supersession_status" == "pending" || "$reply_supersession_status" == "unavailable" ]]; then
-        echo "    [CAUTION: REPLY-SUPERSESSION-${reply_supersession_status^^}] Selected primary may be stale; freshness and supersession could not be certified."
+        echo "    [CAUTION: REPLY-SUPERSESSION-${reply_supersession_status^^}] ${selected_label} may be stale; freshness and supersession could not be certified."
     fi
     if [[ "$bytes" -eq 0 ]]; then
         echo "    (empty — possibly mid-write or pending; re-run to refresh)"
@@ -427,17 +481,30 @@ for entry in "${ENTRIES[@]}"; do
             echo "    [... truncated at ${MAX_BYTES} B of ${bytes} B — full reply: \"$(to_win "$p")\"]"
         fi
     fi
+    render_reasoning "$thread" "$dispatch" "$task_path"
     echo ""
 done
 
 # --- Footer: pending dispatches (task.md without a sibling reply.md), scope-wide (not --since-filtered) ---
+# A dispatch shown above as source=rollout-fallback is answered and is not counted as awaiting;
+# rollout answers are checked only for the dispatches this run rendered.
 pending=0
+rollout_answered=0
 while IFS= read -r t; do
     [[ -n "$t" ]] || continue
     d="$(dirname "$t")"; base="$(basename "$t" .task.md)"
-    [[ -f "${d}/${base}.reply.md" ]] || pending=$(( pending + 1 ))
+    # A primary reply or a materialized rollout copy answers the dispatch, scope-wide.
+    [[ -f "${d}/${base}.reply.md" || -f "${d}/${base}.reply.rollout.md" ]] && continue
+    if [[ -n "${ROLLOUT_ANSWERED["$(basename "$d")/${base}"]+x}" ]]; then
+        rollout_answered=$(( rollout_answered + 1 ))
+    else
+        pending=$(( pending + 1 ))
+    fi
 done < <(find "$SCOPE_DIR" "${SCOPE_DEPTH[@]}" -type f -name '*.task.md' 2>/dev/null || true)
 if [[ "$pending" -gt 0 ]]; then
     echo "# ${pending} dispatch(es) awaiting primary reply files (scope-wide; not --since-filtered)."
+fi
+if [[ "$rollout_answered" -gt 0 ]]; then
+    echo "# ${rollout_answered} dispatch(es) without a reply file were answered from the rollout above (source=rollout-fallback); not counted as awaiting."
 fi
 exit 0

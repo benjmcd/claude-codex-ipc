@@ -2196,6 +2196,14 @@ echo "== 24. O3/AC1: the DEFAULT emit is byte-identical to ${PRE_O3_REF:0:7} at 
 # changing any historical value: targetClassification; incomingSpawnEdges; the source/provider/
 # agent fields; and ownerSessionMeta. The current side removes exactly those enumerated additions
 # before comparison. No pre-existing field is normalized or removed.
+#
+# DELIBERATE PIN CHANGE (reasoning visibility, Phase 1): the default emit gained ONE additive field,
+# rollout.primary.reasoning (thread-activity/1), on by default by operator decision ("full thinking
+# by default"). It is appended after every historical key of primary and is computed from records
+# the parse already reads; no historical field, key order or value changes, and recentItems are
+# untouched. Two legs keep that claim falsifiable: the "current" leg removes exactly that one new
+# key (beside the enumerated A2 additions), and the "current-none" leg runs --reasoning none, which
+# must OMIT the key, and compares with nothing reasoning-related removed at all.
 O3_NORMALIZER="$TMP/o3-normalize.mjs"
 cat > "$O3_NORMALIZER" <<'EOF'
 import fs from "node:fs";
@@ -2211,6 +2219,25 @@ if (mode === "current") {
     delete value.dbThread?.thread?.[key];
   }
   delete value.rollout?.primary?.ownerSessionMeta;
+  // Reasoning visibility (deliberate, additive; see the scenario-24 header): present by default.
+  if (value.rollout?.primary && !Object.hasOwn(value.rollout.primary, "reasoning")) {
+    throw new Error("default emit lost rollout.primary.reasoning");
+  }
+  if (value.rollout?.primary && Object.keys(value.rollout.primary).at(-1) !== "reasoning") {
+    throw new Error("rollout.primary.reasoning is not appended after every historical key");
+  }
+  delete value.rollout?.primary?.reasoning;
+} else if (mode === "current-none") {
+  delete value.rollout?.sessionsRoot;
+  delete value.targetClassification;
+  delete value.dbThread?.incomingSpawnEdges;
+  for (const key of ["source", "modelProvider", "agentNickname", "agentRole", "agentPath"]) {
+    delete value.dbThread?.thread?.[key];
+  }
+  delete value.rollout?.primary?.ownerSessionMeta;
+  if (value.rollout?.primary && Object.hasOwn(value.rollout.primary, "reasoning")) {
+    throw new Error("--reasoning none must omit rollout.primary.reasoning");
+  }
 } else if (mode !== "historical") {
   throw new Error(`unknown normalization mode: ${mode}`);
 }
@@ -2239,6 +2266,13 @@ if [[ -n "$PRE_O3" ]]; then
         AC1_DIFFS=$((AC1_DIFFS+1))
         echo "    default output drifted: fixture=$fixture --tail-events $window"
         diff "$TMP/ac1-old.n" "$TMP/ac1-new.n" | head -6 | sed 's/^/      /'
+      fi
+      run_o3 "$TMP/ac1-none" "$INSPECT" "$O3/$fixture/state.sqlite" "$O3/$fixture/sessions" --tail-events "$window" --reasoning none
+      AC1_PAIRS=$((AC1_PAIRS+1))
+      if ! "$NODE_BIN" "$O3_NORMALIZER" current-none "$TMP/ac1-none" "$TMP/ac1-none.n" \
+         || ! cmp -s "$TMP/ac1-old.n" "$TMP/ac1-none.n"; then
+        AC1_DIFFS=$((AC1_DIFFS+1))
+        echo "    --reasoning none output drifted: fixture=$fixture --tail-events $window"
       fi
     done
   done
@@ -2489,6 +2523,46 @@ fi
 [[ $AC7_OK -eq 1 ]] \
   && ok "summary output parses whole, stays within its bar, is documented, and the preflight fence adopts it" \
   || no "an AC7 conjunct failed"
+echo "== 31. archived (zstd) pages are never sources and never make a sessions-root scan ambiguous =="
+# With no DB-designated page, the inspector selects from its own sessions-root scan. Archived
+# pages are skipped by name, as in the reader's discovery; a `.zst` name the archive grammar
+# rejects still marks the candidate set unresolved.
+ARCH_THREAD="11111111-1111-4111-8111-111111111111"
+ARCH_ROOT="$TMP/archived-sessions"
+mkdir -p "$ARCH_ROOT/2026/10/20" "$ARCH_ROOT/2026/11/17"
+ARCH_LIVE="rollout-2026-11-17T01-00-00-${ARCH_THREAD}.jsonl"
+printf '%s\n' "{\"type\":\"session_meta\",\"payload\":{\"id\":\"${ARCH_THREAD}\"}}" \
+  > "$ARCH_ROOT/2026/11/17/$ARCH_LIVE"
+printf 'archived bytes are not read' \
+  > "$ARCH_ROOT/2026/10/20/rollout-2026-10-20T01-00-00-${ARCH_THREAD}.jsonl.zst"
+printf 'archived bytes are not read' \
+  > "$ARCH_ROOT/2026/10/20/rollout-2026-10-20T01-00-00-${ARCH_THREAD}_33333333-3333-4333-8333-333333333333.jsonl.zst"
+arch_selection() {
+  "$NODE_BIN" "$INSPECT" --thread "$ARCH_THREAD" --summary --db "$TMP/archived-absent.sqlite" \
+    --sessions-root "$ARCH_ROOT" 2>/dev/null | "$NODE_BIN" -e '
+let text = "";
+process.stdin.on("data", (chunk) => { text += chunk; }).on("end", () => {
+  const value = JSON.parse(text);
+  const selection = value.rollout?.selection || {};
+  const primary = value.rollout?.primary?.path || "";
+  console.log([
+    selection.status,
+    selection.reason,
+    selection.rejectedCandidateCount ?? "-",
+    value.rollout?.candidates?.length ?? "-",
+    primary.split(/[\\/]/).pop() || "-",
+  ].join(" "));
+});'
+}
+ARCH_OUT="$(arch_selection)"
+[[ "$ARCH_OUT" == "found single-candidate - 1 $ARCH_LIVE" ]] \
+  && ok "archived root and paginated siblings leave the live page as the single candidate" \
+  || no "archived siblings changed selection: $ARCH_OUT"
+printf 'malformed archive' > "$ARCH_ROOT/2026/10/20/rollout-2026-10-20T02-00-00-${ARCH_THREAD}.json.zst"
+ARCH_OUT="$(arch_selection)"
+[[ "$ARCH_OUT" == "ambiguous candidate-set-unresolved 1 1 -" ]] \
+  && ok "a .zst name the archive grammar rejects still leaves the candidate set unresolved" \
+  || no "malformed archive name was not flagged: $ARCH_OUT"
 echo ""
 echo "RESULT: $PASS passed, $FAIL failed"
 [[ $FAIL -eq 0 ]] && echo "ALL GREEN" || echo "FAILURES PRESENT"

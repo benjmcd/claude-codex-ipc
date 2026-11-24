@@ -363,6 +363,36 @@ assert_policy 0 "R2 declared alternate inventory is send eligible" '
   value.inventory.guiHosts.length === 1 && value.inventory.guiHosts[0].classification === "alternate" &&
   value.inventory.guiHosts[0].matchesIntended === true'
 
+
+# Router expectation: Codex Desktop 26.1117+ serves no IPC router. The version comes from the
+# intended GUI's resources\owl-app.ini, else from a Store package folder name; otherwise unknown.
+POLICY_OUT="$(powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$POLICYWIN" \
+    -Purpose send -IpcRoot "$POLICY_ROOT" -DryRun -MockInventoryJson "$MOCK_PACKAGE" 2>&1)"; POLICY_RC=$?
+assert_policy 0 "R2r1 a pre-26.1117 package host expects a router" '
+  value.sendEligible === true && value.intendedHostVersion === "26.707.3563.0" && value.routerExpected === true'
+MOCK_ROUTERLESS_PACKAGE="${MOCK_PACKAGE//26.707.3563.0/26.1201.1.0}"
+POLICY_OUT="$(powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$POLICYWIN" \
+    -Purpose send -IpcRoot "$POLICY_ROOT" -DryRun -MockInventoryJson "$MOCK_ROUTERLESS_PACKAGE" 2>&1)"; POLICY_RC=$?
+assert_policy 0 "R2r2 a 26.1117+ package host expects no router" '
+  value.sendEligible === true && value.intendedHostVersion === "26.1201.1.0" && value.routerExpected === false'
+POLICY_OUT="$(powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$POLICYWIN" \
+    -Purpose send -IpcRoot "$POLICY_ROOT" -IntendedHost 'C:\Alt\Host\ChatGPT.exe' \
+    -DryRun -MockInventoryJson "$MOCK_ALTERNATE" 2>&1)"; POLICY_RC=$?
+assert_policy 0 "R2r3 a host with no version evidence leaves routerExpected unknown" '
+  value.sendEligible === true && value.intendedHostVersion === null && value.routerExpected === null'
+OWL_HOST_DIR="$POLICY_ROOT/owl-host"; mkdir -p "$OWL_HOST_DIR/resources"
+for _owl_case in "26.1117.31558:false" "26.1111.71704:true"; do
+  printf '[Owl]\r\nUserDataDirectoryName=Codex\r\nAppVersion=%s\r\n' "${_owl_case%%:*}" > "$OWL_HOST_DIR/resources/owl-app.ini"
+  OWL_EXE_WIN="$(cygpath -w "$OWL_HOST_DIR")\ChatGPT.exe"
+  OWL_EXE_JSON="${OWL_EXE_WIN//\\/\\\\}"
+  MOCK_OWL='{"complete":true,"packageRootsComplete":true,"packageRoots":[],"errors":[],"processes":[{"pid":211,"parentPid":1,"name":"ChatGPT.exe","executable":"'"$OWL_EXE_JSON"'"}]}'
+  POLICY_OUT="$(powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$POLICYWIN" \
+      -Purpose send -IpcRoot "$POLICY_ROOT" -IntendedHost "$OWL_EXE_WIN" \
+      -DryRun -MockInventoryJson "$MOCK_OWL" 2>&1)"; POLICY_RC=$?
+  assert_policy 0 "R2r4 owl-app.ini AppVersion ${_owl_case%%:*} sets routerExpected ${_owl_case##*:}" "
+    value.sendEligible === true && value.intendedHostVersion === '${_owl_case%%:*}' && value.routerExpected === ${_owl_case##*:}"
+done
+unset _owl_case
 MOCK_OTHER='{"complete":true,"packageRootsComplete":true,"packageRoots":[],"errors":[],"processes":[{"pid":301,"parentPid":1,"name":"ChatGPT.exe","executable":"C:\\Program Files\\WindowsApps\\OpenAI.ChatGPT-Desktop_1.2026.100.0_x64__9x9x9x9x9x9x9\\app\\ChatGPT.exe"}]}'
 POLICY_OUT="$(powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$POLICYWIN" \
     -Purpose send -IpcRoot "$POLICY_ROOT" -DryRun -MockInventoryJson "$MOCK_OTHER" 2>&1)"; POLICY_RC=$?
@@ -775,6 +805,188 @@ for scenario in config-only payload-only unknown-prefix missing-value empty-valu
     conflicting-runtime incomplete; do
     native_policy_case "$scenario" false
 done
+
+# R28: Desktop builds that start the app-server from the GUI's Electron Node utility process
+# (node.mojom.NodeService) rather than from the main process. Synthetic tree shaped like the
+# observed layout: runtime beside the app, exec-server under the GUI, the Windows sandbox
+# helper under the app-server, and a package-runtime node.exe helper that is never a candidate.
+MOCK_UTILITY_TREE="$(node <<'NODE'
+const gui = "C:\\Alt\\Host\\app\\ChatGPT.exe";
+const runtime = "C:\\Alt\\Host\\runtime\\codex.exe";
+const processes = [
+  { pid: 861, parentPid: 999, name: "ChatGPT.exe", executable: gui,
+    commandLine: `"${gui}" --user-data-dir="C:\\Alt\\Data"` },
+  { pid: 862, parentPid: 861, name: "ChatGPT.exe", executable: gui,
+    commandLine: `"${gui}" --type=utility --utility-sub-type=node.mojom.NodeService --lang=en-US` },
+  { pid: 863, parentPid: 862, name: "codex.exe", executable: runtime,
+    commandLine: `${runtime} -c features.fixture=true app-server --analytics-default-enabled` },
+  { pid: 864, parentPid: 863, name: "codex.exe", executable: runtime,
+    commandLine: `"${runtime}" --__codex-windows-mxc` },
+  { pid: 865, parentPid: 861, name: "codex.exe", executable: runtime,
+    commandLine: `${runtime} -c features.fixture=true -c "fixture.login=\\"value\\"" exec-server --fixture` },
+  { pid: 866, parentPid: 861, name: "ChatGPT.exe", executable: gui, commandLine: `"${gui}" --type=renderer` },
+  { pid: 867, parentPid: 861, name: "node.exe",
+    executable: "C:\\Program Files\\WindowsApps\\OpenAI.CodexPrimaryRuntime_fixture\\dependencies\\node\\bin\\node.exe",
+    commandLine: "node.exe fixture.js" },
+  { pid: 868, parentPid: 861, name: "ChatGPT.exe", executable: gui, commandLine: `"${gui}" --type=gpu-process` },
+];
+console.log(JSON.stringify({ complete: true, packageRootsComplete: true, packageRoots: [], errors: [], processes }));
+NODE
+)"
+utility_policy_case(){
+    local scenario="$1" predicate="$2"
+    local intended='C:\Alt\Host\app\ChatGPT.exe'
+    [[ "$scenario" == package-* ]] && intended=package
+    local inventory
+    inventory="$(printf '%s' "$MOCK_UTILITY_TREE" | node -e '
+      let input = "";
+      process.stdin.on("data", chunk => input += chunk);
+      process.stdin.on("end", () => {
+        const value = JSON.parse(input);
+        const rows = value.processes;
+        const row = id => rows.find(item => item.pid === id);
+        const gui = row(861).executable;
+        switch (process.argv[1]) {
+          case "base": break;
+          case "reverse-order": value.processes.reverse(); break;
+          case "package-gui": {
+            const root = "C:\\Packages\\OpenAI.Codex_fixture";
+            value.packageRoots = [root];
+            for (const id of [861, 862, 866, 868]) {
+              row(id).commandLine = row(id).commandLine.replace(gui, root + "\\app\\ChatGPT.exe");
+              row(id).executable = root + "\\app\\ChatGPT.exe";
+            }
+            for (const id of [863, 864, 865]) {
+              row(id).commandLine = row(id).commandLine.replace(row(id).executable, root + "\\app\\resources\\codex.exe");
+              row(id).executable = root + "\\app\\resources\\codex.exe";
+            }
+            break;
+          }
+          case "launcher-renderer":
+            row(862).commandLine = `"${gui}" --type=renderer --utility-sub-type=node.mojom.NodeService`; break;
+          case "launcher-network":
+            row(862).commandLine = `"${gui}" --type=utility --utility-sub-type=network.mojom.NetworkService`; break;
+          case "launcher-subtype-prefix":
+            row(862).commandLine = `"${gui}" --type=utility --utility-sub-type=node.mojom.NodeServiceHost`; break;
+          case "launcher-other-exe":
+            row(862).executable = "C:\\Other\\ChatGPT.exe";
+            row(862).commandLine = "\"C:\\Other\\ChatGPT.exe\" --type=utility --utility-sub-type=node.mojom.NodeService";
+            break;
+          case "launcher-command-mismatch":
+            row(862).commandLine = "\"C:\\Other\\ChatGPT.exe\" --type=utility --utility-sub-type=node.mojom.NodeService";
+            break;
+          case "launcher-unreadable": row(862).commandLine = null; break;
+          case "launcher-orphan": row(862).parentPid = 998; break;
+          case "launcher-self-cycle": row(862).parentPid = 862; break;
+          case "launcher-under-renderer": row(862).parentPid = 866; break;
+          case "launcher-nested":
+            rows.push({ ...row(862), pid: 869, parentPid: 861 });
+            row(862).parentPid = 869;
+            break;
+          case "launcher-non-candidate-hop":
+            row(863).parentPid = 867;
+            break;
+          case "mxc-orphan": row(864).parentPid = 998; break;
+          case "mxc-prefix": row(864).commandLine = `"${row(864).executable}" --__codex-windows-mxc-v2`; break;
+          case "mxc-wrong-runtime":
+            row(864).executable = "C:\\Other\\codex.exe"; row(864).commandLine = "codex.exe --__codex-windows-mxc"; break;
+          case "unproven-helper":
+            rows.push({ pid: 870, parentPid: 861, name: "codex.exe", executable: row(863).executable, commandLine: "codex.exe serve" });
+            break;
+          case "conflicting-runtime":
+            rows.push({ ...row(863), pid: 871, executable: "C:\\Other\\codex.exe", commandLine: "codex.exe app-server" });
+            break;
+          case "second-store-gui":
+            value.packageRoots = ["C:\\Program Files\\WindowsApps\\OpenAI.Codex_fixture"];
+            rows.push({ pid: 872, parentPid: 999, name: "ChatGPT.exe",
+              executable: value.packageRoots[0] + "\\app\\ChatGPT.exe", commandLine: "ChatGPT.exe" });
+            break;
+          case "second-store-gui-under-intended":
+            value.packageRoots = ["C:\\Program Files\\WindowsApps\\OpenAI.Codex_fixture"];
+            rows.push({ pid: 872, parentPid: 862, name: "ChatGPT.exe",
+              executable: value.packageRoots[0] + "\\app\\ChatGPT.exe", commandLine: "ChatGPT.exe" });
+            break;
+          case "second-same-gui": rows.push({ ...row(861), pid: 873 }); break;
+          case "unreadable-identity":
+            rows.push({ pid: 874, parentPid: 999, name: "ChatGPT.exe", executable: null, commandLine: null });
+            break;
+          default: throw new Error("unknown utility scenario");
+        }
+        console.log(JSON.stringify(value));
+      });
+    ' "$scenario")"
+    POLICY_OUT="$(powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$POLICYWIN" \
+        -Purpose send -IpcRoot "$POLICY_ROOT" -IntendedHost "$intended" \
+        -DryRun -MockInventoryJson "$inventory" 2>&1)"; POLICY_RC=$?
+    assert_policy 0 "${3:-R28 NodeService-launched runtime $scenario}" "$predicate"
+}
+UTILITY_ACCEPTED='value.sendEligible === true && value.inventory.complete === true &&
+  value.inventory.guiHosts.length === 1 && value.inventory.guiHosts[0].pid === 861 &&
+  [862, 863, 864, 865, 866, 868].every((pid) => value.inventory.appServers.some((item) => item.pid === pid)) &&
+  !value.inventory.guiHosts.concat(value.inventory.appServers).some((item) => item.pid === 867) &&
+  value.activationEligible === false'
+for scenario in base reverse-order package-gui; do
+    utility_policy_case "$scenario" "$UTILITY_ACCEPTED"
+done
+for scenario in launcher-renderer launcher-network launcher-subtype-prefix launcher-other-exe \
+    launcher-command-mismatch launcher-unreadable launcher-orphan launcher-self-cycle \
+    launcher-under-renderer launcher-nested launcher-non-candidate-hop mxc-orphan mxc-prefix \
+    mxc-wrong-runtime unproven-helper conflicting-runtime second-store-gui \
+    second-store-gui-under-intended second-same-gui; do
+    utility_policy_case "$scenario" 'value.sendEligible === false &&
+      value.sendReasons.includes("other-desktop-host-running")'
+done
+utility_policy_case unreadable-identity 'value.sendEligible === false &&
+  value.inventory.complete === false && value.sendReasons.includes("host-inventory-incomplete")'
+
+echo "== R29. intended runtime for --deliver queue =="
+# --deliver queue runs the runtime the policy already proved for the one intended GUI: the
+# app-server it launched directly or through its NodeService utility child. The policy reports
+# that proof; it never searches for a runtime, and it reports none it did not prove.
+POLICY_OUT="$(powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$POLICYWIN" \
+    -Purpose send -IpcRoot "$POLICY_ROOT" -DryRun -MockInventoryJson "$MOCK_PACKAGE" 2>&1)"; POLICY_RC=$?
+assert_policy 0 "R29a a package GUI's direct app-server is its resolved runtime" '
+  value.sendEligible === true && value.intendedRuntime.status === "resolved" &&
+  value.intendedRuntime.executable === "C:\\Program Files\\WindowsApps\\OpenAI.Codex_26.707.3563.0_x64__2p2nqsd0c76g0\\app\\resources\\codex.exe" &&
+  value.inventory.guiRuntimes.length === 1 && value.inventory.guiRuntimes[0].guiPid === 101 &&
+  value.inventory.guiRuntimes[0].status === "resolved"'
+POLICY_OUT="$(powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$POLICYWIN" \
+    -Purpose send -IpcRoot "$POLICY_ROOT" -IntendedHost 'C:\Alt\Host\ChatGPT.exe' \
+    -DryRun -MockInventoryJson "$MOCK_NATIVE_TREE" 2>&1)"; POLICY_RC=$?
+assert_policy 0 "R29b an alternate GUI's config-prefixed app-server is its resolved runtime" '
+  value.sendEligible === true && value.intendedRuntime.status === "resolved" &&
+  value.intendedRuntime.executable === "C:\\Alt Runtime\\codex.exe"'
+for scenario in base reverse-order; do
+    utility_policy_case "$scenario" '
+      value.sendEligible === true && value.intendedRuntime.status === "resolved" &&
+      value.intendedRuntime.executable === "C:\\Alt\\Host\\runtime\\codex.exe"' \
+      "R29c a NodeService-launched app-server is the resolved runtime ($scenario)"
+done
+utility_policy_case package-gui '
+  value.sendEligible === true && value.intendedRuntime.status === "resolved" &&
+  value.intendedRuntime.executable === "C:\\Packages\\OpenAI.Codex_fixture\\app\\resources\\codex.exe"' \
+  "R29d a package GUI's NodeService-launched runtime resolves inside the package"
+utility_policy_case conflicting-runtime '
+  value.intendedRuntime.status === "ambiguous" && value.intendedRuntime.executable === null' \
+  "R29e two different app-server executables leave the runtime ambiguous"
+utility_policy_case launcher-other-exe '
+  value.intendedRuntime.status === "missing" && value.intendedRuntime.executable === null' \
+  "R29f an app-server under an unproven launcher is no runtime"
+POLICY_OUT="$(powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$POLICYWIN" \
+    -Purpose send -IpcRoot "$POLICY_ROOT" -IntendedHost 'C:\Alt\Host\ChatGPT.exe' \
+    -DryRun -MockInventoryJson "$MOCK_ALTERNATE" 2>&1)"; POLICY_RC=$?
+assert_policy 0 "R29g a GUI with no proven app-server reports the runtime missing" '
+  value.sendEligible === true && value.intendedRuntime.status === "missing" &&
+  value.intendedRuntime.executable === null'
+POLICY_OUT="$(powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$POLICYWIN" \
+    -Purpose send -IpcRoot "$POLICY_ROOT" -DryRun -MockInventoryJson "$MOCK_EMPTY" 2>&1)"; POLICY_RC=$?
+assert_policy 0 "R29h no intended GUI leaves the runtime not evaluated" '
+  value.sendEligible === false && value.intendedRuntime.status === "not-evaluated" &&
+  value.intendedRuntime.executable === null'
+POLICY_OUT="$(powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$POLICYWIN" \
+    -Purpose configuration -IpcRoot "$POLICY_ROOT" 2>&1)"; POLICY_RC=$?
+assert_policy 0 "R29i the configuration purpose reports no runtime" '
+  value.purpose === "configuration" && value.intendedRuntime === null'
 
 echo "== S. shared policy activation decision =="
 PKG_CLEAR='{"state":"clear","runningPackageFullName":"OpenAI.Codex_26.707.3563.0_x64__2p2nqsd0c76g0","runningVersion":"26.707.3563.0","higherVersions":[],"evidence":"mock"}'

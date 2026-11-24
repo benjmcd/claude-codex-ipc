@@ -7,7 +7,7 @@ Repo-level triage lives in `docs/TROUBLESHOOTING.md`; this is the bundled quick 
 | Symptom | Cause | Fix |
 |---|---|---|
 | `node:sqlite is unavailable` from inspector/locator/snapshot | Node.js without `node:sqlite` support (needs ≥ 22.5; older 22.x/23.x lines may require `--experimental-sqlite`) | Upgrade Node, or skip inspection — file-drop handoff works without it |
-| `--app/--open/--exec was removed in v0.1.8` | CLI-backed modes removed | Use the default file-drop handoff or `--ipc <conversationId>`; neither invokes the Codex CLI |
+| `--app/--open/--exec was removed in v0.1.8` | CLI-backed modes removed | Use the default file-drop handoff or `--ipc <conversationId>`; neither invokes the Codex CLI (only `--deliver queue` runs a Codex binary: the intended host's own runtime) |
 | `--ipc` says `node not found` | Node.js missing | Install Node and rerun preparation/inspection. Live and manual modes retain the envelope without pickup because target eligibility was not established |
 | Inspector says `State DB was not found` | No Codex Desktop state on this machine (or non-default path) | Pass `--db`/`--sessions-root`, or accept that inspection is unavailable |
 | `autoload helper unavailable` | Not Windows, `powershell.exe` missing, or helper missing | Use file-drop; do not launch the protocol manually to bypass the shared policy |
@@ -35,7 +35,27 @@ Codex; never auto-switched), `foreground-restore-unproven` (restore-if-known is 
 `autoload-incomplete` (poll window expired), `target-not-found`/`target-archived`/
 `target-non-root`/`target-model-empty`/`target-inspection-ambiguous` (positive target proof
 required before any maintained-wrapper live attempt),
-`router-pipe-failure`, `foreground-switch-unacknowledged`, `invalid-foreground-policy`.
+`router-pipe-failure`, `foreground-switch-unacknowledged`, `invalid-foreground-policy`,
+`router-absent` (no router: Codex Desktop 26.1117 and later serve none. The host policy refuses a
+proven 26.1117+ host before any pipe contact, and a host of unknown version finds no pipe; nothing
+was sent, so the pickup line is printed — use `--deliver queue`, or `--deliver manual` as the
+fallback. On a proven host a `QUEUE-HINT:` line follows the `RESULT:` line: with `intendedRuntime`
+resolved, which queue delivery needs, re-send with `--deliver queue` instead of pasting, for a
+loaded, idle target, and then never paste that pickup line), `router-unreachable` (the pipe could not be connected; nothing was sent, pickup printed).
+
+`--deliver queue` results:
+`queued -- reason=runtime-accepted -- confirmation=pending -- queueId=<uuid>` means stored, not yet
+started; run the printed WAIT line. `queue-unavailable` with `confirmation=not-attempted` means the
+runtime never ran, so the printed pickup line is safe:
+host-gate reasons as above, `runtime-missing`/`runtime-ambiguous` (no single proven runtime under
+the intended host), `runtime-launch-failed`, `queue-store-absent` (no `queue_1.sqlite` in the
+inspected Codex home), `codex-home-mismatch` (`CODEX_HOME` names another home; unset it).
+`failed-closed -- confirmation=unknown` with `queue-runtime-failed`, `queue-timeout`,
+`queue-output-unrecognized`, `queue-thread-mismatch` or `queue-helper-failure` means the runtime ran
+and its exact success sentence did not follow: the item may be queued, so do not paste or resend;
+read the bounded runtime diagnostics, and run the waiter for that dispatch. A waiter
+`queued-not-started` diagnostic means the item is still queued after 30 s: the thread is busy, not
+loaded (open it in the intended App), or its last turn was interrupted. It is not a failure.
 The target snapshot is run once before the first live attempt and reused across auto-load recovery;
 the host inventory still runs fresh before each send or retry. `target-non-root` may print a known
 parent UUID. Legacy null-source rows continue only as warned `legacy-root-assumed` targets when

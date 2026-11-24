@@ -1782,5 +1782,662 @@ await test("post-locator wait read remains bound to the requested rollout owner"
   );
 });
 
+// --- Settings-only response items and archived (zstd) rollout pages ---
+const zlibApi = (await import("node:zlib")).default;
+const crypto = await import("node:crypto");
+const zstdAvailable = typeof zlibApi.zstdCompressSync === "function";
+
+function ownCompletedWithInTurn(extraRecords, body = "settings turn body") {
+  const records = ownOpenRecords();
+  return [
+    ...records,
+    ...extraRecords,
+    event("agent_message", ownTurn, { phase: "final_answer", message: body }),
+    event("task_complete", ownTurn, { last_agent_message: body }),
+  ];
+}
+
+const configurationUpdate = {
+  type: "response_item",
+  payload: { type: "configuration_update", reasoning: { effort: "high" } },
+};
+const additionalTools = {
+  type: "response_item",
+  payload: {
+    type: "additional_tools",
+    id: "fixture-tools",
+    role: "developer",
+    tools: [{ type: "namespace", name: "fixture", description: "fixture tools", tools: [{ type: "function", name: "noop" }] }],
+  },
+};
+
+await test("settings-only response items inside the dispatch turn keep rollout fallback certifiable", async () => {
+  const root = caseDir("settings-items-in-turn");
+  const rollout = writeRollout(root, ownCompletedWithInTurn([configurationUpdate, additionalTools]));
+  const parsed = readRolloutFile(rollout);
+  assert.equal(parsed.diagnostics.some((item) => item.code === "schema-drift"), false);
+  const result = await waitForCompletion(directOptions(
+    root,
+    rollout,
+    path.join(root, "missing.reply.md"),
+    { acceptRolloutFallback: true },
+  ));
+  assert.equal(result.token, "done");
+  assert.equal(result.replySource, "rollout-fallback");
+  assert.deepEqual(result.diagnostics, []);
+});
+
+for (const [label, record] of [
+  ["steer-input context", {
+    type: "retained_context",
+    payload: { type: "native_steer_ownership", version: 1, record: { phase: "steer", items: [{ type: "message" }] } },
+  }],
+  ["configuration update carrying a body key", {
+    type: "response_item",
+    payload: { type: "configuration_update", reasoning: { effort: "high" }, content: [{ text: "body" }] },
+  }],
+  ["tool manifest with a non-developer role", {
+    type: "response_item",
+    payload: { ...additionalTools.payload, role: "user" },
+  }],
+  ["tool manifest carrying a message", {
+    type: "response_item",
+    payload: { ...additionalTools.payload, message: "body" },
+  }],
+  ["configuration update carrying an unobserved key", {
+    type: "response_item",
+    payload: { ...configurationUpdate.payload, output: "unobserved" },
+  }],
+  ["tool manifest carrying an unobserved key", {
+    type: "response_item",
+    payload: { ...additionalTools.payload, item: { type: "message" } },
+  }],
+]) {
+  await test(`${label} inside the dispatch turn stays schema drift and is not certified`, async () => {
+    const root = caseDir(`settings-drift-${label.replace(/[^a-z]+/giu, "-")}`);
+    const rollout = writeRollout(root, ownCompletedWithInTurn([record]));
+    const parsed = readRolloutFile(rollout);
+    assert.ok(parsed.diagnostics.some((item) => item.code === "schema-drift"));
+    const result = await waitForCompletion(directOptions(
+      root,
+      rollout,
+      path.join(root, "missing.reply.md"),
+      { acceptRolloutFallback: true },
+    ));
+    assert.notEqual(result.token, "done");
+  });
+}
+
+function pagedRecords(pageId, base = thread) {
+  return [
+    {
+      type: "session_meta",
+      payload: {
+        id: thread,
+        session_id: thread,
+        history_mode: "paginated",
+        history_base: { thread_id: base, end_byte_offset: 0 },
+      },
+    },
+    ...ownCompletedRecords().slice(1),
+  ];
+}
+
+function writePagedRollout(directory, pageId, records) {
+  fs.mkdirSync(directory, { recursive: true });
+  const target = path.join(directory, `rollout-page-${thread}_${pageId}.jsonl`);
+  fs.writeFileSync(target, `${records.map((item) => JSON.stringify(item)).join("\n")}\n`);
+  return target;
+}
+
+function writeArchive(target, text) {
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  fs.writeFileSync(
+    target,
+    zstdAvailable ? zlibApi.zstdCompressSync(Buffer.from(text)) : Buffer.from("not zstd"),
+  );
+  return target;
+}
+
+// Page ids reuse the public-safety scanner's synthetic allowlist.
+const currentPageId = "33333333-3333-4333-8333-333333333333";
+const archivedPageId = "00000000-0000-4000-8000-000000000000";
+
+await test("an archived legacy root page beside the current page does not unresolve the page set", async () => {
+  const root = caseDir("archived-legacy-root");
+  const rollout = writePagedRollout(path.join(root, "2026", "11", "17"), currentPageId, pagedRecords(currentPageId));
+  // A legacy archive is never opened: its bytes need not even be valid zstd.
+  fs.mkdirSync(path.join(root, "2026", "10", "20"), { recursive: true });
+  fs.writeFileSync(path.join(root, "2026", "10", "20", `rollout-root-${thread}.jsonl.zst`), "legacy archive");
+  const result = await waitForCompletion(directOptions(
+    root,
+    rollout,
+    path.join(root, "missing.reply.md"),
+    { acceptRolloutFallback: true, sessionsRoot: root },
+  ));
+  assert.equal(result.token, "done");
+  assert.equal(result.replySource, "rollout-fallback");
+  assert.equal(result.diagnostics.some((item) => item.code === "candidate-set-unresolved"), false);
+  const cliResult = cli([
+    "--thread", thread, "--dispatch", dispatch, "--rollout-path", rollout,
+    "--sessions-root", root, "--reply-path", path.join(root, "missing.reply.md"),
+    "--accept-rollout-fallback", "--status-exit-codes",
+  ]);
+  assert.equal(cliResult.status, 0, cliResult.stderr);
+  assert.equal(cliResult.stdout, "done\n");
+  assert.match(cliResult.stderr, /"source":"rollout-fallback"/);
+});
+
+await test("an archived paginated page that is not the bound page's successor leaves it current", async () => {
+  const root = caseDir("archived-unrelated-page");
+  const rollout = writePagedRollout(path.join(root, "2026", "11", "17"), currentPageId, pagedRecords(currentPageId));
+  writeArchive(
+    path.join(root, "2026", "10", "30", `rollout-page-${thread}_${archivedPageId}.jsonl.zst`),
+    `${JSON.stringify(pagedRecords(archivedPageId)[0])}\n${JSON.stringify(event("task_started", otherTurn))}\n`,
+  );
+  const result = await waitForCompletion(directOptions(
+    root,
+    rollout,
+    path.join(root, "missing.reply.md"),
+    { acceptRolloutFallback: true, sessionsRoot: root },
+  ));
+  if (zstdAvailable) {
+    assert.equal(result.token, "done");
+    assert.equal(result.replySource, "rollout-fallback");
+  } else {
+    assert.equal(result.token, "unavailable");
+    assert.ok(result.diagnostics.some((item) => item.reason === "archive-unsupported"));
+  }
+});
+
+await test("an archived paginated successor still vetoes the bound page", async () => {
+  const root = caseDir("archived-successor");
+  const records = pagedRecords(currentPageId);
+  const rollout = writePagedRollout(path.join(root, "2026", "11", "17"), currentPageId, records);
+  const cutoff = Buffer.byteLength(`${records.map((item) => JSON.stringify(item)).join("\n")}\n`);
+  writeArchive(
+    path.join(root, "2026", "11", "20", `rollout-page-${thread}_${archivedPageId}.jsonl.zst`),
+    `${JSON.stringify({
+      type: "session_meta",
+      payload: {
+        id: thread,
+        session_id: thread,
+        history_mode: "paginated",
+        history_base: { thread_id: currentPageId, end_byte_offset: cutoff },
+      },
+    })}\n`,
+  );
+  const result = await waitForCompletion(directOptions(
+    root,
+    rollout,
+    path.join(root, "missing.reply.md"),
+    { acceptRolloutFallback: true, sessionsRoot: root },
+  ));
+  assert.equal(result.token, "unavailable");
+  assert.ok(result.diagnostics.some((item) =>
+    zstdAvailable ? item.code === "rollout-page-superseded" : item.reason === "archive-unsupported"));
+});
+
+await test("an archived successor with a large header and a highly compressible tail still vetoes", async () => {
+  const root = caseDir("archived-successor-large-header");
+  const records = pagedRecords(currentPageId);
+  const rollout = writePagedRollout(path.join(root, "2026", "11", "17"), currentPageId, records);
+  const cutoff = Buffer.byteLength(`${records.map((item) => JSON.stringify(item)).join("\n")}\n`);
+  // A ~400 KB header is not done by the first compressed windows, and the 30 MB repetitive tail
+  // overflows the 24 MB record cap as soon as a window reaches it: only the bisection finds the
+  // header's newline.
+  const header = JSON.stringify({
+    type: "session_meta",
+    payload: {
+      id: thread,
+      session_id: thread,
+      history_mode: "paginated",
+      history_base: { thread_id: currentPageId, end_byte_offset: cutoff },
+      base_instructions: { text: crypto.randomBytes(200 * 1024).toString("hex") },
+    },
+  });
+  writeArchive(
+    path.join(root, "2026", "11", "20", `rollout-page-${thread}_${archivedPageId}.jsonl.zst`),
+    `${header}\n${"x".repeat(30 * 1024 * 1024)}\n`,
+  );
+  const result = await waitForCompletion(directOptions(
+    root,
+    rollout,
+    path.join(root, "missing.reply.md"),
+    { acceptRolloutFallback: true, sessionsRoot: root },
+  ));
+  assert.equal(result.token, "unavailable");
+  assert.ok(result.diagnostics.some((item) =>
+    zstdAvailable ? item.code === "rollout-page-superseded" : item.reason === "archive-unsupported"));
+});
+
+await test("an unreadable archived paginated page fails the page set closed", async () => {
+  const root = caseDir("archived-unreadable");
+  const rollout = writePagedRollout(path.join(root, "2026", "11", "17"), currentPageId, pagedRecords(currentPageId));
+  fs.mkdirSync(path.join(root, "2026", "10", "30"), { recursive: true });
+  fs.writeFileSync(
+    path.join(root, "2026", "10", "30", `rollout-page-${thread}_${archivedPageId}.jsonl.zst`),
+    "not a zstd frame",
+  );
+  const result = await waitForCompletion(directOptions(
+    root,
+    rollout,
+    path.join(root, "missing.reply.md"),
+    { acceptRolloutFallback: true, sessionsRoot: root },
+  ));
+  assert.equal(result.token, "unavailable");
+  assert.ok(result.diagnostics.some((item) =>
+    item.code === "page-supersession-unproven" &&
+    item.reason === (zstdAvailable ? "archive-invalid" : "archive-unsupported")));
+});
+
+// A live bound page keeps growing while its turn runs. Same-identity growth after a certifying
+// read, with that read's end still a record boundary, is a stale snapshot: the waiter keeps
+// polling and never certifies on it. A shrink, a rewritten end, a successor page or an identity
+// change stays terminal.
+function appendRecords(target, records) {
+  fs.appendFileSync(target, `${records.map((item) => JSON.stringify(item)).join("\n")}\n`);
+}
+
+function growingReader(afterRead) {
+  let reads = 0;
+  const reader = (filePath, options) => {
+    const result = readRolloutFile(filePath, options);
+    afterRead(reads, filePath);
+    reads += 1;
+    return result;
+  };
+  reader.reads = () => reads;
+  return reader;
+}
+
+function steppedClock(extra = {}) {
+  let clock = 0;
+  return { now: () => clock, sleep: async (ms) => { clock += ms; }, ...extra };
+}
+
+function growthOptions(root, rollout, extra = {}) {
+  return directOptions(root, rollout, path.join(root, "missing.reply.md"), {
+    acceptRolloutFallback: true,
+    budgetMs: 100,
+    intervalMs: 10,
+    ...extra,
+  });
+}
+
+await test("append-only growth after a certifying read keeps polling and certifies once settled", async () => {
+  const root = caseDir("growth-stale-then-done");
+  const rollout = writeRollout(root, ownOpenRecords());
+  const reader = growingReader((index, target) => {
+    if (index === 0) {
+      appendRecords(target, [event("agent_message", ownTurn, { phase: "commentary", message: "working" })]);
+    } else if (index === 1) {
+      appendRecords(target, [
+        event("agent_message", ownTurn, { phase: "final_answer", message: "grown body" }),
+        event("task_complete", ownTurn, { last_agent_message: "grown body" }),
+      ]);
+    }
+  });
+  const result = await waitForCompletion(growthOptions(root, rollout), steppedClock({ readRolloutFile: reader }));
+  assert.equal(result.token, "done", JSON.stringify(result));
+  assert.equal(result.replySource, "rollout-fallback");
+  assert.equal(reader.reads(), 3);
+  assert.equal(
+    result.diagnostics.filter((item) => item.code === "page-snapshot-stale").length,
+    1,
+    "a stale snapshot is recorded once",
+  );
+  assert.ok(result.diagnostics.some((item) =>
+    item.code === "page-snapshot-stale" && item.reason === "bound-page-grew"));
+  assert.ok(!result.diagnostics.some((item) => item.code === "page-supersession-unproven"));
+});
+
+await test("growth on every read stays pending through the budget and never certifies", async () => {
+  const root = caseDir("growth-stale-endless");
+  const rollout = writeRollout(root, ownCompletedRecords("already complete body"));
+  const reader = growingReader((index, target) => {
+    appendRecords(target, [event("token_count", undefined, { info: { total: index } })]);
+  });
+  const result = await waitForCompletion(
+    growthOptions(root, rollout, { budgetMs: 50 }),
+    steppedClock({ readRolloutFile: reader }),
+  );
+  assert.equal(result.token, "pending", JSON.stringify(result));
+  assert.ok(reader.reads() >= 2);
+  assert.ok(result.diagnostics.some((item) => item.code === "page-snapshot-stale"));
+});
+
+await test("a page that shrinks after the read stays unavailable", async () => {
+  const root = caseDir("growth-shrink");
+  const rollout = writeRollout(root, ownOpenRecords());
+  const reader = growingReader((index, target) => {
+    if (index === 0) {
+      const text = fs.readFileSync(target, "utf8");
+      fs.writeFileSync(target, text.slice(0, text.length - 8));
+    }
+  });
+  const result = await waitForCompletion(growthOptions(root, rollout), steppedClock({ readRolloutFile: reader }));
+  assert.equal(result.token, "unavailable", JSON.stringify(result));
+  assert.ok(result.diagnostics.some((item) =>
+    item.code === "page-supersession-unproven" && item.reason === "bound-page-size-changed"));
+});
+
+await test("growth whose old end is no longer a record boundary stays unavailable", async () => {
+  const root = caseDir("growth-rewritten-end");
+  const rollout = writeRollout(root, ownOpenRecords());
+  const reader = growingReader((index, target) => {
+    if (index === 0) {
+      const text = fs.readFileSync(target, "utf8");
+      fs.writeFileSync(target, `${text.slice(0, -1)} ${JSON.stringify(event("token_count", undefined))}\n`);
+    }
+  });
+  const result = await waitForCompletion(growthOptions(root, rollout), steppedClock({ readRolloutFile: reader }));
+  assert.equal(result.token, "unavailable", JSON.stringify(result));
+  assert.ok(result.diagnostics.some((item) =>
+    item.code === "page-supersession-unproven" && item.reason === "bound-page-size-changed"));
+});
+
+await test("a successor page still vetoes a growing bound page", async () => {
+  const root = caseDir("growth-successor");
+  const records = ownOpenRecords();
+  const rollout = writeRollout(root, records);
+  const reader = growingReader((index, target) => {
+    if (index === 0) {
+      const cutoff = fs.statSync(target).size;
+      appendRecords(target, [event("agent_message", ownTurn, { phase: "commentary", message: "working" })]);
+      writeSuccessor(root, records, cutoff, currentPageId);
+    }
+  });
+  const result = await waitForCompletion(growthOptions(root, rollout), steppedClock({ readRolloutFile: reader }));
+  assert.equal(result.token, "unavailable", JSON.stringify(result));
+  assert.ok(result.diagnostics.some((item) => item.code === "rollout-page-superseded"));
+  assert.ok(!result.diagnostics.some((item) => item.code === "page-snapshot-stale"));
+});
+
+await test("a replaced bound page (new identity, larger) stays unavailable", async () => {
+  const root = caseDir("growth-identity-swap");
+  const rollout = writeRollout(root, ownOpenRecords());
+  const reader = growingReader((index, target) => {
+    if (index === 0) {
+      const text = fs.readFileSync(target, "utf8");
+      fs.renameSync(target, `${target}.old`);
+      fs.writeFileSync(target, `${text}${JSON.stringify(event("token_count", undefined))}\n`);
+    }
+  });
+  const result = await waitForCompletion(growthOptions(root, rollout), steppedClock({ readRolloutFile: reader }));
+  assert.equal(result.token, "unavailable", JSON.stringify(result));
+  assert.ok(result.diagnostics.some((item) =>
+    item.code === "page-supersession-unproven" && item.reason === "bound-page-identity-changed"));
+});
+
+await test("the page assessor separates stale growth from a shrink and from an unchanged page", () => {
+  const root = caseDir("growth-assessor");
+  const rollout = writeRollout(root, ownOpenRecords());
+  const size = fs.statSync(rollout).size;
+  const firstLineEnd = Buffer.byteLength(JSON.stringify(sessionMeta())) + 1;
+  const assess = (expectedSize) => assessRolloutPageSupersession({
+    threadId: thread,
+    rolloutPath: rollout,
+    sessionsRoot: root,
+    expectedSize,
+  });
+  assert.equal(assess(size).status, "current");
+  const stale = assess(firstLineEnd);
+  assert.equal(stale.status, "stale");
+  assert.deepEqual(
+    stale.diagnostics.map((item) => [item.code, item.reason, item.expectedSize, item.size]),
+    [["page-snapshot-stale", "bound-page-grew", firstLineEnd, size]],
+  );
+  assert.equal(assess(firstLineEnd - 1).status, "unproven", "a non-boundary snapshot end");
+  assert.equal(assess(size + 1).status, "unproven", "a shrink");
+  assert.equal(assess(-1).status, "unproven", "a negative snapshot size");
+});
+
+await test("--materialize-reply requires the fallback flag and a resolvable reply path", () => {
+  const base = ["--thread", thread, "--dispatch", dispatch, "--materialize-reply"];
+  assert.throws(
+    () => parseWaitArgs([...base, "--reply-path", path.join(tmp, `${dispatch}.reply.md`)], {}),
+    /--materialize-reply requires --accept-rollout-fallback/,
+  );
+  assert.throws(
+    () => parseWaitArgs([...base, "--accept-rollout-fallback"], {}),
+    /--materialize-reply requires --reply-path or --session/,
+  );
+  assert.equal(parseWaitArgs([...base, "--accept-rollout-fallback", "--session", "sid"], {})
+    .options.materializeReply, true);
+});
+
+await test("the waiter keeps a rollout-only reply only with --materialize-reply; stdout stays the token", () => {
+  const root = caseDir("wait-materialize");
+  const rollout = writeRollout(root, ownCompletedRecords("materialized body"));
+  const channel = path.join(root, "transport", "sid", thread);
+  fs.mkdirSync(channel, { recursive: true });
+  fs.writeFileSync(path.join(channel, taskName), "task\n");
+  const replyPath = path.join(channel, `${dispatch}.reply.md`);
+  const copyPath = path.join(channel, `${dispatch}.reply.rollout.md`);
+  const args = [
+    "--thread", thread, "--dispatch", dispatch, "--reply-path", replyPath,
+    "--rollout-path", rollout, "--sessions-root", root, "--accept-rollout-fallback",
+  ];
+  const plain = cli(args);
+  assert.equal(plain.status, 0, plain.stderr);
+  assert.equal(plain.stdout, "done\n");
+  assert.equal(fs.existsSync(copyPath), false, "the waiter is read-only without the flag");
+  const first = cli([...args, "--materialize-reply"]);
+  assert.equal(first.status, 0, first.stderr);
+  assert.equal(first.stdout, "done\n");
+  assert.match(first.stderr, /"code":"reply-materialized","bytes":17,"sha256":"[0-9a-f]{64}"/);
+  assert.equal(fs.readFileSync(copyPath, "utf8"), "materialized body");
+  assert.equal(fs.existsSync(replyPath), false, "the primary reply file is never written");
+  const second = cli([...args, "--materialize-reply", "--status-exit-codes"]);
+  assert.equal(second.status, 0, second.stderr);
+  assert.equal(second.stdout, "done\n");
+  assert.match(second.stderr, /"code":"reply-materialize-refused","reason":"materialized-present"/);
+  assert.equal(fs.readFileSync(copyPath, "utf8"), "materialized body");
+});
+
+// --queue-id: the opt-in, read-only queue-store check for a --deliver queue dispatch. Fixtures
+// are throwaway SQLite files under this suite's temporary directory; nothing reads ~/.codex.
+const queueId = "0f0f0001-0000-4000-8000-000000000001";
+const { QUEUE_NOT_STARTED_GRACE_MS } = api;
+
+async function writeQueueStore(target, rows) {
+  const { DatabaseSync } = await import("node:sqlite");
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  fs.rmSync(target, { force: true });
+  const db = new DatabaseSync(target);
+  try {
+    db.exec(
+      "create table queued_items (id text primary key not null, thread_id text not null, " +
+        "payload_json text not null, queue_order integer not null, created_at_ms integer not null, " +
+        "updated_at_ms integer not null)",
+    );
+    const insert = db.prepare("insert into queued_items values (?,?,?,?,?,?)");
+    rows.forEach((row, index) =>
+      insert.run(row.id, row.threadId, "{}", index, row.createdAtMs, row.createdAtMs));
+  } finally {
+    db.close();
+  }
+  return target;
+}
+
+function queueDiagnostics(stderr) {
+  return stderr.split(/\r?\n/u)
+    .filter((line) => line.startsWith("WAIT_DIAGNOSTIC "))
+    .map((line) => JSON.parse(line.slice("WAIT_DIAGNOSTIC ".length)))
+    .filter((item) => /^queue/.test(item.code));
+}
+
+await test("--queue-id parses as an opt-in UUID with its store path; --queue-db needs it", () => {
+  const base = ["--thread", thread, "--dispatch", dispatch];
+  const plain = parseWaitArgs(base, { CODEX_IPC_QUEUE_DB: "/env/queue.sqlite" }).options;
+  assert.equal(plain.queueItemId, null, "no queue check without --queue-id");
+  assert.equal(plain.queueDbPath, null, "the environment alone does not enable the check");
+  const flagged = parseWaitArgs([...base, "--queue-id", queueId.toUpperCase()], {}).options;
+  assert.equal(flagged.queueItemId, queueId);
+  assert.match(flagged.queueDbPath, /[\\/]\.codex[\\/]queue_1\.sqlite$/);
+  assert.equal(parseWaitArgs([...base, "--queue-id", queueId],
+    { CODEX_IPC_QUEUE_DB: "/env/queue.sqlite" }).options.queueDbPath, "/env/queue.sqlite");
+  assert.equal(parseWaitArgs([...base, "--queue-id", queueId, "--queue-db", "/flag/q.sqlite"],
+    { CODEX_IPC_QUEUE_DB: "/env/queue.sqlite" }).options.queueDbPath, "/flag/q.sqlite");
+  assert.throws(() => parseWaitArgs([...base, "--queue-id", "not-a-uuid"], {}),
+    /--queue-id must be a UUID/);
+  assert.throws(() => parseWaitArgs([...base, "--queue-db", "/flag/q.sqlite"], {}),
+    /--queue-db requires --queue-id/);
+  assert.equal(QUEUE_NOT_STARTED_GRACE_MS, 30000);
+});
+
+await test("an ordinary wait never reads the queue store", async () => {
+  const root = caseDir("queue-not-enabled");
+  const rollout = writeRollout(root, ownOpenRecords());
+  let reads = 0;
+  const result = await waitForCompletion(directOptions(root, rollout, null), {
+    readQueuedItem: async () => { reads += 1; return { status: "present" }; },
+  });
+  assert.equal(result.token, "pending");
+  assert.equal(reads, 0);
+  assert.equal(result.diagnostics.some((item) => /^queue/.test(item.code)), false);
+});
+
+await test("a stale queued item with no dispatch turn reports queued-not-started once, live, token unchanged", async () => {
+  const root = caseDir("queue-not-started");
+  const rollout = writeRollout(root, [sessionMeta()]);
+  let clock = 1_000_000;
+  const live = [];
+  let reads = 0;
+  const result = await waitForCompletion(
+    directOptions(root, rollout, null, {
+      budgetMs: 5000, intervalMs: 1000, queueItemId: queueId, queueDbPath: "unused",
+    }),
+    {
+      now: () => clock,
+      sleep: async (ms) => { clock += ms; },
+      readQueuedItem: async (request) => {
+        reads += 1;
+        assert.deepEqual(request, { dbPath: "unused", queueId });
+        return {
+          status: "present", queueId, threadId: thread,
+          createdAtMs: clock - QUEUE_NOT_STARTED_GRACE_MS - 1,
+        };
+      },
+      onDiagnostic: (item) => live.push(item),
+    },
+  );
+  assert.equal(result.token, "pending", "the queue check never changes the token");
+  assert.equal(reads, 1, "a reported item is not read again");
+  assert.equal(live.length, 1);
+  assert.equal(live[0].code, "queued-not-started");
+  assert.equal(live[0].queueId, queueId);
+  assert.deepEqual(live[0].possibleCauses,
+    ["thread-busy", "thread-not-loaded", "last-turn-interrupted"]);
+  assert.equal(result.diagnostics.filter((item) => item.code === "queued-not-started").length, 1);
+});
+
+await test("a queued item inside the grace period, an item already gone, or a started dispatch reports nothing", async () => {
+  const root = caseDir("queue-quiet");
+  const empty = writeRollout(root, [sessionMeta()]);
+  const run = async (rollout, item) => {
+    const clock = 5_000_000;
+    let reads = 0;
+    const result = await waitForCompletion(
+      directOptions(path.dirname(rollout), rollout, null, { queueItemId: queueId, queueDbPath: "unused" }),
+      {
+        now: () => clock,
+        readQueuedItem: async () => {
+          reads += 1;
+          return typeof item === "function" ? item(clock) : item;
+        },
+      },
+    );
+    return { result, reads };
+  };
+  const young = await run(empty, (clock) =>
+    ({ status: "present", queueId, threadId: thread, createdAtMs: clock - 1000 }));
+  assert.equal(young.reads, 1);
+  assert.equal(young.result.diagnostics.some((item) => /^queue/.test(item.code)), false);
+  const gone = await run(empty, { status: "absent" });
+  assert.equal(gone.result.diagnostics.some((item) => /^queue/.test(item.code)), false);
+  const started = writeRollout(caseDir("queue-started"), ownOpenRecords());
+  const raced = await run(started, (clock) =>
+    ({ status: "present", queueId, threadId: thread, createdAtMs: clock - 600000 }));
+  assert.equal(raced.result.token, "pending");
+  assert.equal(raced.result.diagnostics.some((item) => /^queue/.test(item.code)), false,
+    "a turn already carries the dispatch");
+});
+
+await test("an unreadable store or another thread's item is diagnosed once without changing the token", async () => {
+  const root = caseDir("queue-unavailable");
+  const rollout = writeRollout(root, [sessionMeta()]);
+  const run = async (item) => {
+    let clock = 0;
+    return waitForCompletion(
+      directOptions(root, rollout, null, {
+        budgetMs: 3000, intervalMs: 1000, queueItemId: queueId, queueDbPath: "unused",
+      }),
+      { now: () => clock, sleep: async (ms) => { clock += ms; }, readQueuedItem: async () => item },
+    );
+  };
+  const unavailable = await run({ status: "unavailable", reason: "queue-store-absent" });
+  assert.equal(unavailable.token, "pending");
+  assert.deepEqual(unavailable.diagnostics.filter((item) => /^queue/.test(item.code)),
+    [{ code: "queue-check-unavailable", queueId, reason: "queue-store-absent" }]);
+  const mismatch = await run({ status: "present", queueId, threadId: otherTurn, createdAtMs: 0 });
+  assert.deepEqual(mismatch.diagnostics.filter((item) => /^queue/.test(item.code)),
+    [{ code: "queue-item-thread-mismatch", queueId, threadId: otherTurn }]);
+  const thrown = await waitForCompletion(
+    directOptions(root, rollout, null, { queueItemId: queueId, queueDbPath: "unused" }),
+    { readQueuedItem: async () => { throw new Error("synthetic read failure"); } },
+  );
+  assert.deepEqual(thrown.diagnostics.filter((item) => /^queue/.test(item.code)),
+    [{ code: "queue-check-unavailable", queueId, reason: "queue-check-error" }]);
+});
+
+await test("CLI --queue-id reads a fixture store read-only and prints queued-not-started once; stdout and exit stay the wait's", async () => {
+  const root = caseDir("queue-cli");
+  const rollout = writeRollout(root, [sessionMeta()]);
+  const store = path.join(root, "store", "queue_1.sqlite");
+  await writeQueueStore(store, [{ id: queueId, threadId: thread, createdAtMs: Date.now() - 600000 }]);
+  const before = fs.readFileSync(store);
+  const args = ["--thread", thread, "--dispatch", dispatch, "--rollout-path", rollout,
+    "--sessions-root", root, "--status-exit-codes"];
+  const plain = cli(args);
+  const flagged = cli([...args, "--queue-id", queueId, "--queue-db", store]);
+  assert.equal(flagged.stdout, plain.stdout, "stdout is the determination token alone");
+  assert.equal(flagged.status, plain.status, "the exit code is unchanged");
+  assert.equal(flagged.stdout, "pending\n");
+  const found = queueDiagnostics(flagged.stderr);
+  assert.equal(found.length, 1, flagged.stderr);
+  assert.equal(found[0].code, "queued-not-started");
+  assert.equal(found[0].threadId, thread);
+  assert.doesNotMatch(flagged.stderr, /ExperimentalWarning/, "the SQLite import warning is not printed");
+  assert.deepEqual(queueDiagnostics(plain.stderr), []);
+  assert.ok(before.equals(fs.readFileSync(store)), "the store is unchanged");
+  assert.deepEqual(fs.readdirSync(path.dirname(store)), ["queue_1.sqlite"], "no sidecar was created");
+
+  const fresh = path.join(root, "fresh", "queue_1.sqlite");
+  await writeQueueStore(fresh, [{ id: queueId, threadId: thread, createdAtMs: Date.now() }]);
+  assert.deepEqual(queueDiagnostics(cli([...args, "--queue-id", queueId, "--queue-db", fresh]).stderr), []);
+  const absent = path.join(root, "absent", "queue_1.sqlite");
+  await writeQueueStore(absent, []);
+  assert.deepEqual(queueDiagnostics(cli([...args, "--queue-id", queueId, "--queue-db", absent]).stderr), []);
+  const missing = cli([...args, "--queue-id", queueId, "--queue-db", path.join(root, "none.sqlite")]);
+  assert.equal(missing.stdout, "pending\n");
+  assert.deepEqual(queueDiagnostics(missing.stderr),
+    [{ code: "queue-check-unavailable", queueId, reason: "queue-store-absent" }]);
+  const defaulted = cli([...args, "--queue-id", queueId]);
+  assert.deepEqual(queueDiagnostics(defaulted.stderr),
+    [{ code: "queue-check-unavailable", queueId, reason: "queue-store-absent" }],
+    "the default store is the isolated home's, which has none");
+  const selected = cli([...args, "--queue-id", queueId, "--queue-db", store],
+    { CODEX_IPC_SQLITE_READER: "{}" });
+  assert.deepEqual(queueDiagnostics(selected.stderr),
+    [{ code: "queue-check-unavailable", queueId, reason: "sqlite-reader-selected" }],
+    "a selected Python reader never falls back to node:sqlite");
+  const usage = cli([...args, "--queue-id", "nope"]);
+  assert.equal(usage.status, 1);
+  assert.equal(usage.stdout, "");
+  assert.match(usage.stderr, /--queue-id must be a UUID/);
+});
+
 console.log(`RESULT: ${passed} passed, 0 failed`);
 NODE

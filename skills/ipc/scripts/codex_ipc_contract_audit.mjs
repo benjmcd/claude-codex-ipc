@@ -24,6 +24,7 @@ const REQUIRED_FILES = [
   "scripts/codex_ipc_client.mjs",
   "scripts/codex_ipc_owner_probe.mjs",
   "scripts/codex_ipc_probe.mjs",
+  "scripts/codex_ipc_queue.mjs",
   "scripts/codex_ipc_autoload.ps1",
   "scripts/codex_ipc_host_policy.ps1",
   "scripts/codex_ipc_revalidate.mjs",
@@ -151,7 +152,7 @@ function main() {
     )?.[1] || "";
   const initialLiveSendPath =
     handoffText.match(
-      /echo "Injecting pickup line into live Desktop thread \$\{IPC_CID\} via IPC router\.\.\."([\s\S]*?)(?=\n[ \t]*if ! authoritative_no_client; then)/,
+      /\n[ \t]*if send_live announce; then([\s\S]*?)(?=\n[ \t]*if ! authoritative_no_client; then)/,
     )?.[1] || "";
   const postAutoloadRetryPath =
     handoffText.match(
@@ -575,9 +576,11 @@ function main() {
     ]),
     check("REQ-017", "No Codex CLI: legacy CLI-backed modes fail before transport access or child launch.", [
       {
-        label: "SKILL.md states the no-CLI wrapper contract",
+        label: "SKILL.md states the no-CLI wrapper contract and its one runtime exception",
         file: "SKILL.md",
-        ok: contains("SKILL.md", "The IPC tooling does not invoke the Codex CLI"),
+        ok:
+          contains("SKILL.md", "The IPC tooling does not invoke the Codex CLI from PATH.") &&
+          contains("SKILL.md", "Only `--deliver queue` starts a Codex binary"),
       },
       {
         label: "all removed modes have stable errors before transport initialization",
@@ -711,6 +714,18 @@ function main() {
           contains("SKILL.md", "--accept-rollout-fallback"),
       },
       {
+        label: "final-message reply mode is explicit, --ipc only, names no reply file, and records itself in the envelope",
+        file: "scripts/handoff_to_codex.sh",
+        ok:
+          contains("scripts/handoff_to_codex.sh", 'REPLY_MODE="file"') &&
+          contains("scripts/handoff_to_codex.sh", "file|final-message) REPLY_MODE=\"$2\" ;;") &&
+          contains("scripts/handoff_to_codex.sh", "Reply mode: final-message. When finished, put your complete reply/result in your final agent") &&
+          contains("scripts/handoff_to_codex.sh", "Do NOT write a reply file for this handoff") &&
+          contains("scripts/codex_ipc_replies.sh", 'ROLLOUT_ANSWERED["${thread}/${dispatch}"]=1') &&
+          contains("SKILL.md", "--reply-mode final-message") &&
+          contains("references/handoff-template.md", "Final-message reply mode"),
+      },
+      {
         label: "handoff template carries the denied-reply completion obligation",
         file: "references/handoff-template.md",
         ok:
@@ -764,7 +779,8 @@ function main() {
       {
         label: "host-policy refusal preserves pickup after target eligibility is established",
         file: "scripts/handoff_to_codex.sh",
-        ok: /report_host_policy_refusal\(\) \{\n[^\n]*\n[^\n]*confirmation=not-attempted[^\n]*\n\s*fallback\n\s*\}/.test(handoffText) &&
+        // The only line allowed between the RESULT line and the pickup is the router-absent queue hint.
+        ok: /report_host_policy_refusal\(\) \{\n[^\n]*\n[^\n]*confirmation=not-attempted[^\n]*\n(?:[ \t]*\[\[ "\$HOST_POLICY_REFUSAL_REASON" != "router-absent" \]\] \|\| print_queue_hint\n)?\s*fallback\n\s*\}/.test(handoffText) &&
           handoffText.indexOf('if [[ -n "$TARGET_REFUSAL_REASON" ]]') < handoffText.indexOf("report_host_policy_refusal()"),
       },
       {
@@ -786,6 +802,16 @@ function main() {
           contains("scripts/codex_ipc_host_policy.ps1", "intended-host-not-running") &&
           contains("scripts/codex_ipc_host_policy.ps1", "other-desktop-host-running") &&
           contains("scripts/codex_ipc_host_policy.ps1", /eligible\s*=\s*\(\$Inventory\.complete\s+-and\s+\$intendedCount\s+-eq\s+1\s+-and\s+\$otherCount\s+-eq\s+0\)/),
+      },
+      {
+        label: "the GUI's Node utility process anchors a runtime only as the GUI's direct, same-executable child",
+        file: "scripts/codex_ipc_host_policy.ps1",
+        ok:
+          contains("scripts/codex_ipc_host_policy.ps1", "function Test-CodexIpcNodeServiceLauncher") &&
+          contains("scripts/codex_ipc_host_policy.ps1", "--utility-sub-type=node\\.mojom\\.NodeService(\\s|$)") &&
+          contains("scripts/codex_ipc_host_policy.ps1", /if \(\$parentKey -eq \[string\]\$Process\.pid -or -not \$GuiById\.ContainsKey\(\$parentKey\)\) \{ return \$false \}/) &&
+          contains("scripts/codex_ipc_host_policy.ps1", /-not \[string\]::Equals\(\$path, \$guiPath, \[System\.StringComparison\]::OrdinalIgnoreCase\)\) \{ return \$false \}/) &&
+          contains("scripts/codex_ipc_host_policy.ps1", "'--__codex-windows-mxc'"),
       },
       {
         label: "wrapper invokes the send gate inside every live attempt and never activates an alternate host",
@@ -818,6 +844,42 @@ function main() {
           contains("scripts/codex_ipc_autoload.ps1", "mock-inputs-require-dry-run") &&
           contains("scripts/codex_ipc_autoload.ps1", "Test-CodexAlternateForeground") &&
           contains("scripts/codex_ipc_autoload.ps1", "foreground-alternate-host"),
+      },
+      {
+        label: "a proven 26.1117+ intended host is refused inside the send gate, before the client, with the pickup line",
+        file: "scripts/handoff_to_codex.sh",
+        ok:
+          contains("scripts/codex_ipc_host_policy.ps1", "return ([version]::new($parsed.Major, $parsed.Minor) -lt [version]::new(26, 1117))") &&
+          contains("scripts/codex_ipc_host_policy.ps1", "intendedHostVersion = $intendedHostVersion") &&
+          contains("scripts/codex_ipc_host_policy.ps1", "routerExpected = $routerExpected") &&
+          contains("scripts/handoff_to_codex.sh", 'if (routerExpected === false && typeof hostVersion !== "string") process.exit(1);') &&
+          contains("scripts/handoff_to_codex.sh", 'HOST_POLICY_REFUSAL_REASON="router-absent"') &&
+          /host_policy_send\(\) \{[\s\S]*HOST_POLICY_REFUSAL_REASON="router-absent"[\s\S]*?\n    \}\n    report_host_policy_refusal\(\) \{/.test(handoffText),
+      },
+      {
+        label: "that refusal points to --deliver queue instead of pasting, only when the intended runtime is resolved",
+        file: "scripts/handoff_to_codex.sh",
+        ok:
+          contains("scripts/handoff_to_codex.sh",
+            '[[ "$HOST_POLICY_REFUSAL_REASON" != "router-absent" ]] || print_queue_hint') &&
+          contains("scripts/handoff_to_codex.sh",
+            "re-send this handoff with --deliver queue instead of pasting the pickup line below") &&
+          contains("scripts/handoff_to_codex.sh", "--deliver queue needs the host policy's intendedRuntime resolved") &&
+          matchCount("scripts/handoff_to_codex.sh", /print_queue_hint/g) === 2,
+      },
+      {
+        label: "a connect-phase failure is pre-write non-admission only in its exact structure, on the first attempt and every retry",
+        file: "scripts/handoff_to_codex.sh",
+        ok:
+          contains("scripts/codex_ipc_client.mjs", "if (routerPipePresent(opts.pipePath) === false) {") &&
+          contains("scripts/codex_ipc_client.mjs", 'phase: "connect",') &&
+          contains("scripts/codex_ipc_client.mjs", "sentRequests: [],") &&
+          contains("scripts/handoff_to_codex.sh", 'value?.phase === "connect" &&') &&
+          contains("scripts/handoff_to_codex.sh", "value.sentRequests.length === 0 &&") &&
+          contains("scripts/handoff_to_codex.sh", "RESULT: gui-unowned -- reason=router-absent -- confirmation=not-attempted") &&
+          contains("scripts/handoff_to_codex.sh", "RESULT: gui-unowned -- reason=router-unreachable -- confirmation=not-attempted") &&
+          initialLiveSendPath.includes("report_router_connect_failure_if_any") &&
+          postAutoloadRetryPath.includes("report_router_connect_failure_if_any"),
       },
       {
         label: "wrapper pins the complete host and activation refusal vocabulary and the multi-cause no-client observation",
@@ -969,6 +1031,59 @@ function main() {
           matchCount("scripts/codex_ipc_rollout_reader.mjs", /node:sqlite/g) === 0,
       },
       {
+        label: "append-only growth of the bound page is a stale snapshot that never certifies; a shrink stays unproven",
+        file: "scripts/codex_ipc_rollout_reader.mjs",
+        ok:
+          contains("scripts/codex_ipc_rollout_reader.mjs", "!cutoffIsRecordBoundary(rolloutPath, options.expectedSize)") &&
+          contains("scripts/codex_ipc_rollout_reader.mjs", 'return unproven("bound-page-size-changed");') &&
+          contains("scripts/codex_ipc_rollout_reader.mjs", 'return pageAssessment("stale", "page-snapshot-stale", {') &&
+          contains("scripts/codex_ipc_wait.mjs", 'if (assessment.status === "stale") {') &&
+          contains("scripts/codex_ipc_wait.mjs", 'const resolved = page === "current"') &&
+          contains("scripts/codex_ipc_rollout_observe.mjs", 'if (assessment.status === "stale") {') &&
+          contains("scripts/codex_ipc_rollout_observe.mjs", 'if (page === "current" && admissionObserved && !hardReadFailure) {') &&
+          contains("scripts/codex_ipc_reply_harvest.mjs", 'if (pageAssessment.status === "stale") {'),
+      },
+      {
+        label: "rollout replies are materialized only by explicit opt-in, after certification, beside the envelope, never over anything",
+        file: "scripts/codex_ipc_reply_harvest.mjs",
+        ok:
+          contains("scripts/codex_ipc_reply_harvest.mjs", "export function materializeDispatch(options)") &&
+          contains("scripts/codex_ipc_reply_harvest.mjs", 'descriptor = fs.openSync(temp, "wx", 0o600);') &&
+          contains("scripts/codex_ipc_reply_harvest.mjs", "fs.linkSync(temp, target);") &&
+          contains("scripts/codex_ipc_reply_harvest.mjs", 'if (lstatOrNull(replyPath)) return materializeRefused("primary-present");') &&
+          contains("scripts/codex_ipc_reply_harvest.mjs", 'return materializeRefused("dispatch-id-reused", harvested.diagnostics);') &&
+          contains("scripts/codex_ipc_reply_harvest.mjs", 'if (harvested.source !== "rollout-fallback") {') &&
+          contains("scripts/codex_ipc_reply_harvest.mjs", 'return materializeRefused("body-too-large", [], { sourceBytes: harvested.sourceBytes });') &&
+          contains("scripts/codex_ipc_reply_harvest.mjs", "export const MATERIALIZED_REPLY_SUFFIX = \".reply.rollout.md\";") &&
+          contains("scripts/codex_ipc_wait.mjs", "--materialize-reply requires --accept-rollout-fallback") &&
+          contains("scripts/codex_ipc_wait.mjs", 'result.replySource === "rollout-fallback") {') &&
+          contains("scripts/handoff_to_codex.sh", "--status-exit-codes --materialize-reply)") &&
+          contains("scripts/handoff_to_codex.sh", "-name '*.reply.rollout.md' -o -name '*.reply.rollout.json'") &&
+          contains("scripts/codex_ipc_replies.sh", 'reply_source="rollout-materialized"') &&
+          !contains("scripts/codex_ipc_replies.sh", "--materialize"),
+      },
+      {
+        label: "archived (zstd) pages never become record sources, and an archived paginated page is read for the veto or fails it closed",
+        file: "scripts/codex_ipc_rollout_reader.mjs",
+        ok:
+          contains("scripts/codex_ipc_rollout_reader.mjs", "export function parseRolloutArchiveBasename") &&
+          contains("scripts/codex_ipc_rollout_reader.mjs", "(filename.archived ? archives : matches).push(candidate);") &&
+          contains("scripts/codex_ipc_rollout_reader.mjs", "validateCandidate(candidatePath, threadId, { archived })") &&
+          contains("scripts/codex_ipc_rollout_reader.mjs", '"archive-invalid" : "archive-unsupported"'),
+      },
+      {
+        label: "settings-only response items are admitted only in their census shape; steer input stays drift",
+        file: "scripts/codex_ipc_rollout_reader.mjs",
+        ok:
+          contains("scripts/codex_ipc_rollout_reader.mjs", "function settingsResponseItem(envelopeType, payloadType, body)") &&
+          contains("scripts/codex_ipc_rollout_reader.mjs", '["configuration_update", new Set(["type", "reasoning"])]') &&
+          contains("scripts/codex_ipc_rollout_reader.mjs", '["additional_tools", new Set(["type", "id", "role", "tools"])]') &&
+          contains("scripts/codex_ipc_rollout_reader.mjs", "Object.keys(body).every((key) => keys.has(key))") &&
+          contains("scripts/codex_ipc_rollout_reader.mjs", 'body.role === "developer"') &&
+          matchCount("scripts/codex_ipc_rollout_reader.mjs", /native_steer_ownership/g) === 1 &&
+          !contains("scripts/codex_ipc_rollout_reader.mjs", /RESPONSE_TYPES = new Set\(\[[^\]]*"(?:configuration_update|additional_tools)"/),
+      },
+      {
         label: "observer, waiter, and harvester share the same SQLite-free page assessor",
         file: "scripts/codex_ipc_rollout_observe.mjs",
         ok:
@@ -1020,11 +1135,12 @@ function main() {
           manualPreparationPath.length > 0 &&
           [
             "read \\\"${OUTBOUND}\\\" and proceed",
-            "Codex's reply will be written to ${INBOUND}",
+            "print_reply_route",
             "ROLLOUT-PATH: Supply the inspector's database-designated page with --rollout-path <path>.",
             "print_wait_hint",
             "exit 0",
           ].every((anchor) => manualPreparationPath.includes(anchor)) &&
+          contains("scripts/handoff_to_codex.sh", 'echo "Codex\'s reply will be written to ${INBOUND} (Claude Code reads it)."') &&
           !/RESULT:|host_policy_send|send_live|observe_rollout|powershell\.exe|codex_ipc_client|codex_ipc_autoload/.test(
             manualPreparationPath,
           ),
@@ -1133,6 +1249,78 @@ function main() {
           contains("references/troubleshooting.md", "Retry creates another rollout page"),
       },
     ], "Static installed-skill evidence only. Aliases are path inputs, not compatibility or authority claims; hermetic component tests prove precedence and validation."),
+    check("REQ-027", "Runtime queue delivery runs only the intended host's proven runtime, once, and never claims non-admission after it ran.", [
+      {
+        label: "host policy reports a runtime only from the app-server it proved under the one intended GUI",
+        file: "scripts/codex_ipc_host_policy.ps1",
+        ok:
+          contains("scripts/codex_ipc_host_policy.ps1", "function Get-CodexIpcIntendedRuntime") &&
+          contains("scripts/codex_ipc_host_policy.ps1", "guiRuntimes = @($guiRuntimes)") &&
+          contains("scripts/codex_ipc_host_policy.ps1", "intendedRuntime = $intendedRuntime") &&
+          contains("scripts/codex_ipc_host_policy.ps1", "foreach ($guiKey in @($runtimeByGuiId.Keys"),
+      },
+      {
+        label: "the helper launches exactly queue --thread --message from an absolute runtime file, with a timeout and no shell",
+        file: "scripts/codex_ipc_queue.mjs",
+        ok:
+          contains("scripts/codex_ipc_queue.mjs",
+            'spawn(runtime, ["queue", "--thread", threadId.toLowerCase(), "--message", message], {') &&
+          contains("scripts/codex_ipc_queue.mjs", "!path.isAbsolute(runtime) || !regularFile(runtime)") &&
+          contains("scripts/codex_ipc_queue.mjs", "timeout: timeoutMs,") &&
+          !contains("scripts/codex_ipc_queue.mjs", /shell:\s*true/) &&
+          !contains("scripts/codex_ipc_queue.mjs", /"--(?:resume|remote|config)"|"-c"/),
+      },
+      {
+        label: "only a launch with no process is not-attempted; every outcome after the runtime ran is unknown unless exact",
+        file: "scripts/codex_ipc_queue.mjs",
+        ok:
+          contains("scripts/codex_ipc_queue.mjs", "if (child.error && !child.pid) {") &&
+          contains("scripts/codex_ipc_queue.mjs", 'return result("unknown", "queue-timeout"') &&
+          contains("scripts/codex_ipc_queue.mjs", 'return result("unknown", "queue-runtime-failed"') &&
+          contains("scripts/codex_ipc_queue.mjs", 'return result("unknown", "queue-output-unrecognized"') &&
+          contains("scripts/codex_ipc_queue.mjs", 'return result("unknown", "queue-thread-mismatch"') &&
+          contains("scripts/codex_ipc_queue.mjs", "if (body.length === 0 || /[\\r\\n]/u.test(body)) return null;"),
+      },
+      {
+        label: "the wrapper's queue route follows the target gate, keeps the shared send gate, expects a routerless host, and suppresses pickup after the runtime ran",
+        file: "scripts/handoff_to_codex.sh",
+        ok:
+          handoffText.indexOf('echo "MANUAL: thread-bound envelope is ready for operator pickup."') > 0 &&
+          handoffText.indexOf('if [[ "$DELIVERY" == "queue" ]]; then\n        report_queue_unavailable()') >
+            handoffText.indexOf('echo "MANUAL: thread-bound envelope is ready for operator pickup."') &&
+          contains("scripts/handoff_to_codex.sh", "if ! host_policy_send queue; then") &&
+          contains("scripts/handoff_to_codex.sh", 'if [[ "$route" != "queue" && "$router_expected" == "false" ]]; then') &&
+          contains("scripts/handoff_to_codex.sh", 'echo "RESULT: queue-unavailable -- reason=$1 -- confirmation=not-attempted" >&2') &&
+          contains("scripts/handoff_to_codex.sh", 'echo "RESULT: failed-closed -- reason=$1 -- confirmation=unknown" >&2') &&
+          contains("scripts/handoff_to_codex.sh", 'echo "RESULT: queued -- reason=runtime-accepted -- confirmation=pending -- queueId=${QUEUE_ID}"') &&
+          (() => {
+            // After the runtime ran: the ambiguity notice, never the pickup line.
+            const body = handoffText.match(/report_queue_unknown\(\) \{\n([\s\S]*?)\n        \}\n/)?.[1] || "";
+            return body.includes("fallback_ambiguous") && body.includes("exit 1") &&
+              !/^\s*fallback\s*$/m.test(body);
+          })(),
+      },
+      {
+        label: "the waiter's queue check is opt-in and lazily loads the read-only store reader, so the waiter stays free of node:sqlite",
+        file: "scripts/codex_ipc_wait.mjs",
+        ok:
+          contains("scripts/codex_ipc_wait.mjs", 'await import(new URL("./codex_ipc_queue.mjs", import.meta.url))') &&
+          contains("scripts/codex_ipc_wait.mjs", "if (!options.queueItemId) return null;") &&
+          contains("scripts/codex_ipc_wait.mjs", "if (queueCheck) await queueCheck(records);") &&
+          matchCount("scripts/codex_ipc_wait.mjs", /node:sqlite/g) === 0 &&
+          contains("scripts/codex_ipc_queue.mjs", "new DatabaseSync(dbPath, { readOnly: true })"),
+      },
+      {
+        label: "SKILL.md documents queue delivery, its limits, the version-skew rule and the manual fallback",
+        file: "SKILL.md",
+        ok:
+          contains("SKILL.md", "--deliver queue") &&
+          contains("SKILL.md", "It never steers") &&
+          contains("SKILL.md", "Version-skew rule") &&
+          contains("SKILL.md", "`queued-not-started`") &&
+          contains("SKILL.md", "RESULT: queued -- reason=runtime-accepted -- confirmation=pending -- queueId=<uuid>"),
+      },
+    ], "Static evidence backed by hermetic tests with a fake runtime and fixture queue stores. The live queue service's start timing and the real runtime's success sentence are proven only by live acceptance on a scratch thread."),
   ];
 
   const ok = Object.values(files).every((item) => item.ok) &&

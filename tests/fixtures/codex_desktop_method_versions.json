@@ -560,6 +560,39 @@
         ]
       },
       "scope": "The retained archive scan, corrected full-table comparison and independent receipt support only the named observations; the separate byte-seek read verifies the seven follower-token offsets and records current archive mtime under the same full hash. The retained capture does not provide member paths/hashes, archive data-start offset, table-start offset, a re-derived hostId resolver byte anchor or an identity-throw byte anchor. None is copied from older builds. Raw .turnStart count 160 is not a word-bounded property-token count; the two turnStartParams hits are not localized by this capture. The Daybreak message-key count 65 does not establish unchanged predicate semantics or admission on other models. No whole-application comparison or new installed-route proof is claimed."
+    },
+    {
+      "$comment": "Router-removal observation, appended 2026-11-23. Not a method-table derivation: the 26.1117 Store build serves no IPC router, so there is no follower table to derive. Every .js, .json and .html member of each archive was scanned read-only for the router markers below; the top-level table and the earlier records are unchanged and remain historical evidence.",
+      "build": "26.1117.4957.0",
+      "package": "OpenAI.Codex_26.1117.4957.0_x64__2p2nqsd0c76g0",
+      "observedAtUtc": "2026-11-23T08:51:10Z",
+      "asar": {
+        "size": 443800006,
+        "sha256": "8a437aad94098770c1bf5fd5385c204e162b62c6d7917f688741d74e05babe90"
+      },
+      "routerServed": false,
+      "markerCounts": {
+        "IpcRouterManager": 0,
+        "getOrStartRouterEndpoint": 0,
+        "thread-follower-start-turn": 0,
+        "no-client-found": 0
+      },
+      "residue": "The pipe-path helper that still names \\\\.\\pipe\\codex-ipc survives in .vite/build/early-bootstrap-824-de8313738dd96f7c.js, but nothing listens on it. Cross-window coordination moved to an in-process app-view service with no external transport.",
+      "previousStoreBuildWithRouter": {
+        "build": "26.1111.9664.0",
+        "asar": {
+          "size": 783725118,
+          "sha256": "a538c8bfa0bf6a43b06c4c62aad93616a78c4cad306602cc05f528844a551598"
+        },
+        "routerMember": ".vite/build/early-bootstrap-631-3c9a0c378663988e.js",
+        "markerCounts": {
+          "IpcRouterManager": 1,
+          "getOrStartRouterEndpoint": 2,
+          "thread-follower-start-turn": 11
+        }
+      },
+      "effect": "A live --ipc send on 26.1117 builds finds no router pipe and reports RESULT: gui-unowned -- reason=router-absent -- confirmation=not-attempted with the pickup line; nothing is sent.",
+      "scope": "Static archive scan of two Store builds only. It does not establish whether a later build restores a router, and it does not certify any other transport."
     }
   ],
   "frame": {

@@ -206,6 +206,30 @@ R8b="$TMP/root8b"; run_dispatch "$R8b" CODEX_IPC_RETENTION_DAYS=7
     && ok "canonical value '7' still dispatches" \
     || no "canonical value '7' failed to dispatch (rc=$RC)"
 
+echo "== 9. a materialized rollout copy answers its dispatch for the sweep =="
+R9="$TMP/root9"; CH9="$R9/sweepsess/filedrop"; mkdir -p "$CH9"
+printf 'aged task, aged copy\n' > "$CH9/1000-6-ffffffffffffffff.task.md"
+printf 'aged copy\n'            > "$CH9/1000-6-ffffffffffffffff.reply.rollout.md"
+printf '{}\n'                   > "$CH9/1000-6-ffffffffffffffff.reply.rollout.json"
+printf 'aged task, fresh copy\n' > "$CH9/1000-7-1111111111111111.task.md"
+printf 'fresh copy\n'           > "$CH9/1000-7-1111111111111111.reply.rollout.md"
+printf 'aged unanswered\n'      > "$CH9/1000-8-2222222222222222.task.md"
+age "$CH9/1000-6-ffffffffffffffff.task.md" "$CH9/1000-6-ffffffffffffffff.reply.rollout.md" \
+    "$CH9/1000-6-ffffffffffffffff.reply.rollout.json" "$CH9/1000-7-1111111111111111.task.md" \
+    "$CH9/1000-8-2222222222222222.task.md"
+run_dispatch "$R9" CODEX_IPC_RETENTION_DAYS=7
+[[ $RC -eq 0 ]] && ok "dispatch exits 0" || no "dispatch failed (rc=$RC): $OUT"
+[[ ! -e "$CH9/1000-6-ffffffffffffffff.task.md" && ! -e "$CH9/1000-6-ffffffffffffffff.reply.rollout.md" \
+   && ! -e "$CH9/1000-6-ffffffffffffffff.reply.rollout.json" ]] \
+    && ok "an aged task, its aged materialized copy and provenance are swept" \
+    || no "aged materialized pair not swept"
+[[ ! -e "$CH9/1000-7-1111111111111111.task.md" && -f "$CH9/1000-7-1111111111111111.reply.rollout.md" ]] \
+    && ok "an aged task answered by a fresh materialized copy is swept; the copy stays" \
+    || no "materialized pairing for an aged task"
+[[ -f "$CH9/1000-8-2222222222222222.task.md" ]] \
+    && ok "an aged task with neither reply nor copy still survives" \
+    || no "aged unanswered task deleted"
+
 echo ""
 echo "RESULT: $PASS passed, $FAIL failed"
 [[ $FAIL -eq 0 ]] && echo "ALL GREEN" || echo "FAILURES PRESENT"

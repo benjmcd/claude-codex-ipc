@@ -77,8 +77,11 @@ export async function observeRollout(options, injected = {}) {
   let pageGuidanceRecorded = false;
   const diagnostics = [];
 
-  const pageIsCurrent = () => {
-    if (!candidatePath || !cursor) return false;
+  let staleSnapshotRecorded = false;
+  // "current" may confirm; "stale" (the page grew after this read) keeps observing and never
+  // confirms; anything else is terminal.
+  const pageStatus = () => {
+    if (!candidatePath || !cursor) return "unproven";
     const assessment = assessPage({
       threadId: options.threadId,
       rolloutPath: candidatePath,
@@ -89,8 +92,13 @@ export async function observeRollout(options, injected = {}) {
       deadlineAt: startedAt + budgetMs,
       now,
     });
+    if (assessment.status === "stale") {
+      if (!staleSnapshotRecorded) diagnostics.push(...(assessment.diagnostics || []));
+      staleSnapshotRecorded = true;
+      return "stale";
+    }
     diagnostics.push(...(assessment.diagnostics || []));
-    return assessment.status === "current";
+    return assessment.status === "current" ? "current" : "unproven";
   };
 
   for (let iteration = 0; iteration < maxIterations; iteration += 1) {
@@ -133,7 +141,7 @@ export async function observeRollout(options, injected = {}) {
         // full read solely to keep waiting; growth/change and any final or budget-edge attempt
         // that begins before the deadline return to the hash-validating reader below. A deadline
         // that elapses during sleep returns unavailable/pending evidence without certification.
-        if (!pageIsCurrent()) return { token: "rollout-unavailable", diagnostics };
+        if (pageStatus() === "unproven") return { token: "rollout-unavailable", diagnostics };
       } else {
         let readAdmission = false;
         let readAdmissionByteOffset = null;
@@ -183,10 +191,11 @@ export async function observeRollout(options, injected = {}) {
         // Page authority is independent of whether this dispatch has appeared. A trustworthy
         // full read of a superseded page must not sleep to its budget and report pending merely
         // because its searched-for marker is absent.
-        if (completeRead && !pageIsCurrent()) {
+        const page = completeRead ? pageStatus() : null;
+        if (page === "unproven") {
           return { token: "rollout-unavailable", diagnostics };
         }
-        if (completeRead && admissionObserved && !hardReadFailure) {
+        if (page === "current" && admissionObserved && !hardReadFailure) {
           return { token: "rollout-hit", diagnostics };
         }
         if (!parsed.ok && parsed.reason === "deadline-exceeded") {

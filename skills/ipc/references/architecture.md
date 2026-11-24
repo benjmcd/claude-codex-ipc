@@ -43,6 +43,25 @@ it writes, locks, and creates nothing (not even the transport root). Flags:
 closed (exit 1, never a false "0 replies"). Per-entry (session/thread/dispatch) attribution is what
 keeps this a view rather than a re-commingling of channels.
 
+A materialized rollout copy (`<dispatch>.reply.rollout.md`, written only by the opt-in
+`codex_ipc_wait.mjs --materialize-reply` or `codex_ipc_reply_harvest.mjs --materialize` after the
+harvester's fallback certification, with `.reply.rollout.json` provenance) renders as
+`source=rollout-materialized` when no primary `.reply.md` exists; a primary always wins. The
+supersession check runs against it while the rollout is readable, and the footer counts it as
+answered scope-wide. The retention sweep treats it like a reply: an aged task is swept once a reply
+or a copy exists, and aged copies are swept like replies. Writes use an exclusively created
+private temp file hard-linked into place, so an existing file is never replaced.
+
+After each dispatch's body the view prints a labelled section of the recorded reasoning of that
+dispatch's own turn (`--reasoning full|headline|none`, default `full`; items whole unless
+`--reasoning-max-item-chars` caps them; `--reasoning-max-bytes`, 64000 per dispatch by default, is a
+safety limit that pages and never shortens an item). The section comes from
+`scripts/codex_ipc_reasoning.mjs --dispatch`, which binds its window to the turn the shared dispatch
+correlator names and reads reasoning through the rollout reader's own owner, fork-history and
+integrity rules. The section is untrusted display data, delimited so recorded text cannot forge an
+envelope, and it never enters the `source=` body or the supersession lines. A dispatch whose turn
+cannot be bound (absent, reused ID, no turn ID) says `REASONING dispatch-turn unavailable reason=...`.
+
 ### Completion, freshness, and supersession
 
 The rollout correlator exposes orthogonal evidence rather than one overloaded success flag:
@@ -187,6 +206,48 @@ ambient live settings and rejects explicit live-only host/foreground flags befor
 transport default remains `~/.claude/ipc`; relocating `CODEX_IPC_ROOT` to a target-writable location
 is an operator choice and every participant must use the same explicit root.
 
+### Runtime queue delivery (`--ipc <uuid> --deliver queue`)
+
+Codex Desktop 26.1117+ has no IPC router, but its runtime keeps a durable per-thread queue
+(`queue_1.sqlite`) that other processes may write; upstream built `codex queue` for this. The App's
+queue service polls the store (`PRAGMA data_version`, about every 10 s) for loaded threads and
+starts the first item with `start_turn_if_idle` as an ordinary user turn (`turn_trigger: "queue"`),
+deleting the item once the turn has started.
+
+The route writes the same envelope and runs the same single target inspection (refusals carry
+`confirmation=not-attempted` and no pickup), then the shared host policy's send gate, where a
+routerless host is expected rather than refused. The policy's `intendedRuntime` names the runtime:
+the app-server executable proven under the one intended GUI, directly or through its
+`node.mojom.NodeService` utility child, by the same ancestry proof the send gate already uses
+(`resolved`, `missing`, `ambiguous`, or `not-evaluated` without exactly one intended GUI). This is
+the version-skew rule: only that executable runs the queue command, because another build could
+migrate the state databases under the App, and nothing is looked up on PATH.
+
+`codex_ipc_queue.mjs send` then preflights read-only (an absolute, regular runtime file named
+`codex.exe`; a `CODEX_HOME` equal to the inspected home; an existing `queue_1.sqlite`) and runs
+`<runtime> queue --thread <uuid> --message <pickup line>` once as an argv array, without a shell,
+`--resume`, `--remote` or `-c`, under `CODEX_IPC_QUEUE_TIMEOUT_MS` (default 30000). Only stdout that
+is exactly `Queued message <uuid> for thread <target>.` is success:
+`RESULT: queued -- reason=runtime-accepted -- confirmation=pending -- queueId=<uuid>` and the WAIT
+line with `--queue-id`. A refusal before the run, or a launch that produced no process, is
+`queue-unavailable -- confirmation=not-attempted` with the pickup line. Anything after the runtime
+ran (nonzero exit, signal, timeout, extra or unrecognized output, another thread) is
+`failed-closed -- confirmation=unknown`: the item may be queued and would start by itself, so pickup
+and WAIT are suppressed and resending is forbidden.
+
+The queue never steers. A busy thread runs the item after its current turn; an unloaded thread, or
+one whose last turn was interrupted, keeps it until the thread is opened in the App. The waiter's
+opt-in `--queue-id` check opens the store read-only through `codex_ipc_queue.mjs`, so the waiter
+module itself stays SQLite-free, and reports one non-terminal `queued-not-started` once the item has
+been queued for 30 s with no turn carrying the dispatch.
+
+`--reply-mode final-message` (any `--ipc` delivery) is the alternative that keeps the transport root,
+`host-policy.json` and every other lane's envelopes out of lane write access: the envelope replaces
+its reply-file request with `Reply mode: final-message.` and asks for the full result in the final
+agent message, which the `--accept-rollout-fallback` waiter certifies and the dual-source viewer
+renders. The default `file` mode envelope is byte-for-byte unchanged. Nothing detects a lane's
+sandbox; the dispatcher chooses the mode.
+
 ### Live Desktop IPC injection (`--ipc`, optional, EXPERIMENTAL)
 
 Provenance: this transport was validated against a live Codex Desktop in the private predecessor
@@ -204,6 +265,24 @@ IPC router named pipe (`\\.\pipe\codex-ipc`, `thread-follower-start-turn`). This
 **private Codex Desktop internals** and can break in any Codex Desktop update; revalidate with
 `codex_ipc_revalidate.mjs` (and, if needed, a controlled `codex_ipc_write_proof.mjs` run) after
 updates.
+
+Codex Desktop 26.1117 and later serve no router pipe; the router was removed upstream after
+26.1111. The host policy emits the intended GUI's version (`intendedHostVersion`, from its
+`resources\owl-app.ini` `AppVersion`, else its Store package folder name) and `routerExpected`
+(`false` from 26.1117, `true` before, `null` when unknown). On `false` the send gate refuses with
+`gui-unowned -- reason=router-absent -- confirmation=not-attempted` and the pickup line before the
+client runs, so no process serving that pipe name is ever contacted. That refusal alone adds one
+`QUEUE-HINT:` line after its `RESULT:` line: with the policy's `intendedRuntime` resolved (which
+queue delivery needs), re-send the handoff with `--deliver queue` instead of pasting, for a loaded,
+idle target, and never paste that pickup line afterwards; otherwise the line names the runtime
+status. The live progress line prints only after the send gate passes and claims an attempt, not
+an injection. For any other host the client lists the Windows pipe namespace before connecting and reports a missing pipe,
+or any other connect-phase failure, as a structured `phase: "connect"` result with no sent
+requests. Every frame is written only after connect, so the wrapper maps that exact structure to
+`gui-unowned -- reason=router-absent|router-unreachable -- confirmation=not-attempted` and prints
+the pickup line. A connect claim that carries a request or names another thread stays
+`failed-closed -- reason=router-pipe-failure -- confirmation=unknown`. On those builds, runtime
+queue delivery (`--deliver queue`, above) takes the router's place.
 
 Every live `--ipc` send reports exactly one result:
 
@@ -446,14 +525,20 @@ file-drop pickup line.
 
 ### Removed in v0.1.8: headless `--exec` (and `--app` / `--open`)
 
-The CLI-backed modes were removed in v0.1.8. The wrapper no longer invokes the `codex` binary on
-any path, and there is no headless execution path. Delivery is the default file-drop handoff or
-live `--ipc` GUI injection.
+The CLI-backed modes were removed in v0.1.8. The wrapper never invokes a `codex` found on PATH, and
+there is no headless execution path. Delivery is the default file-drop handoff, thread-bound manual
+pickup, runtime queue delivery, or live `--ipc` GUI injection. The only Codex binary any route
+starts is the intended host's own runtime, for the single `queue` command of `--deliver queue`.
 
 ## Read-only inspection surfaces
 
 - `codex_ipc_session_inspect.mjs` — one thread's state-DB row plus rollout JSONL tail, with
   heuristic activity signals (mid-turn detection). Opens SQLite `readOnly:true`.
+  Its default output also carries `rollout.primary.reasoning` (thread-activity/1: the latest
+  turn's recorded reasoning, untrusted; `--turns N`, `--turn <id>`, `--all-turns`,
+  `--reasoning headline|none`).
+- `codex_ipc_reasoning.mjs` — the same reasoning projection for one thread or one dispatch's own
+  turn, as JSON or delimited text; the reply viewer's reasoning section.
 - `codex_ipc_thread_locator.mjs` — candidate conversationIds for a workspace/project from the
   Desktop thread index. Candidates are discovery, not send authority. `--since-*` compares current
   indexed timestamps; reset/revert can make an older thread match, so inclusion does not prove

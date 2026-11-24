@@ -13,6 +13,10 @@
 #       [--deliver live|manual] [--request-goal] \
 #       [--autoload off|codex-uri] [--intended-host package|ABSOLUTE-EXE] \
 #       [--foreground-policy defer|switch|restore-if-known] [--ack-foreground-switch] [--] "task"
+#   ./scripts/handoff_to_codex.sh --ipc <conversationId> --deliver queue \
+#       [--reply-mode file|final-message] [--request-goal] [--intended-host package|ABSOLUTE-EXE] [--] "task"
+#       # queue the pickup line with the intended Desktop host's own runtime (`codex.exe queue`);
+#       # the recommended thread-bound path on Codex Desktop 26.1117+, which serves no IPC router
 #
 # The file-drop default is the recommended path: it appears in the Codex Desktop GUI (your own session
 # reads the file) and has zero effect on any other running Codex session.
@@ -34,8 +38,9 @@
 #   CODEX_IPC_RETENTION_DAYS=<n>       prune transport files older than n days on each run.
 #                                      KEEP-ONLY BY DEFAULT: unset, empty and 0 all mean never
 #                                      delete; pruning requires an explicit positive integer.
-#                                      When enabled: aged *.reply.md files, and aged
-#                                      *.task.md files whose same-dispatch *.reply.md exists, are
+#                                      When enabled: aged *.reply.md files, aged materialized
+#                                      *.reply.rollout.md/.json copies, and aged *.task.md files
+#                                      whose same-dispatch reply or materialized copy exists, are
 #                                      deleted. An UNREPLIED *.task.md is NEVER age-deleted: an
 #                                      outstanding dispatch is kept until it is answered, and
 #                                      pairing ambiguity errs toward retention.
@@ -62,6 +67,8 @@
 #   CODEX_IPC_OBSERVE_BUDGET_MS=<n>    post-acceptance rollout observation cap
 #                                      (default 20000; measurement-informed)
 #   CODEX_IPC_OBSERVE_INTERVAL_MS=<n>  positive rollout observation interval override
+#   CODEX_IPC_QUEUE_TIMEOUT_MS=<n>     --deliver queue runtime timeout (default 30000); a timeout
+#                                      reports confirmation=unknown, never not-attempted
 
 set -euo pipefail
 
@@ -78,8 +85,9 @@ case "${1:-}" in
             '  handoff_to_codex.sh "<task>"                       file-drop (writes an envelope; prints a pickup line)' \
             '  handoff_to_codex.sh --request-goal [--] "<task>"  file-drop with an explicit goal-setup request' \
             '  handoff_to_codex.sh --ipc <conversationId> "<task>" live delivery into an existing Desktop thread' \
-            '  handoff_to_codex.sh --ipc <conversationId> --deliver manual [--request-goal] -- "<task>"' \
-            '  handoff_to_codex.sh --ipc <conversationId> [--deliver live] [--request-goal] [--autoload off|codex-uri] [--intended-host package|ABSOLUTE-EXE] [--foreground-policy defer|switch|restore-if-known] [--ack-foreground-switch] -- "<task>"' \
+            '  handoff_to_codex.sh --ipc <conversationId> --deliver manual [--reply-mode file|final-message] [--request-goal] -- "<task>"' \
+            '  handoff_to_codex.sh --ipc <conversationId> --deliver queue [--reply-mode file|final-message] [--request-goal] [--intended-host package|ABSOLUTE-EXE] -- "<task>"' \
+            '  handoff_to_codex.sh --ipc <conversationId> [--deliver live] [--reply-mode file|final-message] [--request-goal] [--autoload off|codex-uri] [--intended-host package|ABSOLUTE-EXE] [--foreground-policy defer|switch|restore-if-known] [--ack-foreground-switch] -- "<task>"' \
             '  handoff_to_codex.sh -h | --help | -v | --version' \
             '' \
             'NOTES:' \
@@ -95,6 +103,12 @@ case "${1:-}" in
             '  inspect, replace, or otherwise change an existing goal.' \
             '  --deliver manual writes the same thread-bound envelope, inspects the target, and prints' \
             '  pickup + WAIT instructions without contacting the Desktop pipe, host helper, or opener.' \
+            '  --deliver queue (recommended on Codex Desktop 26.1117+, which serves no router) queues the' \
+            '  pickup line with the runtime of the intended host (codex.exe queue, never codex on PATH)' \
+            '  after the same target checks; it never steers, and an unloaded or interrupted thread keeps' \
+            '  the item queued until it is opened. RESULT: queued ... -- queueId=<id> plus WAIT on success.' \
+            '  --reply-mode final-message (--ipc only) asks for the reply in the final agent message, not' \
+            '  a reply file, for a target that cannot write the transport root; the envelope records it.' \
             '  Transport root: ${CODEX_IPC_ROOT:-~/.claude/ipc}. Envelopes are kept by default.' \
             '  --app/--open/--exec were removed in v0.1.8 (No Codex CLI).' \
             '' \
@@ -287,6 +301,13 @@ TASK=""
 REQUEST_GOAL=0
 DELIVERY="live"
 DELIVERY_FLAG_PRESENT=0
+# --reply-mode (--ipc only): file (default) asks the target to write the per-dispatch reply file;
+# final-message makes its final agent message the reply, for a lane that cannot write the
+# transport root. Explicit only: nothing detects the target's sandbox.
+REPLY_MODE="file"
+REPLY_MODE_FLAG_PRESENT=0
+# Set only by a successful --deliver queue send; never inherited from the environment.
+QUEUE_ID=""
 
 # --- Foreground policy for live Desktop IPC (--ipc only; see SKILL.md) ---
 # defer (default): never navigate the visible Codex app; switch: navigate it to the
@@ -346,7 +367,7 @@ case "${1:-}" in
                     REQUEST_GOAL=1; shift;;
                 --deliver)
                     if [[ $# -lt 2 ]]; then
-                        echo "ERROR: --deliver requires a value (live|manual)." >&2
+                        echo "ERROR: --deliver requires a value (live|manual|queue)." >&2
                         exit 1
                     fi
                     if [[ "$DELIVERY_FLAG_PRESENT" -eq 1 ]]; then
@@ -354,12 +375,28 @@ case "${1:-}" in
                         exit 1
                     fi
                     case "$2" in
-                        live|manual) DELIVERY="$2" ;;
+                        live|manual|queue) DELIVERY="$2" ;;
                         *)
-                            echo "ERROR: --deliver requires live or manual (got '$2')." >&2
+                            echo "ERROR: --deliver requires live, manual or queue (got '$2')." >&2
                             exit 1;;
                     esac
                     DELIVERY_FLAG_PRESENT=1; shift 2;;
+                --reply-mode)
+                    if [[ $# -lt 2 ]]; then
+                        echo "ERROR: --reply-mode requires a value (file|final-message)." >&2
+                        exit 1
+                    fi
+                    if [[ "$REPLY_MODE_FLAG_PRESENT" -eq 1 ]]; then
+                        echo "ERROR: --reply-mode may be supplied only once." >&2
+                        exit 1
+                    fi
+                    case "$2" in
+                        file|final-message) REPLY_MODE="$2" ;;
+                        *)
+                            echo "ERROR: --reply-mode requires file or final-message (got '$2')." >&2
+                            exit 1;;
+                    esac
+                    REPLY_MODE_FLAG_PRESENT=1; shift 2;;
                 --foreground-policy)
                     if [[ -z "${2:-}" ]]; then
                         echo "ERROR: --foreground-policy requires a value (defer|switch|restore-if-known)." >&2
@@ -384,7 +421,7 @@ case "${1:-}" in
                     TASK_AFTER_DASHDASH=1; shift; break;;
                 --*)
                     echo "ERROR: unknown --ipc flag '$1'." >&2
-                    echo "Usage: $0 --ipc <conversationId> [--deliver live|manual] [--request-goal] [--autoload off|codex-uri] [--intended-host package|ABSOLUTE-EXE] [--foreground-policy defer|switch|restore-if-known] [--ack-foreground-switch] [--] \"<task>\"" >&2
+                    echo "Usage: $0 --ipc <conversationId> [--deliver live|manual|queue] [--reply-mode file|final-message] [--request-goal] [--autoload off|codex-uri] [--intended-host package|ABSOLUTE-EXE] [--foreground-policy defer|switch|restore-if-known] [--ack-foreground-switch] [--] \"<task>\"" >&2
                     exit 1;;
                 *)
                     break;;
@@ -407,6 +444,14 @@ case "${1:-}" in
            { [[ "$FOREGROUND_POLICY_SOURCE" == "flag" ]] || [[ "$ACK_SOURCE" == "flag" ]] ||
              [[ "$HOST_AUTOLOAD_FLAG_PRESENT" -eq 1 ]] || [[ "$HOST_INTENDED_HOST_FLAG_PRESENT" -eq 1 ]]; }; then
             echo "ERROR: --deliver manual cannot be combined with live-only host or foreground flags." >&2
+            exit 1
+        fi
+        # Queue delivery resolves the intended host (so --intended-host applies) but never
+        # activates or navigates the App, so activation and foreground flags are refused.
+        if [[ "$DELIVERY" == "queue" ]] &&
+           { [[ "$FOREGROUND_POLICY_SOURCE" == "flag" ]] || [[ "$ACK_SOURCE" == "flag" ]] ||
+             [[ "$HOST_AUTOLOAD_FLAG_PRESENT" -eq 1 ]]; }; then
+            echo "ERROR: --deliver queue cannot be combined with --autoload, --foreground-policy or --ack-foreground-switch." >&2
             exit 1
         fi
         ;;
@@ -499,14 +544,18 @@ if (( 10#$RETENTION_DAYS > 0 )); then
     if [[ "$RETENTION_SWEEP_OK" -eq 1 ]]; then
         # Aged tasks first, deciding pairing BEFORE any reply is deleted below --
         # otherwise an aged pair's task would misread as unreplied and never sweep.
+        # A materialized rollout copy (*.reply.rollout.md) answers its dispatch like a reply.
         while IFS= read -r -d '' AGED_TASK; do
-            if [[ -f "${AGED_TASK%.task.md}.reply.md" ]]; then
+            if [[ -f "${AGED_TASK%.task.md}.reply.md" || -f "${AGED_TASK%.task.md}.reply.rollout.md" ]]; then
                 rm -f -- "$AGED_TASK" \
                     || echo "WARNING: retention sweep could not delete \"${AGED_TASK}\"." >&2
             fi
         done < <(find "$IPC_ROOT" -type f -name '*.task.md' -mtime +"$RETENTION_DAYS" -print0 2>/dev/null)
-        # Aged replies are terminal artifacts: sweepable unconditionally, as before.
+        # Aged replies, and aged materialized copies with their provenance, are terminal artifacts:
+        # sweepable unconditionally, as before.
         find "$IPC_ROOT" -type f -name '*.reply.md' -mtime +"$RETENTION_DAYS" -delete 2>/dev/null || true
+        find "$IPC_ROOT" -type f \( -name '*.reply.rollout.md' -o -name '*.reply.rollout.json' \) \
+            -mtime +"$RETENTION_DAYS" -delete 2>/dev/null || true
         find "$IPC_ROOT" -mindepth 1 -type d -empty -mtime +"$RETENTION_DAYS" -delete 2>/dev/null || true
     else
         echo "WARNING: refusing retention sweep for dangerous CODEX_IPC_ROOT \"${IPC_ROOT}\"." >&2
@@ -594,17 +643,29 @@ if [[ "${CODEX_IPC_INCLUDE_TRANSCRIPT:-0}" == "1" ]]; then
 fi
 
 # --- Build handoff payload ---
-WORKDIR="${PROJECT_ROOT:-$PWD}"
-read -r -d '' PAYLOAD <<EOF || true
-# Handoff from Claude Code -> Codex
-
-Generated: ${STAMP} on branch \`${BRANCH}\` (dispatch ${DISPATCH_ID})
-
-## How to use this file
-You (Codex) have been handed follow-up work from a Claude Code session.
-Read the **Task** below${GOAL_REQUEST_CLAUSE}, then complete it
-in the associated workspace at:
-  ${WORKDIR}
+# Reply section: the file mode text is unchanged; final-message mode (--reply-mode) replaces it
+# and records the mode in the envelope's own "Reply mode: final-message." line.
+if [[ "$REPLY_MODE" == "final-message" ]]; then
+    read -r -d '' REPLY_SECTION <<EOF || true
+Reply mode: final-message. When finished, put your complete reply/result in your final agent
+message. Do NOT write a reply file for this handoff: this lane may be unable to write the transport
+root, so the dispatcher reads your final agent message from this thread's rollout instead.
+Finish the substantive work and inspect the complete result first, and self-verify it; then put
+the full substantive result (not a pointer to where it is) in your final agent message and
+complete the turn. A calculation, command-construction, or parse failure must be reported as its
+actual failure. The opt-in
+codex_ipc_wait.mjs --accept-rollout-fallback path certifies named-dispatch completion and
+replySource=rollout-fallback but intentionally emits no body. The dispatcher must retrieve and render
+the body with the existing read-only dual-source scripts/codex_ipc_replies.sh viewer. The viewer caps
+display at 4096 bytes by default; if it reports truncation, rerun it with a sufficient --max-bytes.
+EOF
+    read -r -d '' REPLY_ID_NOTE <<EOF || true
+In your final agent message, include your Codex session/conversation id if it is available to
+you. (If it is not exposed to you, that is fine: for --ipc handoffs Claude already knows it as the
+conversationId.)
+EOF
+else
+    read -r -d '' REPLY_SECTION <<EOF || true
 When finished, write your reply/result to this per-dispatch reply file (create it):
   ${INBOUND}
 Use that absolute path exactly. It is unique to this handoff, so your reply is
@@ -624,6 +685,26 @@ codex_ipc_wait.mjs --accept-rollout-fallback path certifies named-dispatch compl
 replySource=rollout-fallback but intentionally emits no body. The dispatcher must retrieve and render
 the body with the existing read-only dual-source scripts/codex_ipc_replies.sh viewer. The viewer caps
 display at 4096 bytes by default; if it reports truncation, rerun it with a sufficient --max-bytes.
+EOF
+    read -r -d '' REPLY_ID_NOTE <<EOF || true
+When you reply in ${INBOUND}, include your Codex session/conversation id if it is available to
+you. (If it is not exposed to you, that is fine: for --ipc handoffs Claude already knows it as the
+conversationId, and can otherwise locate your rollout under ~/.codex/sessions/ by this handoff.)
+EOF
+fi
+
+WORKDIR="${PROJECT_ROOT:-$PWD}"
+read -r -d '' PAYLOAD <<EOF || true
+# Handoff from Claude Code -> Codex
+
+Generated: ${STAMP} on branch \`${BRANCH}\` (dispatch ${DISPATCH_ID})
+
+## How to use this file
+You (Codex) have been handed follow-up work from a Claude Code session.
+Read the **Task** below${GOAL_REQUEST_CLAUSE}, then complete it
+in the associated workspace at:
+  ${WORKDIR}
+${REPLY_SECTION}
 
 ## Branch
 ${BRANCH}  (merge target: ${MAIN_BRANCH})
@@ -647,9 +728,7 @@ CODEX_IPC_INCLUDE_TRANSCRIPT=1; if it is a path, the JSONL is large -- grep or t
 relevant part; it may include context unrelated to this task):
   ${TRANSCRIPT_NOTE}
 
-When you reply in ${INBOUND}, include your Codex session/conversation id if it is available to
-you. (If it is not exposed to you, that is fine: for --ipc handoffs Claude already knows it as the
-conversationId, and can otherwise locate your rollout under ~/.codex/sessions/ by this handoff.)
+${REPLY_ID_NOTE}
 EOF
 
 # --- Payload advisories (non-fatal; STDERR ONLY; exit code unchanged) ---
@@ -866,12 +945,24 @@ process.stdout.write([state, parent, legacy, rolloutPath, sessionsRoot].join("\t
 ' "$IPC_CID"
     }
     # Safe manual preparation and accepted live sends share one correlation-complete WAIT line.
+    print_reply_route() {
+        if [[ "$REPLY_MODE" == "final-message" ]]; then
+            echo "Codex's reply is its final agent message (reply mode final-message; no reply file is written)."
+            echo "Certify it with the WAIT line below; read it with scripts/codex_ipc_replies.sh."
+        else
+            echo "Codex's reply will be written to ${INBOUND} (Claude Code reads it)."
+        fi
+    }
     print_wait_hint() {
         local -a wait_args=(node "${SCRIPT_DIR}/codex_ipc_wait.mjs"
             --thread "$IPC_CID" --dispatch "$DISPATCH_ID" --reply-path "$INBOUND")
         [[ -z "$INSPECT_ROLLOUT_PATH" ]] || wait_args+=(--rollout-path "$INSPECT_ROLLOUT_PATH")
         [[ -z "$INSPECT_SESSIONS_ROOT" ]] || wait_args+=(--sessions-root "$INSPECT_SESSIONS_ROOT")
-        wait_args+=(--accept-rollout-fallback --budget-ms 1800000 --interval-ms 1000 --status-exit-codes)
+        # Queue delivery only: the waiter reports an item that stays queued (non-terminal).
+        [[ -z "$QUEUE_ID" ]] || wait_args+=(--queue-id "$QUEUE_ID")
+        # --materialize-reply keeps a certified rollout-only reply beside the envelope, so it stays
+        # readable after Codex compresses the page; it never writes the primary reply file.
+        wait_args+=(--accept-rollout-fallback --budget-ms 1800000 --interval-ms 1000 --status-exit-codes --materialize-reply)
         printf 'WAIT:'
         printf ' %q' "${wait_args[@]}"
         printf '\n'
@@ -947,7 +1038,7 @@ process.stdout.write([state, parent, legacy, rolloutPath, sessionsRoot].join("\t
         echo "MANUAL: thread-bound envelope is ready for operator pickup."
         echo "Open the thread in your intended Desktop host's window, then paste:"
         echo "    read \"${OUTBOUND}\" and proceed"
-        echo "Codex's reply will be written to ${INBOUND} (Claude Code reads it)."
+        print_reply_route
         if [[ -z "$INSPECT_ROLLOUT_PATH" ]]; then
             echo "ROLLOUT-PATH: Supply the inspector's database-designated page with --rollout-path <path>." >&2
         fi
@@ -962,7 +1053,12 @@ process.stdout.write([state, parent, legacy, rolloutPath, sessionsRoot].join("\t
     HOST_AUTOLOAD_SOURCE=""
     HOST_INTENDED_KIND_EFFECTIVE=""
     HOST_INTENDED_SOURCE=""
+    HOST_RUNTIME_STATUS=""
+    HOST_RUNTIME_PATH=""
+    # host_policy_send [queue]: the shared send gate. With `queue` (--deliver queue) a routerless
+    # host is expected rather than refused, and the intended host's proven runtime is required.
     host_policy_send() {
+        local route="${1:-live}"
         HOST_POLICY_REFUSAL=0
         HOST_POLICY_REFUSAL_REASON=""
         HOST_POLICY_REASON_LIST=""
@@ -970,6 +1066,8 @@ process.stdout.write([state, parent, legacy, rolloutPath, sessionsRoot].join("\t
         HOST_AUTOLOAD_SOURCE=""
         HOST_INTENDED_KIND_EFFECTIVE=""
         HOST_INTENDED_SOURCE=""
+        HOST_RUNTIME_STATUS=""
+        HOST_RUNTIME_PATH=""
 
         local policy_script="${SCRIPT_DIR}/codex_ipc_host_policy.ps1"
         local policy_win ipc_root_win policy_stderr policy_status policy_fields structured_reason
@@ -1056,13 +1154,52 @@ if (value.sendEligible === true &&
   process.exit(1);
 }
 if (value.sendEligible === false && reasons.length === 0) process.exit(1);
+// routerExpected: false only for an intended host proven to be a routerless (26.1117+) build;
+// absent or null means unknown, which keeps the connect-phase path.
+const routerExpected = value.routerExpected;
+const hostVersion = value.intendedHostVersion;
+if (routerExpected !== undefined && routerExpected !== null && typeof routerExpected !== "boolean") {
+  process.exit(1);
+}
+if (hostVersion !== undefined && hostVersion !== null &&
+    (typeof hostVersion !== "string" || !/^\d+(?:\.\d+){1,3}$/.test(hostVersion))) {
+  process.exit(1);
+}
+if (routerExpected === false && typeof hostVersion !== "string") process.exit(1);
+// intendedRuntime: the proven runtime executable of the one intended GUI, which --deliver queue
+// runs. Older policy output has none; the queue route then refuses.
+const runtime = value.intendedRuntime;
+let runtimeStatus = "absent";
+let runtimePath = "-";
+if (runtime !== undefined && runtime !== null) {
+  if (typeof runtime !== "object" || Array.isArray(runtime) ||
+      !["resolved", "ambiguous", "missing", "not-evaluated"].includes(runtime.status)) {
+    process.exit(1);
+  }
+  if (runtime.status === "resolved") {
+    if (typeof runtime.executable !== "string" ||
+        !/^(?:[A-Za-z]:[\\/]|\\\\|\/)/.test(runtime.executable) ||
+        /[\u0000-\u001f\u007f]/.test(runtime.executable)) {
+      process.exit(1);
+    }
+    runtimePath = runtime.executable;
+  } else if (runtime.executable !== null) {
+    process.exit(1);
+  }
+  if (value.sendEligible === true && runtime.status === "not-evaluated") process.exit(1);
+  runtimeStatus = runtime.status;
+}
 process.stdout.write([
   autoload.value,
   autoload.source,
   intended.kind,
   intended.source,
   value.sendEligible ? "true" : "false",
-  reasons.join(","),
+  reasons.join(",") || "-",
+  routerExpected === true ? "true" : routerExpected === false ? "false" : "unknown",
+  typeof hostVersion === "string" ? hostVersion : "-",
+  runtimeStatus,
+  runtimePath,
 ].join("\t"));
 ' 2>/dev/null) || policy_fields=""
         if [[ -z "$policy_fields" ]]; then
@@ -1072,11 +1209,19 @@ process.stdout.write([
             return 1
         fi
 
-        local send_eligible
+        local send_eligible router_expected host_version
         IFS=$'\t' read -r HOST_AUTOLOAD_EFFECTIVE HOST_AUTOLOAD_SOURCE \
             HOST_INTENDED_KIND_EFFECTIVE HOST_INTENDED_SOURCE send_eligible \
-            HOST_POLICY_REASON_LIST <<< "$policy_fields"
-        echo "POLICY: autoload=${HOST_AUTOLOAD_EFFECTIVE} (source: ${HOST_AUTOLOAD_SOURCE}) intended-host=${HOST_INTENDED_KIND_EFFECTIVE} (source: ${HOST_INTENDED_SOURCE})"
+            HOST_POLICY_REASON_LIST router_expected host_version \
+            HOST_RUNTIME_STATUS HOST_RUNTIME_PATH <<< "$policy_fields"
+        [[ "$HOST_POLICY_REASON_LIST" == "-" ]] && HOST_POLICY_REASON_LIST=""
+        [[ "$HOST_RUNTIME_PATH" == "-" ]] && HOST_RUNTIME_PATH=""
+        if [[ "$route" == "queue" ]]; then
+            # Paths stay out of wrapper output; the runtime is named only by its status.
+            echo "POLICY: delivery=queue intended-host=${HOST_INTENDED_KIND_EFFECTIVE} (source: ${HOST_INTENDED_SOURCE}) runtime=${HOST_RUNTIME_STATUS}"
+        else
+            echo "POLICY: autoload=${HOST_AUTOLOAD_EFFECTIVE} (source: ${HOST_AUTOLOAD_SOURCE}) intended-host=${HOST_INTENDED_KIND_EFFECTIVE} (source: ${HOST_INTENDED_SOURCE})"
+        fi
         if [[ "$send_eligible" != "true" ]]; then
             HOST_POLICY_REFUSAL=1
             case ",${HOST_POLICY_REASON_LIST}," in
@@ -1087,19 +1232,49 @@ process.stdout.write([
             esac
             return 1
         fi
+        # A proven 26.1117+ intended host serves no router, so a server of that pipe name could only
+        # be another process. Refuse before the client runs: zero pipe contact, pickup is safe.
+        # An unknown version keeps the client's connect-phase handling. Queue delivery never
+        # contacts the pipe, so a routerless host is exactly the host it is for.
+        if [[ "$route" != "queue" && "$router_expected" == "false" ]]; then
+            HOST_POLICY_REFUSAL=1
+            HOST_POLICY_REFUSAL_REASON="router-absent"
+            HOST_POLICY_REASON_LIST="intended host ${host_version} is a Codex Desktop 26.1117+ build, which serves no IPC router"
+            return 1
+        fi
         return 0
     }
     report_host_policy_refusal() {
         echo "HOST-WARNING: live IPC refused by host policy (${HOST_POLICY_REASON_LIST:-$HOST_POLICY_REFUSAL_REASON})." >&2
         echo "RESULT: gui-unowned -- reason=${HOST_POLICY_REFUSAL_REASON} -- confirmation=not-attempted" >&2
+        [[ "$HOST_POLICY_REFUSAL_REASON" != "router-absent" ]] || print_queue_hint
         fallback
     }
+    # router-absent from the send gate means a proven 26.1117+ host, which is exactly the host
+    # --deliver queue is for. One line: the re-send guidance when the policy resolved the intended
+    # runtime the queue route runs, otherwise why queue delivery is unavailable. Re-sending writes
+    # a new envelope, so the agent must choose one route: "instead of pasting" is load-bearing.
+    print_queue_hint() {
+        local runtime_status="$HOST_RUNTIME_STATUS"
+        if [[ "$runtime_status" == "resolved" ]]; then
+            echo "QUEUE-HINT: if the target thread is loaded and idle, re-send this handoff with --deliver queue instead of pasting the pickup line below, and then never paste that line." >&2
+        else
+            [[ "$runtime_status" != "absent" ]] || runtime_status="not reported"
+            echo "QUEUE-HINT: --deliver queue needs the host policy's intendedRuntime resolved, and it is ${runtime_status}; use the pickup line below." >&2
+        fi
+    }
+    # send_live [announce]: the shared send gate, then one router client run. The progress line is
+    # printed only after the gate passes, and it claims an attempt, not an injection: a refused gate
+    # contacts nothing, and an absent router pipe is found only by the client.
     send_live() {
         local send_status=0
         IPC_OUTPUT=""
         HOST_POLICY_REFUSAL=0
         if ! host_policy_send; then
             return 125
+        fi
+        if [[ "${1:-}" == "announce" ]]; then
+            echo "Attempting live delivery into Desktop thread ${IPC_CID} via the IPC router..."
         fi
         if IPC_OUTPUT=$(node "${SCRIPT_DIR}/codex_ipc_client.mjs" \
             --thread "${IPC_CID}" \
@@ -1173,6 +1348,48 @@ const exact =
 process.exit(exact ? 0 : 1);
 ' "$IPC_CID"
     }
+    # Prints the connect error code and succeeds only for the client's exact connect-phase
+    # failure: no request was sent, so the router never saw this dispatch.
+    router_connect_failure() {
+        printf '%s' "$IPC_OUTPUT" | node --input-type=module -e '
+import fs from "node:fs";
+let value;
+try {
+  value = JSON.parse(fs.readFileSync(0, "utf8"));
+} catch {
+  process.exit(1);
+}
+const target = String(process.argv[1] || "").toLowerCase();
+const code = value?.connectError?.code;
+const exact =
+  value?.ok === false &&
+  value?.phase === "connect" &&
+  String(value?.targetThreadId || "").toLowerCase() === target &&
+  Array.isArray(value?.sentRequests) &&
+  value.sentRequests.length === 0 &&
+  !("response" in value) &&
+  typeof code === "string" &&
+  /^[A-Z][A-Z0-9_]{1,31}$/.test(code);
+if (!exact) process.exit(1);
+console.log(code);
+' "$IPC_CID"
+    }
+    # Pre-write: the client never connected, so nothing was sent and pickup is safe. Codex
+    # Desktop 26.1117 builds serve no router pipe, which shows up here as ENOENT. Exits when the
+    # last attempt was a connect-phase failure; returns otherwise.
+    report_router_connect_failure_if_any() {
+        local connect_code
+        connect_code=$(router_connect_failure) || return 0
+        if [[ "$connect_code" == "ENOENT" ]]; then
+            echo "RESULT: gui-unowned -- reason=router-absent -- confirmation=not-attempted" >&2
+            echo "(No Desktop IPC router pipe is present; Codex Desktop 26.1117 and later serve none. Nothing was sent.)" >&2
+        else
+            echo "RESULT: gui-unowned -- reason=router-unreachable -- confirmation=not-attempted" >&2
+            echo "(The router pipe could not be connected (${connect_code}); nothing was sent.)" >&2
+        fi
+        fallback
+        exit 1
+    }
     print_router_response() {
         # The client pretty-prints its document with `response` LAST, after the echoed
         # `sentRequests`, so a twenty-line clip of the whole document ends inside the request echo
@@ -1224,8 +1441,139 @@ console.log(JSON.stringify({
         echo "(Rollout confirmation reflects bounded pickup observation only; it does not confirm" >&2
         echo " completion or reply-file success.)" >&2
     }
-    echo "Injecting pickup line into live Desktop thread ${IPC_CID} via IPC router..."
-    if send_live; then
+    # --- Runtime queue delivery (--deliver queue) ---
+    # Codex Desktop 26.1117+ serves no IPC router. Its runtime keeps a durable per-thread queue,
+    # and the App's queue service starts a queued item as a normal user turn (turn_trigger "queue")
+    # once the thread is loaded and idle. The pickup line is queued with the intended host's OWN
+    # runtime executable, which the shared host policy proves from the app-server under the one
+    # intended GUI: a different build could migrate the state databases under the App, and `codex`
+    # on PATH is never used. One attempt, no retry:
+    #   not-attempted  a preflight refusal, or the process never started: nothing was queued, so
+    #                  the pickup line is safe.
+    #   unknown        the runtime ran and anything but its exact success line followed: the item
+    #                  may be queued and would start by itself, so pickup is suppressed and
+    #                  resending is forbidden.
+    # It never steers: a busy thread runs the item after its current turn, and an unloaded thread or
+    # one whose last turn was interrupted keeps it queued until the thread is opened in the App.
+    if [[ "$DELIVERY" == "queue" ]]; then
+        report_queue_unavailable() {
+            echo "RESULT: queue-unavailable -- reason=$1 -- confirmation=not-attempted" >&2
+            [[ -z "${2:-}" ]] || echo "$2" >&2
+            fallback
+            exit 1
+        }
+        report_queue_unknown() {
+            echo "RESULT: failed-closed -- reason=$1 -- confirmation=unknown" >&2
+            fallback_ambiguous
+            echo "A queued item starts by itself once the thread is idle. To learn whether this one ran," >&2
+            echo "run codex_ipc_wait.mjs for thread ${IPC_CID} and dispatch ${DISPATCH_ID}; do not resend." >&2
+            exit 1
+        }
+        if ! host_policy_send queue; then
+            echo "HOST-WARNING: queue delivery refused by host policy (${HOST_POLICY_REASON_LIST:-$HOST_POLICY_REFUSAL_REASON})." >&2
+            report_queue_unavailable "$HOST_POLICY_REFUSAL_REASON"
+        fi
+        case "$HOST_RUNTIME_STATUS" in
+            resolved) : ;;
+            ambiguous)
+                report_queue_unavailable runtime-ambiguous \
+                    "(The intended host runs more than one runtime executable; refusing to choose one.)" ;;
+            missing)
+                report_queue_unavailable runtime-missing \
+                    "(No runtime app-server was proven under the intended host.)" ;;
+            *)
+                report_queue_unavailable host-policy-invalid \
+                    "(The host policy did not report the intended host's runtime.)" ;;
+        esac
+        echo "Queueing the pickup line for thread ${IPC_CID} with the intended host's runtime..."
+        QUEUE_OUTPUT=""
+        QUEUE_STDERR=""
+        if QUEUE_STDERR=$(mktemp); then
+            QUEUE_OUTPUT=$(node "${SCRIPT_DIR}/codex_ipc_queue.mjs" send \
+                --runtime "$HOST_RUNTIME_PATH" --thread "$IPC_CID" \
+                --message "read \"${OUTBOUND}\" and proceed" \
+                --cwd "$(to_win "$CHANNEL_DIR")" 2>"$QUEUE_STDERR") || true
+            if [[ -s "$QUEUE_STDERR" ]]; then
+                echo "QUEUE-WARNING: queue helper diagnostics were suppressed." >&2
+            fi
+            rm -f "$QUEUE_STDERR"
+        else
+            # Nothing ran: the helper is the only thing that starts the runtime.
+            report_queue_unavailable queue-helper-unavailable "(Could not allocate the helper diagnostics capture.)"
+        fi
+        # The helper's document is re-checked here: success needs the exact outcome, a UUID queue
+        # id and the target thread. Runtime stderr comes back as a few bounded, sanitized lines.
+        QUEUE_FIELDS=$(printf '%s' "$QUEUE_OUTPUT" | node --input-type=module -e '
+import fs from "node:fs";
+let value;
+try { value = JSON.parse(fs.readFileSync(0, "utf8")); } catch { process.exit(1); }
+const target = String(process.argv[1] || "").toLowerCase();
+const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const token = /^[a-z][a-z0-9-]{1,63}$/;
+if (value?.schemaVersion !== 1 || !["queued", "not-attempted", "unknown"].includes(value.outcome) ||
+    typeof value.reason !== "string" || !token.test(value.reason)) {
+  process.exit(1);
+}
+const queueId = typeof value.queueId === "string" && uuid.test(value.queueId) ? value.queueId : "-";
+const reported = typeof value.reportedThreadId === "string" && uuid.test(value.reportedThreadId)
+  ? value.reportedThreadId
+  : "-";
+if (value.outcome === "queued" &&
+    (value.reason !== "runtime-accepted" || queueId === "-" || reported !== target)) {
+  process.exit(1);
+}
+const exit = Number.isSafeInteger(value.exitCode) ? String(value.exitCode) : "-";
+const signal = typeof value.signal === "string" && /^SIG[A-Z0-9]+$/.test(value.signal) ? value.signal : "-";
+const lines = Array.isArray(value.runtimeStderr)
+  ? value.runtimeStderr.filter((line) => typeof line === "string").slice(0, 6)
+  : [];
+process.stdout.write([value.outcome, value.reason, queueId, reported, exit, signal].join("\t") + "\n");
+for (const line of lines) {
+  process.stdout.write(line.replace(/[\u0000-\u001f\u007f-\u009f]/gu, "").slice(0, 600) + "\n");
+}
+' "$IPC_CID") || QUEUE_FIELDS=""
+        if [[ -z "$QUEUE_FIELDS" ]]; then
+            # The helper may have started the runtime before failing, so this is not non-admission.
+            report_queue_unknown queue-helper-failure
+        fi
+        IFS=$'\t' read -r Q_OUTCOME Q_REASON Q_ID Q_THREAD Q_EXIT Q_SIGNAL <<< "$(printf '%s\n' "$QUEUE_FIELDS" | sed -n '1p')"
+        Q_RUNTIME_STDERR="$(printf '%s\n' "$QUEUE_FIELDS" | sed -n '2,$p')"
+        case "$Q_OUTCOME" in
+            queued)
+                QUEUE_ID="$Q_ID"
+                echo "[ Queued for thread ${IPC_CID} as queue item ${QUEUE_ID}. It starts when that thread is loaded and idle in the intended host. ]"
+                print_reply_route
+                echo "(Queue confirmation means the runtime stored the pickup line; it does not confirm that a" >&2
+                echo " turn started or finished. A busy thread runs it after its current turn; a thread that is" >&2
+                echo " not loaded, or whose last turn was interrupted, keeps it queued until it is opened.)" >&2
+                if [[ -z "$INSPECT_ROLLOUT_PATH" ]]; then
+                    echo "ROLLOUT-PATH: Supply the inspector's database-designated page with --rollout-path <path>." >&2
+                fi
+                print_wait_hint
+                echo "RESULT: queued -- reason=runtime-accepted -- confirmation=pending -- queueId=${QUEUE_ID}"
+                exit 0
+                ;;
+            not-attempted)
+                report_queue_unavailable "$Q_REASON" "(The runtime did not run; nothing was queued.)"
+                ;;
+            unknown)
+                echo "QUEUE: the runtime ran (exit ${Q_EXIT}, signal ${Q_SIGNAL}); its outcome is not the exact success line." >&2
+                if [[ "$Q_REASON" == "queue-thread-mismatch" ]]; then
+                    echo "QUEUE: the runtime reported queue item ${Q_ID} for thread ${Q_THREAD}, not ${IPC_CID}." >&2
+                    echo "       If that is wrong, remove the item from that thread's queue in the App." >&2
+                fi
+                if [[ -n "$Q_RUNTIME_STDERR" ]]; then
+                    echo "Runtime diagnostics (bounded):" >&2
+                    printf '%s\n' "$Q_RUNTIME_STDERR" | sed 's/^/  | /' >&2
+                fi
+                report_queue_unknown "$Q_REASON"
+                ;;
+            *)
+                report_queue_unknown queue-helper-failure
+                ;;
+        esac
+    fi
+    if send_live announce; then
         if ! authoritative_success; then
             # Exit 0 without the exact one-target follower proof is still post-attempt
             # ambiguity. Never call it delivered and never retry automatically.
@@ -1236,7 +1584,7 @@ console.log(JSON.stringify({
         fi
         CONFIRMATION=$(observe_rollout)
         echo "[ Delivered into live thread ${IPC_CID}. It should appear in your Codex Desktop GUI. ]"
-        echo "Codex's reply will be written to ${INBOUND} (Claude Code reads it)."
+        print_reply_route
         print_confirmation_disclaimer
         print_wait_hint
         echo "RESULT: gui-delivered -- reason=renderer-owned -- confirmation=${CONFIRMATION}"
@@ -1246,6 +1594,7 @@ console.log(JSON.stringify({
         report_host_policy_refusal
         exit 1
     fi
+    report_router_connect_failure_if_any
     if ! authoritative_no_client; then
         # Router/pipe-level failure (app closed, timeout, protocol drift). This is
         # POST-ATTEMPT: the follower frame is written before the response is awaited,
@@ -1351,7 +1700,7 @@ console.log(JSON.stringify({
             [[ "$FOREGROUND_POLICY" == "switch" ]] && DELIVER_REASON="foreground-switched"
             CONFIRMATION=$(observe_rollout)
             echo "[ Delivered into live thread ${IPC_CID}. It should appear in your Codex Desktop GUI. ]"
-            echo "Codex's reply will be written to ${INBOUND} (Claude Code reads it)."
+            print_reply_route
             print_confirmation_disclaimer
             print_wait_hint
             echo "RESULT: gui-delivered -- reason=${DELIVER_REASON} -- confirmation=${CONFIRMATION}"
@@ -1361,6 +1710,9 @@ console.log(JSON.stringify({
             report_host_policy_refusal
             exit 1
         fi
+        # Every earlier attempt ended in an authoritative no-client-found, so a pre-write
+        # connect failure here still proves non-admission.
+        report_router_connect_failure_if_any
         # Retry ONLY on the authoritative "thread not loaded" answer. Any other
         # failure (timeout, closed pipe, protocol drift) is post-attempt and may have
         # already admitted the task -- retrying it is the duplicate-execution defect

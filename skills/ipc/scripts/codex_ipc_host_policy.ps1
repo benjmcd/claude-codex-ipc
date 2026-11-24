@@ -527,8 +527,32 @@ function Get-CodexIpcNativeRole {
         if ($null -eq $value -or $value.value -notmatch '^[^=\s]+=.+$') { return $null }
         $token = Read-CodexIpcCommandToken -CommandLine $Process.commandLine -Offset $value.next
     }
-    if ($null -ne $token -and $token.value -cin @('app-server', 'exec-server', 'sandbox')) { return $token.value }
+    # '--__codex-windows-mxc' is the Windows sandbox helper the app-server starts from its own
+    # executable; like every role here it counts only with proven ancestry to the intended GUI.
+    if ($null -ne $token -and $token.value -cin @('app-server', 'exec-server', 'sandbox', '--__codex-windows-mxc')) { return $token.value }
     return $null
+}
+
+function Test-CodexIpcNodeServiceLauncher {
+    param([object]$Process, [hashtable]$GuiById)
+
+    # Some Desktop builds start the app-server from the GUI's Electron Node utility process
+    # (--type=utility --utility-sub-type=node.mojom.NodeService) instead of the main process.
+    # That exact child, running the GUI's own executable and launched directly by a GUI anchor,
+    # is the only GUI-named process allowed between the anchor and its runtime, and the runtime
+    # is registered only from an app-server directly under it. Descendants of the runtime keep
+    # the existing ancestry rules (same-runtime native roles, readable non-candidate hops).
+    $parentKey = [string]$Process.parentPid
+    if ($parentKey -eq [string]$Process.pid -or -not $GuiById.ContainsKey($parentKey)) { return $false }
+    $path = ConvertTo-CodexIpcNormalizedPath -Value $Process.executable
+    $guiPath = ConvertTo-CodexIpcNormalizedPath -Value $GuiById[$parentKey].executable
+    if ($null -eq $path -or $null -eq $guiPath -or
+        -not [string]::Equals($path, $guiPath, [System.StringComparison]::OrdinalIgnoreCase)) { return $false }
+    if ($Process.commandLine -isnot [string]) { return $false }
+    $token = Read-CodexIpcCommandToken -CommandLine $Process.commandLine
+    if ($null -eq $token -or -not (Test-CodexIpcCommandExecutable -Token $token.value -Path $path)) { return $false }
+    return ($Process.commandLine -match '(?i)(^|\s)--type=utility(\s|$)' -and
+        $Process.commandLine -match '(?i)(^|\s)--utility-sub-type=node\.mojom\.NodeService(\s|$)')
 }
 
 function Test-CodexIpcGuiAnchor {
@@ -568,7 +592,8 @@ function Test-CodexIpcRuntimeAncestry {
         }
         $ancestor = $ProcessById[$key]
         if ($null -eq $ancestor.executable -or [string]::IsNullOrWhiteSpace([string]$ancestor.commandLine)) { return $false }
-        if ($CandidateById.ContainsKey($key) -and (
+        if ($CandidateById.ContainsKey($key) -and
+            -not (Test-CodexIpcNodeServiceLauncher -Process $ancestor -GuiById $GuiById) -and (
             -not $NativeRoleById.ContainsKey($key) -or -not [string]::Equals(
                 $path, [string]$ancestor.executable, [System.StringComparison]::OrdinalIgnoreCase))) { return $false }
         $parentId = [long]$ancestor.parentPid
@@ -630,13 +655,31 @@ function Resolve-CodexIpcInventory {
         }
     }
     foreach ($process in @($RawInventory.processes)) {
+        if ($nativeRoleById[[string]$process.pid] -ne 'app-server') { continue }
         $parentKey = [string]$process.parentPid
-        if ($nativeRoleById[[string]$process.pid] -eq 'app-server' -and $guiById.ContainsKey($parentKey)) {
-            $path = ConvertTo-CodexIpcNormalizedPath -Value $process.executable
-            if ($runtimeByGuiId.ContainsKey($parentKey) -and -not [string]::Equals(
-                [string]$runtimeByGuiId[$parentKey], $path, [System.StringComparison]::OrdinalIgnoreCase)) {
-                $runtimeByGuiId[$parentKey] = ''
-            } else { $runtimeByGuiId[$parentKey] = $path }
+        $guiKey = $null
+        if ($guiById.ContainsKey($parentKey)) {
+            $guiKey = $parentKey
+        } elseif ($processById.ContainsKey($parentKey) -and
+            (Test-CodexIpcNodeServiceLauncher -Process $processById[$parentKey] -GuiById $guiById)) {
+            $guiKey = [string]$processById[$parentKey].parentPid
+        }
+        if ($null -eq $guiKey) { continue }
+        $path = ConvertTo-CodexIpcNormalizedPath -Value $process.executable
+        if ($runtimeByGuiId.ContainsKey($guiKey) -and -not [string]::Equals(
+            [string]$runtimeByGuiId[$guiKey], $path, [System.StringComparison]::OrdinalIgnoreCase)) {
+            $runtimeByGuiId[$guiKey] = ''
+        } else { $runtimeByGuiId[$guiKey] = $path }
+    }
+    # Each GUI anchor's proven runtime, as recorded above: one app-server executable launched by the
+    # anchor or by its NodeService utility child. Two different executables leave it ambiguous.
+    $guiRuntimes = @()
+    foreach ($guiKey in @($runtimeByGuiId.Keys | Sort-Object { [long]$_ })) {
+        $runtimePath = [string]$runtimeByGuiId[$guiKey]
+        $guiRuntimes += [pscustomobject][ordered]@{
+            guiPid = [long]$guiKey
+            status = if ([string]::IsNullOrEmpty($runtimePath)) { 'ambiguous' } else { 'resolved' }
+            executable = if ([string]::IsNullOrEmpty($runtimePath)) { $null } else { $runtimePath }
         }
     }
 
@@ -709,7 +752,67 @@ function Resolve-CodexIpcInventory {
         packageRoots = @($RawInventory.packageRoots)
         guiHosts = @($guiHosts)
         appServers = @($appServers)
+        guiRuntimes = @($guiRuntimes)
     }
+}
+
+# The runtime that serves the one intended GUI host: the executable of the app-server proven above
+# (launched by the GUI or by its NodeService utility child). Delivery that runs the runtime itself
+# (--deliver queue) uses exactly this file, never a codex found on PATH, so the App's own build is
+# the only one that touches its state databases. Without exactly one intended GUI the runtime is
+# not evaluated; no proven app-server is 'missing'; two different executables are 'ambiguous'.
+function Get-CodexIpcIntendedRuntime {
+    param([object]$Inventory)
+
+    $status = 'resolved'
+    $executable = $null
+    $intended = @($Inventory.guiHosts | Where-Object { $_.matchesIntended })
+    $entries = @()
+    if ($intended.Count -eq 1) {
+        $entries = @($Inventory.guiRuntimes | Where-Object { [long]$_.guiPid -eq [long]$intended[0].pid })
+    }
+    if ($intended.Count -ne 1) {
+        $status = 'not-evaluated'
+    } elseif ($entries.Count -eq 0) {
+        $status = 'missing'
+    } elseif ($entries.Count -ne 1 -or $entries[0].status -ne 'resolved' -or
+        [string]::IsNullOrWhiteSpace([string]$entries[0].executable)) {
+        $status = 'ambiguous'
+    } else {
+        $executable = [string]$entries[0].executable
+    }
+    return [pscustomobject][ordered]@{ status = $status; executable = $executable }
+}
+
+# Codex Desktop builds from 26.1117 serve no IPC router: no process of that build listens on
+# \\.\pipe\codex-ipc, so any server of that name on such a host is not the Desktop's. The version
+# is read from the intended GUI's own resources\owl-app.ini (AppVersion), else from a Store package
+# folder name in its path; anything else leaves it unknown, and routerExpected stays null.
+function Get-CodexIpcHostVersion {
+    param([object]$Executable)
+
+    if ($Executable -isnot [string] -or [string]::IsNullOrWhiteSpace($Executable)) { return $null }
+    try {
+        $ini = Join-Path (Join-Path (Split-Path -Parent $Executable) 'resources') 'owl-app.ini'
+        if (Test-Path -LiteralPath $ini -PathType Leaf) {
+            foreach ($line in [System.IO.File]::ReadAllLines($ini)) {
+                if ($line -match '^\s*AppVersion\s*=\s*(\d+(?:\.\d+){1,3})\s*$') { return [string]$Matches[1] }
+            }
+        }
+    } catch {
+        # An unreadable owl-app.ini leaves the package-path evidence below.
+    }
+    if ($Executable -match '(?i)\\OpenAI\.Codex_(\d+\.\d+\.\d+\.\d+)_') { return [string]$Matches[1] }
+    return $null
+}
+
+function Test-CodexIpcRouterExpected {
+    param([object]$Version)
+
+    $parsed = $null
+    if ($Version -isnot [string] -or -not [version]::TryParse($Version, [ref]$parsed)) { return $null }
+    # The first routerless line is 26.1117.
+    return ([version]::new($parsed.Major, $parsed.Minor) -lt [version]::new(26, 1117))
 }
 
 function Get-CodexIpcSendDecision {
@@ -1105,6 +1208,9 @@ function Invoke-CodexIpcHostPolicyCli {
     $sendReasons = @()
     $activationEligible = $null
     $activationReasons = @()
+    $intendedHostVersion = $null
+    $routerExpected = $null
+    $intendedRuntime = $null
     if ($purpose -eq 'send' -or $purpose -eq 'activation') {
         $rawInventory = if ($mockInventoryPresent) {
             ConvertFrom-CodexIpcMockInventory -Json $mockInventoryJson
@@ -1117,6 +1223,12 @@ function Invoke-CodexIpcHostPolicyCli {
         $sendDecision = Get-CodexIpcSendDecision -Inventory $inventory
         $sendEligible = [bool]$sendDecision.eligible
         $sendReasons = @($sendDecision.reasons)
+        $intendedEntries = @($inventory.guiHosts | Where-Object { $_.matchesIntended })
+        if ($intendedEntries.Count -eq 1) {
+            $intendedHostVersion = Get-CodexIpcHostVersion -Executable $intendedEntries[0].executable
+            $routerExpected = Test-CodexIpcRouterExpected -Version $intendedHostVersion
+        }
+        $intendedRuntime = Get-CodexIpcIntendedRuntime -Inventory $inventory
         if ($purpose -eq 'send') {
             $activationEligible = $false
             $activationReasons = @('activation-not-evaluated')
@@ -1156,6 +1268,9 @@ function Invoke-CodexIpcHostPolicyCli {
         activationEligible = $activationEligible
         sendReasons = @($sendReasons)
         activationReasons = @($activationReasons)
+        intendedHostVersion = $intendedHostVersion
+        routerExpected = $routerExpected
+        intendedRuntime = $intendedRuntime
         limitations = @('inventory-does-not-prove-thread-ownership')
     }
 }

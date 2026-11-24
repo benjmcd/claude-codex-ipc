@@ -4,12 +4,111 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- The `router-absent` refusal of a proven 26.1117+ host now points to queue delivery. One
+  `QUEUE-HINT:` line follows its `RESULT:` line. When the host policy resolved `intendedRuntime`,
+  which queue delivery needs, it says to re-send the handoff with `--deliver queue` instead of
+  pasting, for a loaded, idle target, and never to paste that pickup line afterwards, because the
+  re-send writes a new envelope. Otherwise it names the runtime status (`missing`, `ambiguous` or
+  `not reported`) and points to the pickup line. A host of unknown version, whose `router-absent`
+  comes from the client's connect phase, gets no hint. The `RESULT:` line, exit codes and pickup
+  line are unchanged.
+- Live `--ipc` no longer prints "Injecting pickup line ... via IPC router..." before a send-gate
+  refusal. The progress line is printed only once the gate has passed, and it now reads
+  `Attempting live delivery into Desktop thread <uuid> via the IPC router...`, which also holds
+  when the client then finds no router pipe.
+- Added runtime queue delivery, `handoff_to_codex.sh --ipc <uuid> --deliver queue`, the
+  recommended thread-bound path on Codex Desktop 26.1117+, which serves no IPC router. After the
+  usual envelope, target inspection and shared send gate, the intended host's own runtime runs
+  `queue --thread <uuid> --message <pickup line>` once (no shell, `--resume`, `--remote` or `-c`;
+  `CODEX_IPC_QUEUE_TIMEOUT_MS`, default 30000), and the App starts the item as a user turn when the
+  thread is loaded and idle. The host policy now reports that runtime as `intendedRuntime`
+  (`resolved`, `missing`, `ambiguous` or `not-evaluated`), from the app-server it already proves
+  under the one intended GUI, directly or through the NodeService utility child; `codex` on PATH is
+  never used, so no other build touches the App's state databases. Preflight also refuses a
+  `CODEX_HOME` other than the inspected home and a home without `queue_1.sqlite`. Only the
+  runtime's exact `Queued message <id> for thread <target>.` is success:
+  `RESULT: queued -- reason=runtime-accepted -- confirmation=pending -- queueId=<id>` plus the WAIT
+  line with `--queue-id`. A refusal before the run is `queue-unavailable` with
+  `confirmation=not-attempted` and the pickup line; any other outcome after the runtime ran is
+  `failed-closed` with `confirmation=unknown`, no pickup and no WAIT. The queue never steers, and an
+  unloaded or interrupted thread keeps the item until it is opened. Default delivery and plain
+  `--ipc` are unchanged.
+- The waiter takes an opt-in `--queue-id <uuid>` (and `--queue-db` / `CODEX_IPC_QUEUE_DB`). It
+  reads the runtime queue store read-only, through the new `codex_ipc_queue.mjs` so the waiter
+  stays free of `node:sqlite`, and prints one non-terminal `queued-not-started` diagnostic as soon
+  as the item has been queued for 30 s with no turn carrying the dispatch. Tokens and exit codes are
+  unchanged.
 - Added an explicit, optional Windows SQLite reader for the inspector, snapshot and locator.
   `CODEX_IPC_SQLITE_READER` selects one reviewed Python/SQLite runtime by identity; Node's
   `node:sqlite` remains the default, and a selected reader never falls back. The reader runs
   fixed read-only operations, refuses missing, ownerless or invalid WAL state, and bounds its
   run time, output and failure diagnostics. Revalidation checks the selected reader and keeps
   complete inspector output.
+- Host policy accepts an app-server started by the intended GUI's Electron Node utility process,
+  and the `--__codex-windows-mxc` sandbox helper, as runtime children, not second Desktop hosts.
+  The utility process (`node.mojom.NodeService`) must run the GUI's own executable and be
+  launched directly by the GUI. It is the only GUI-named process allowed between the GUI and its
+  runtime; the runtime's descendants keep the existing ancestry rules. A second GUI, an
+  unreadable identity, or unproven ancestry still refuses with `other-desktop-host-running` or
+  `host-inventory-incomplete`.
+- The rollout reader recognizes zstd-archived pages (`*.jsonl.zst`) during discovery. They are
+  never record sources or locate candidates. An archived legacy page cannot supersede the bound
+  page and is skipped, as its `.jsonl` form is. An archived paginated page's header is read for
+  the successor veto. An unreadable page, or a runtime without zstd, keeps the page unproven.
+- The reader admits two settings-only response items found by a 2026-11-23 corpus census,
+  `configuration_update` and the developer-role `additional_tools`, with exactly their observed
+  payload keys. `retained_context/native_steer_ownership` and every other shape remain schema
+  drift.
+- Added reasoning (thinking) visibility. The inspector's default output carries
+  `rollout.primary.reasoning` (thread-activity/1): the latest turn's recorded reasoning in full,
+  with headlines, no per-item cap unless asked, a paging safety limit, an untrusted label and encrypted-only counts; `--turns N`, `--turn`,
+  `--all-turns` and `--reasoning headline|none` change it. The reply viewer prints a labelled
+  section of each dispatch's own turn after the body. Waiter, harvester, reader, completion
+  certification and marker binding are unchanged; `recentItems` and `--summary` are unchanged.
+- A bound rollout page that grows after a certifying read is now a stale snapshot, not lost
+  authority. Same-identity growth whose old end is still a record boundary makes the page
+  assessor report `stale` (`page-snapshot-stale`, `bound-page-grew`) after the successor scan.
+  The waiter and the post-send observer keep polling and never certify or confirm on it; the
+  harvester reports `pending`. A shrink, a rewritten end, a successor page or an identity change
+  stays unproven. Previously a page appended mid-turn ended the wait as `unavailable`.
+- The session inspector's own sessions-root scan skips zstd-archived pages (`*.jsonl.zst`), as
+  the reader's discovery does, so an archived sibling no longer leaves the candidate set
+  unresolved when no database-designated page exists. A `.zst` name the archive grammar rejects
+  is still flagged.
+- Live `--ipc` reports a missing Desktop router as pre-write non-admission. Codex Desktop 26.1117
+  serves no `\\.\pipe\codex-ipc` (the router was removed upstream after 26.1111). The client
+  lists the Windows pipe namespace before connecting and reports a missing pipe, or any other
+  connect-phase failure, as a structured `phase: "connect"` result with no sent requests. The
+  wrapper maps that exact structure to `gui-unowned -- reason=router-absent|router-unreachable --
+  confirmation=not-attempted` and prints the pickup line; previously it reported
+  `failed-closed -- reason=router-pipe-failure -- confirmation=unknown` with no pickup. The
+  method-version fixture records the 26.1117.4957.0 observation.
+- Added `--reply-mode file|final-message` for `--ipc` dispatches (default `file`, explicit only).
+  `final-message` is for a lane that cannot write the transport root: the envelope says
+  `Reply mode: final-message.`, names no reply file and asks for the full result in the final
+  agent message, which the `--accept-rollout-fallback` waiter certifies and the viewer renders.
+  The default envelope is byte-for-byte unchanged. The reply viewer's footer no longer counts a
+  dispatch it rendered as `source=rollout-fallback` as awaiting a primary reply file; it reports
+  those separately.
+- Rollout-only replies can be kept beside their envelope, because Codex compresses inactive pages
+  to `.jsonl.zst` and archived pages are never read as records. `codex_ipc_reply_harvest.mjs
+  --materialize`, and the waiter's opt-in `--materialize-reply` (now in the printed `WAIT:` line),
+  write a certified rollout-fallback body as `<dispatch>.reply.rollout.md` with
+  `<dispatch>.reply.rollout.json` provenance. They never write or replace `<dispatch>.reply.md`,
+  never overwrite (an exclusively created temp file is hard-linked into place), and refuse when a
+  primary or a copy exists, there is no task envelope, the dispatch id is reused, or the body is
+  uncertified or over 4 MiB. The viewer shows the copy as `source=rollout-materialized`, keeps its
+  supersession check while the rollout is readable, and counts it as answered; the retention sweep
+  treats it like a reply. The viewer and the flagless waiter still write nothing.
+- A live `--ipc` send to a proven Codex Desktop 26.1117+ host is refused before the client runs,
+  with zero pipe contact. These builds serve no router, so a process serving
+  `\\.\pipe\codex-ipc` on such a host is not the Desktop's. The host policy now emits
+  `intendedHostVersion` (from the intended GUI's `resources\owl-app.ini` `AppVersion`, else its
+  Store package folder name) and `routerExpected` (`false` from 26.1117, `true` before, `null`
+  when unknown). On `false` the send gate reports `gui-unowned -- reason=router-absent --
+  confirmation=not-attempted` with the pickup line; a malformed expectation fails closed as
+  `host-policy-invalid`, and an unknown version keeps the client's connect-phase handling. The
+  docs note that on 26.1117+ the pipe's absence and the probe's `connect ENOENT` are expected.
 
 ## [0.1.14] — 2026-10-03
 

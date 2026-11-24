@@ -42,7 +42,10 @@ Per the `/ipc` workspace-scoping rule, place the FILLED handoff inside the assoc
   renders the body with the existing read-only dual-source `scripts/codex_ipc_replies.sh` viewer.
   Its display is capped at 4096 bytes by default; if it reports truncation, rerun it with a
   sufficient `--max-bytes`. Flagless and filedrop do not recover the denied-write fallback
-  automatically. If a post-reply amendment ever becomes
+  automatically. **Final-message reply mode:** for a lane that cannot write the transport root,
+  dispatch with `--ipc <uuid> --reply-mode final-message`; the envelope then says
+  `Reply mode: final-message.`, names no reply file, and asks for the full substantive result in
+  the final agent message, which the same waiter certifies and the viewer renders. If a post-reply amendment ever becomes
   unavoidable, supersede explicitly: state `REPLY-SUPERSEDED` as the FIRST LINE of a final
   message (the harvester's marker detection is first-line exact-token by design) and overwrite
   the same dispatch's reply file. KNOWN LIMITATION: reply viewing is file-primary by design, so
