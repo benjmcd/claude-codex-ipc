@@ -20,6 +20,10 @@ import { materializeDispatch } from "./codex_ipc_reply_harvest.mjs";
 
 export const DEFAULT_WAIT_BUDGET_MS = 0;
 export const DEFAULT_WAIT_INTERVAL_MS = 250;
+// --queue-id: how long a queued item may sit before the waiter says it has not started. The
+// runtime's queue service polls loaded threads about every 10 s, so a healthy idle thread starts
+// the item well inside this window.
+export const QUEUE_NOT_STARTED_GRACE_MS = 30000;
 export const WAIT_TOKENS = Object.freeze([
   "done",
   "aborted",
@@ -317,6 +321,69 @@ function resolveCompletion(lifecycle, options) {
   return { token: "reply-missing", diagnostics };
 }
 
+// The queue store is read through codex_ipc_queue.mjs, loaded on first use, so this module stays
+// SQLite-free and an ordinary wait (no --queue-id) never opens the queue store.
+async function loadQueueReader() {
+  const { readQueuedItem } = await import(new URL("./codex_ipc_queue.mjs", import.meta.url));
+  return readQueuedItem;
+}
+
+// --queue-id (opt-in): a non-terminal diagnostic for a dispatch delivered with --deliver queue.
+// It never changes the determination token or exit code. It reports once, then stops checking:
+//   queued-not-started       the item is still queued after the grace period and no rollout turn
+//                            carries this dispatch (the thread may be busy, not loaded in the App,
+//                            or its last turn was interrupted; the item runs when it next idles)
+//   queue-check-unavailable  the queue store could not be read
+//   queue-item-thread-mismatch  the queued item belongs to another thread
+// An item that is gone was started (or removed in the App); the rollout decides the rest.
+function createQueueCheck(options, injected, now, report) {
+  if (!options.queueItemId) return null;
+  const graceMs = Number.isSafeInteger(options.queueGraceMs) && options.queueGraceMs >= 0
+    ? options.queueGraceMs
+    : QUEUE_NOT_STARTED_GRACE_MS;
+  const queueId = options.queueItemId;
+  let settled = false;
+  let firstSeenAt = null;
+  return async (records) => {
+    if (settled) return;
+    let item;
+    try {
+      const read = injected.readQueuedItem || await loadQueueReader();
+      item = await read({ dbPath: options.queueDbPath, queueId });
+    } catch (error) {
+      item = { status: "unavailable", reason: "queue-check-error", message: error?.message };
+    }
+    if (item?.status === "absent") {
+      settled = true;
+      return;
+    }
+    if (item?.status !== "present") {
+      settled = true;
+      report({ code: "queue-check-unavailable", queueId, reason: item?.reason || "unknown" });
+      return;
+    }
+    if (item.threadId !== options.threadId) {
+      settled = true;
+      report({ code: "queue-item-thread-mismatch", queueId, threadId: item.threadId });
+      return;
+    }
+    if (firstSeenAt === null) firstSeenAt = now();
+    const since = Number.isSafeInteger(item.createdAtMs) ? item.createdAtMs : firstSeenAt;
+    const ageMs = Math.max(0, now() - since);
+    if (ageMs < graceMs) return;
+    // Between the turn start and the item's deletion a turn may already carry the dispatch.
+    if (dispatchLifecycle(records, [], options.dispatchId).duplicateCount > 0) return;
+    settled = true;
+    report({
+      code: "queued-not-started",
+      queueId,
+      threadId: options.threadId,
+      ageMs,
+      possibleCauses: ["thread-busy", "thread-not-loaded", "last-turn-interrupted"],
+    });
+  };
+}
+
 export async function waitForCompletion(options, injected = {}) {
   const now = injected.now || Date.now;
   const sleep = injected.sleep || defaultSleep;
@@ -344,6 +411,10 @@ export async function waitForCompletion(options, injected = {}) {
   let deadlineOnlyReadFailure = false;
   let readerAtCompleteEof = false;
   let pageGuidanceRecorded = false;
+  const queueCheck = createQueueCheck(options, injected, now, (item) => {
+    diagnostics.push(item);
+    if (typeof injected.onDiagnostic === "function") injected.onDiagnostic(item);
+  });
 
   let staleSnapshotRecorded = false;
   // "current" may certify; "stale" (the page grew after this read) keeps polling and never
@@ -452,6 +523,8 @@ export async function waitForCompletion(options, injected = {}) {
       }
     }
 
+    if (queueCheck) await queueCheck(records);
+
     if (budgetMs === 0) break;
     const elapsed = now() - startedAt;
     if (elapsed >= budgetMs || iteration + 1 >= maxIterations) break;
@@ -502,12 +575,20 @@ Options:
                             envelope as <dispatch>.reply.rollout.md (plus .reply.rollout.json),
                             via the harvester's --materialize rules. It never writes the primary
                             reply file; stdout and the exit code are unchanged.
+  --queue-id <uuid>         Opt-in, for a --deliver queue dispatch: read the runtime queue store
+                            read-only. If that item is still queued ${QUEUE_NOT_STARTED_GRACE_MS / 1000} s after it was queued
+                            and no turn carries this dispatch, print one non-terminal
+                            WAIT_DIAGNOSTIC queued-not-started as soon as it is seen (the thread
+                            may be busy, not loaded in the App, or its last turn was interrupted).
+                            The token and exit code are unchanged.
+  --queue-db <path>         Queue store for --queue-id (default ~/.codex/queue_1.sqlite).
 
 Environment:
   CODEX_IPC_ROLLOUT_PATH      same validation as --rollout-path; flag wins
   CODEX_IPC_SESSIONS_ROOT     same meaning as --sessions-root; flag wins
   CODEX_IPC_WAIT_BUDGET_MS    same validation as --budget-ms; flag wins
-  CODEX_IPC_WAIT_INTERVAL_MS  same validation as --interval-ms; flag wins`;
+  CODEX_IPC_WAIT_INTERVAL_MS  same validation as --interval-ms; flag wins
+  CODEX_IPC_QUEUE_DB          same meaning as --queue-db; flag wins`;
 }
 
 function takeValue(argv, index, flag) {
@@ -549,6 +630,8 @@ export function parseWaitArgs(argv, env = process.env) {
     acceptRolloutFallback: false,
     statusExitCodes: false,
     materializeReply: false,
+    queueItemId: null,
+    queueDbPath: null,
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -590,6 +673,12 @@ export function parseWaitArgs(argv, env = process.env) {
       case "--interval-ms":
         raw.intervalMs = takeValue(argv, ++index, arg);
         break;
+      case "--queue-id":
+        raw.queueItemId = takeValue(argv, ++index, arg);
+        break;
+      case "--queue-db":
+        raw.queueDbPath = takeValue(argv, ++index, arg);
+        break;
       default:
         throw new Error(`unknown argument: ${arg}`);
     }
@@ -610,6 +699,12 @@ export function parseWaitArgs(argv, env = process.env) {
   }
   if (raw.materializeReply && !raw.replyPath && !raw.sessionId) {
     throw new Error("--materialize-reply requires --reply-path or --session");
+  }
+  if (raw.queueItemId !== null && !UUID_RE.test(raw.queueItemId)) {
+    throw new Error("--queue-id must be a UUID");
+  }
+  if (raw.queueDbPath !== null && raw.queueItemId === null) {
+    throw new Error("--queue-db requires --queue-id");
   }
 
   const warnings = [];
@@ -644,6 +739,11 @@ export function parseWaitArgs(argv, env = process.env) {
       statusExitCodes: raw.statusExitCodes,
       materializeReply: raw.materializeReply,
       maxRecordBytes: DEFAULT_MAX_RECORD_BYTES,
+      queueItemId: raw.queueItemId ? raw.queueItemId.toLowerCase() : null,
+      queueDbPath: raw.queueItemId
+        ? raw.queueDbPath || env.CODEX_IPC_QUEUE_DB ||
+          path.join(os.homedir(), ".codex", "queue_1.sqlite")
+        : null,
     },
   };
 }
@@ -661,10 +761,18 @@ async function main(argv) {
   }
 
   for (const warning of parsed.warnings) console.error(warning);
+  // Queue diagnostics print when they are seen, so a long wait reports a stuck item early; they
+  // are not repeated with the end-of-wait diagnostics.
+  const printedLive = new Set();
+  const onDiagnostic = (item) => {
+    printedLive.add(item);
+    console.error(`WAIT_DIAGNOSTIC ${serializeDiagnostic(item)}`);
+  };
   try {
-    const result = await waitForCompletion(parsed.options);
+    const result = await waitForCompletion(parsed.options, { onDiagnostic });
     for (const line of rolloutDiagnosticLines(result.diagnostics)) console.error(line);
     for (const item of result.diagnostics) {
+      if (printedLive.has(item)) continue;
       console.error(`WAIT_DIAGNOSTIC ${serializeDiagnostic(item)}`);
     }
     // Opt-in provenance: in --accept-rollout-fallback mode, surface which source certified a done

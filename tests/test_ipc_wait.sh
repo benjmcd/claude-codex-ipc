@@ -2236,5 +2236,208 @@ await test("the waiter keeps a rollout-only reply only with --materialize-reply;
   assert.equal(fs.readFileSync(copyPath, "utf8"), "materialized body");
 });
 
+// --queue-id: the opt-in, read-only queue-store check for a --deliver queue dispatch. Fixtures
+// are throwaway SQLite files under this suite's temporary directory; nothing reads ~/.codex.
+const queueId = "0f0f0001-0000-4000-8000-000000000001";
+const { QUEUE_NOT_STARTED_GRACE_MS } = api;
+
+async function writeQueueStore(target, rows) {
+  const { DatabaseSync } = await import("node:sqlite");
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  fs.rmSync(target, { force: true });
+  const db = new DatabaseSync(target);
+  try {
+    db.exec(
+      "create table queued_items (id text primary key not null, thread_id text not null, " +
+        "payload_json text not null, queue_order integer not null, created_at_ms integer not null, " +
+        "updated_at_ms integer not null)",
+    );
+    const insert = db.prepare("insert into queued_items values (?,?,?,?,?,?)");
+    rows.forEach((row, index) =>
+      insert.run(row.id, row.threadId, "{}", index, row.createdAtMs, row.createdAtMs));
+  } finally {
+    db.close();
+  }
+  return target;
+}
+
+function queueDiagnostics(stderr) {
+  return stderr.split(/\r?\n/u)
+    .filter((line) => line.startsWith("WAIT_DIAGNOSTIC "))
+    .map((line) => JSON.parse(line.slice("WAIT_DIAGNOSTIC ".length)))
+    .filter((item) => /^queue/.test(item.code));
+}
+
+await test("--queue-id parses as an opt-in UUID with its store path; --queue-db needs it", () => {
+  const base = ["--thread", thread, "--dispatch", dispatch];
+  const plain = parseWaitArgs(base, { CODEX_IPC_QUEUE_DB: "/env/queue.sqlite" }).options;
+  assert.equal(plain.queueItemId, null, "no queue check without --queue-id");
+  assert.equal(plain.queueDbPath, null, "the environment alone does not enable the check");
+  const flagged = parseWaitArgs([...base, "--queue-id", queueId.toUpperCase()], {}).options;
+  assert.equal(flagged.queueItemId, queueId);
+  assert.match(flagged.queueDbPath, /[\\/]\.codex[\\/]queue_1\.sqlite$/);
+  assert.equal(parseWaitArgs([...base, "--queue-id", queueId],
+    { CODEX_IPC_QUEUE_DB: "/env/queue.sqlite" }).options.queueDbPath, "/env/queue.sqlite");
+  assert.equal(parseWaitArgs([...base, "--queue-id", queueId, "--queue-db", "/flag/q.sqlite"],
+    { CODEX_IPC_QUEUE_DB: "/env/queue.sqlite" }).options.queueDbPath, "/flag/q.sqlite");
+  assert.throws(() => parseWaitArgs([...base, "--queue-id", "not-a-uuid"], {}),
+    /--queue-id must be a UUID/);
+  assert.throws(() => parseWaitArgs([...base, "--queue-db", "/flag/q.sqlite"], {}),
+    /--queue-db requires --queue-id/);
+  assert.equal(QUEUE_NOT_STARTED_GRACE_MS, 30000);
+});
+
+await test("an ordinary wait never reads the queue store", async () => {
+  const root = caseDir("queue-not-enabled");
+  const rollout = writeRollout(root, ownOpenRecords());
+  let reads = 0;
+  const result = await waitForCompletion(directOptions(root, rollout, null), {
+    readQueuedItem: async () => { reads += 1; return { status: "present" }; },
+  });
+  assert.equal(result.token, "pending");
+  assert.equal(reads, 0);
+  assert.equal(result.diagnostics.some((item) => /^queue/.test(item.code)), false);
+});
+
+await test("a stale queued item with no dispatch turn reports queued-not-started once, live, token unchanged", async () => {
+  const root = caseDir("queue-not-started");
+  const rollout = writeRollout(root, [sessionMeta()]);
+  let clock = 1_000_000;
+  const live = [];
+  let reads = 0;
+  const result = await waitForCompletion(
+    directOptions(root, rollout, null, {
+      budgetMs: 5000, intervalMs: 1000, queueItemId: queueId, queueDbPath: "unused",
+    }),
+    {
+      now: () => clock,
+      sleep: async (ms) => { clock += ms; },
+      readQueuedItem: async (request) => {
+        reads += 1;
+        assert.deepEqual(request, { dbPath: "unused", queueId });
+        return {
+          status: "present", queueId, threadId: thread,
+          createdAtMs: clock - QUEUE_NOT_STARTED_GRACE_MS - 1,
+        };
+      },
+      onDiagnostic: (item) => live.push(item),
+    },
+  );
+  assert.equal(result.token, "pending", "the queue check never changes the token");
+  assert.equal(reads, 1, "a reported item is not read again");
+  assert.equal(live.length, 1);
+  assert.equal(live[0].code, "queued-not-started");
+  assert.equal(live[0].queueId, queueId);
+  assert.deepEqual(live[0].possibleCauses,
+    ["thread-busy", "thread-not-loaded", "last-turn-interrupted"]);
+  assert.equal(result.diagnostics.filter((item) => item.code === "queued-not-started").length, 1);
+});
+
+await test("a queued item inside the grace period, an item already gone, or a started dispatch reports nothing", async () => {
+  const root = caseDir("queue-quiet");
+  const empty = writeRollout(root, [sessionMeta()]);
+  const run = async (rollout, item) => {
+    const clock = 5_000_000;
+    let reads = 0;
+    const result = await waitForCompletion(
+      directOptions(path.dirname(rollout), rollout, null, { queueItemId: queueId, queueDbPath: "unused" }),
+      {
+        now: () => clock,
+        readQueuedItem: async () => {
+          reads += 1;
+          return typeof item === "function" ? item(clock) : item;
+        },
+      },
+    );
+    return { result, reads };
+  };
+  const young = await run(empty, (clock) =>
+    ({ status: "present", queueId, threadId: thread, createdAtMs: clock - 1000 }));
+  assert.equal(young.reads, 1);
+  assert.equal(young.result.diagnostics.some((item) => /^queue/.test(item.code)), false);
+  const gone = await run(empty, { status: "absent" });
+  assert.equal(gone.result.diagnostics.some((item) => /^queue/.test(item.code)), false);
+  const started = writeRollout(caseDir("queue-started"), ownOpenRecords());
+  const raced = await run(started, (clock) =>
+    ({ status: "present", queueId, threadId: thread, createdAtMs: clock - 600000 }));
+  assert.equal(raced.result.token, "pending");
+  assert.equal(raced.result.diagnostics.some((item) => /^queue/.test(item.code)), false,
+    "a turn already carries the dispatch");
+});
+
+await test("an unreadable store or another thread's item is diagnosed once without changing the token", async () => {
+  const root = caseDir("queue-unavailable");
+  const rollout = writeRollout(root, [sessionMeta()]);
+  const run = async (item) => {
+    let clock = 0;
+    return waitForCompletion(
+      directOptions(root, rollout, null, {
+        budgetMs: 3000, intervalMs: 1000, queueItemId: queueId, queueDbPath: "unused",
+      }),
+      { now: () => clock, sleep: async (ms) => { clock += ms; }, readQueuedItem: async () => item },
+    );
+  };
+  const unavailable = await run({ status: "unavailable", reason: "queue-store-absent" });
+  assert.equal(unavailable.token, "pending");
+  assert.deepEqual(unavailable.diagnostics.filter((item) => /^queue/.test(item.code)),
+    [{ code: "queue-check-unavailable", queueId, reason: "queue-store-absent" }]);
+  const mismatch = await run({ status: "present", queueId, threadId: otherTurn, createdAtMs: 0 });
+  assert.deepEqual(mismatch.diagnostics.filter((item) => /^queue/.test(item.code)),
+    [{ code: "queue-item-thread-mismatch", queueId, threadId: otherTurn }]);
+  const thrown = await waitForCompletion(
+    directOptions(root, rollout, null, { queueItemId: queueId, queueDbPath: "unused" }),
+    { readQueuedItem: async () => { throw new Error("synthetic read failure"); } },
+  );
+  assert.deepEqual(thrown.diagnostics.filter((item) => /^queue/.test(item.code)),
+    [{ code: "queue-check-unavailable", queueId, reason: "queue-check-error" }]);
+});
+
+await test("CLI --queue-id reads a fixture store read-only and prints queued-not-started once; stdout and exit stay the wait's", async () => {
+  const root = caseDir("queue-cli");
+  const rollout = writeRollout(root, [sessionMeta()]);
+  const store = path.join(root, "store", "queue_1.sqlite");
+  await writeQueueStore(store, [{ id: queueId, threadId: thread, createdAtMs: Date.now() - 600000 }]);
+  const before = fs.readFileSync(store);
+  const args = ["--thread", thread, "--dispatch", dispatch, "--rollout-path", rollout,
+    "--sessions-root", root, "--status-exit-codes"];
+  const plain = cli(args);
+  const flagged = cli([...args, "--queue-id", queueId, "--queue-db", store]);
+  assert.equal(flagged.stdout, plain.stdout, "stdout is the determination token alone");
+  assert.equal(flagged.status, plain.status, "the exit code is unchanged");
+  assert.equal(flagged.stdout, "pending\n");
+  const found = queueDiagnostics(flagged.stderr);
+  assert.equal(found.length, 1, flagged.stderr);
+  assert.equal(found[0].code, "queued-not-started");
+  assert.equal(found[0].threadId, thread);
+  assert.doesNotMatch(flagged.stderr, /ExperimentalWarning/, "the SQLite import warning is not printed");
+  assert.deepEqual(queueDiagnostics(plain.stderr), []);
+  assert.ok(before.equals(fs.readFileSync(store)), "the store is unchanged");
+  assert.deepEqual(fs.readdirSync(path.dirname(store)), ["queue_1.sqlite"], "no sidecar was created");
+
+  const fresh = path.join(root, "fresh", "queue_1.sqlite");
+  await writeQueueStore(fresh, [{ id: queueId, threadId: thread, createdAtMs: Date.now() }]);
+  assert.deepEqual(queueDiagnostics(cli([...args, "--queue-id", queueId, "--queue-db", fresh]).stderr), []);
+  const absent = path.join(root, "absent", "queue_1.sqlite");
+  await writeQueueStore(absent, []);
+  assert.deepEqual(queueDiagnostics(cli([...args, "--queue-id", queueId, "--queue-db", absent]).stderr), []);
+  const missing = cli([...args, "--queue-id", queueId, "--queue-db", path.join(root, "none.sqlite")]);
+  assert.equal(missing.stdout, "pending\n");
+  assert.deepEqual(queueDiagnostics(missing.stderr),
+    [{ code: "queue-check-unavailable", queueId, reason: "queue-store-absent" }]);
+  const defaulted = cli([...args, "--queue-id", queueId]);
+  assert.deepEqual(queueDiagnostics(defaulted.stderr),
+    [{ code: "queue-check-unavailable", queueId, reason: "queue-store-absent" }],
+    "the default store is the isolated home's, which has none");
+  const selected = cli([...args, "--queue-id", queueId, "--queue-db", store],
+    { CODEX_IPC_SQLITE_READER: "{}" });
+  assert.deepEqual(queueDiagnostics(selected.stderr),
+    [{ code: "queue-check-unavailable", queueId, reason: "sqlite-reader-selected" }],
+    "a selected Python reader never falls back to node:sqlite");
+  const usage = cli([...args, "--queue-id", "nope"]);
+  assert.equal(usage.status, 1);
+  assert.equal(usage.stdout, "");
+  assert.match(usage.stderr, /--queue-id must be a UUID/);
+});
+
 console.log(`RESULT: ${passed} passed, 0 failed`);
 NODE
