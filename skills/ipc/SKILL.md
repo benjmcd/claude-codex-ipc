@@ -269,8 +269,9 @@ The wrapper writes the same envelope and runs the same target inspection as the 
 missing, archived, non-root, empty-model and ambiguous targets refuse with
 `confirmation=not-attempted` and no pickup. It then runs the shared host policy's send gate
 (a complete inventory, exactly one intended GUI host, no other Desktop host) and queues the pickup
-line in the thread's durable runtime queue with `<runtime> queue --thread <uuid> --message <pickup
-line>`, once, with a timeout (`CODEX_IPC_QUEUE_TIMEOUT_MS`, default 30000). The App's queue service
+line in the thread's durable runtime queue with
+`<runtime> queue --thread <uuid> --message <pickup line>`, once, with a timeout
+(`CODEX_IPC_QUEUE_TIMEOUT_MS`, default 30000). The App's queue service
 starts the item as an ordinary user turn (`turn_trigger: "queue"`) once the thread is loaded and
 idle. `--intended-host`, `--reply-mode` and `--request-goal` apply; `--autoload`,
 `--foreground-policy` and `--ack-foreground-switch` are refused before the envelope is written.
