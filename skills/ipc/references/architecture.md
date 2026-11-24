@@ -206,6 +206,41 @@ ambient live settings and rejects explicit live-only host/foreground flags befor
 transport default remains `~/.claude/ipc`; relocating `CODEX_IPC_ROOT` to a target-writable location
 is an operator choice and every participant must use the same explicit root.
 
+### Runtime queue delivery (`--ipc <uuid> --deliver queue`)
+
+Codex Desktop 26.1117+ has no IPC router, but its runtime keeps a durable per-thread queue
+(`queue_1.sqlite`) that other processes may write; upstream built `codex queue` for this. The App's
+queue service polls the store (`PRAGMA data_version`, about every 10 s) for loaded threads and
+starts the first item with `start_turn_if_idle` as an ordinary user turn (`turn_trigger: "queue"`),
+deleting the item once the turn has started.
+
+The route writes the same envelope and runs the same single target inspection (refusals carry
+`confirmation=not-attempted` and no pickup), then the shared host policy's send gate, where a
+routerless host is expected rather than refused. The policy's `intendedRuntime` names the runtime:
+the app-server executable proven under the one intended GUI, directly or through its
+`node.mojom.NodeService` utility child, by the same ancestry proof the send gate already uses
+(`resolved`, `missing`, `ambiguous`, or `not-evaluated` without exactly one intended GUI). This is
+the version-skew rule: only that executable runs the queue command, because another build could
+migrate the state databases under the App, and nothing is looked up on PATH.
+
+`codex_ipc_queue.mjs send` then preflights read-only (an absolute, regular runtime file named
+`codex.exe`; a `CODEX_HOME` equal to the inspected home; an existing `queue_1.sqlite`) and runs
+`<runtime> queue --thread <uuid> --message <pickup line>` once as an argv array, without a shell,
+`--resume`, `--remote` or `-c`, under `CODEX_IPC_QUEUE_TIMEOUT_MS` (default 30000). Only stdout that
+is exactly `Queued message <uuid> for thread <target>.` is success:
+`RESULT: queued -- reason=runtime-accepted -- confirmation=pending -- queueId=<uuid>` and the WAIT
+line with `--queue-id`. A refusal before the run, or a launch that produced no process, is
+`queue-unavailable -- confirmation=not-attempted` with the pickup line. Anything after the runtime
+ran (nonzero exit, signal, timeout, extra or unrecognized output, another thread) is
+`failed-closed -- confirmation=unknown`: the item may be queued and would start by itself, so pickup
+and WAIT are suppressed and resending is forbidden.
+
+The queue never steers. A busy thread runs the item after its current turn; an unloaded thread, or
+one whose last turn was interrupted, keeps it until the thread is opened in the App. The waiter's
+opt-in `--queue-id` check opens the store read-only through `codex_ipc_queue.mjs`, so the waiter
+module itself stays SQLite-free, and reports one non-terminal `queued-not-started` once the item has
+been queued for 30 s with no turn carrying the dispatch.
+
 `--reply-mode final-message` (any `--ipc` delivery) is the alternative that keeps the transport root,
 `host-policy.json` and every other lane's envelopes out of lane write access: the envelope replaces
 its reply-file request with `Reply mode: final-message.` and asks for the full result in the final
@@ -241,7 +276,8 @@ or any other connect-phase failure, as a structured `phase: "connect"` result wi
 requests. Every frame is written only after connect, so the wrapper maps that exact structure to
 `gui-unowned -- reason=router-absent|router-unreachable -- confirmation=not-attempted` and prints
 the pickup line. A connect claim that carries a request or names another thread stays
-`failed-closed -- reason=router-pipe-failure -- confirmation=unknown`.
+`failed-closed -- reason=router-pipe-failure -- confirmation=unknown`. On those builds, runtime
+queue delivery (`--deliver queue`, above) takes the router's place.
 
 Every live `--ipc` send reports exactly one result:
 
@@ -484,9 +520,10 @@ file-drop pickup line.
 
 ### Removed in v0.1.8: headless `--exec` (and `--app` / `--open`)
 
-The CLI-backed modes were removed in v0.1.8. The wrapper no longer invokes the `codex` binary on
-any path, and there is no headless execution path. Delivery is the default file-drop handoff or
-live `--ipc` GUI injection.
+The CLI-backed modes were removed in v0.1.8. The wrapper never invokes a `codex` found on PATH, and
+there is no headless execution path. Delivery is the default file-drop handoff, thread-bound manual
+pickup, runtime queue delivery, or live `--ipc` GUI injection. The only Codex binary any route
+starts is the intended host's own runtime, for the single `queue` command of `--deliver queue`.
 
 ## Read-only inspection surfaces
 

@@ -80,7 +80,16 @@ is not another exact occurrence, and discloses that uncertainty rather than eras
    prints no live `RESULT:`. A trusted inspector page is propagated; absent page authority emits
    fixed `ROLLOUT-PATH:` guidance. The default root stays `~/.claude/ipc`; an explicit shared
    `CODEX_IPC_ROOT` is an operator configuration choice for a target-writable location.
-3. **`--ipc` live injection (optional, EXPERIMENTAL, Windows):** after writing the envelope, the
+3. **Runtime queue (`--ipc <uuid> --deliver queue`, Windows, recommended on Codex Desktop
+   26.1117+):** after the same envelope and target inspection, the shared send gate must pass and
+   name the intended host's proven runtime (`intendedRuntime`). That runtime, never `codex` on
+   PATH, runs `queue --thread <uuid> --message <pickup line>` once; the App's queue service starts
+   the item as a user turn when the thread is loaded and idle. Results:
+   `queued -- confirmation=pending -- queueId=<uuid>` plus `WAIT:` with `--queue-id`;
+   `queue-unavailable -- confirmation=not-attempted` plus pickup when the runtime never ran; and
+   `failed-closed -- confirmation=unknown` with no pickup once it ran without its exact success
+   line. It never steers, and an unloaded or interrupted thread keeps the item until it is opened.
+4. **`--ipc` live injection (optional, EXPERIMENTAL, Windows):** after writing the envelope, the
    wrapper checks a read-only host inventory and injects the pickup line into the renderer-owned
    Desktop thread over the app's private named-pipe router. The host check runs freshly before the
    initial send and every retry. Activation of an unowned package thread is a separate, default-off

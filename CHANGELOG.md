@@ -4,6 +4,28 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- Added runtime queue delivery, `handoff_to_codex.sh --ipc <uuid> --deliver queue`, the
+  recommended thread-bound path on Codex Desktop 26.1117+, which serves no IPC router. After the
+  usual envelope, target inspection and shared send gate, the intended host's own runtime runs
+  `queue --thread <uuid> --message <pickup line>` once (no shell, `--resume`, `--remote` or `-c`;
+  `CODEX_IPC_QUEUE_TIMEOUT_MS`, default 30000), and the App starts the item as a user turn when the
+  thread is loaded and idle. The host policy now reports that runtime as `intendedRuntime`
+  (`resolved`, `missing`, `ambiguous` or `not-evaluated`), from the app-server it already proves
+  under the one intended GUI, directly or through the NodeService utility child; `codex` on PATH is
+  never used, so no other build touches the App's state databases. Preflight also refuses a
+  `CODEX_HOME` other than the inspected home and a home without `queue_1.sqlite`. Only the
+  runtime's exact `Queued message <id> for thread <target>.` is success:
+  `RESULT: queued -- reason=runtime-accepted -- confirmation=pending -- queueId=<id>` plus the WAIT
+  line with `--queue-id`. A refusal before the run is `queue-unavailable` with
+  `confirmation=not-attempted` and the pickup line; any other outcome after the runtime ran is
+  `failed-closed` with `confirmation=unknown`, no pickup and no WAIT. The queue never steers, and an
+  unloaded or interrupted thread keeps the item until it is opened. Default delivery and plain
+  `--ipc` are unchanged.
+- The waiter takes an opt-in `--queue-id <uuid>` (and `--queue-db` / `CODEX_IPC_QUEUE_DB`). It
+  reads the runtime queue store read-only, through the new `codex_ipc_queue.mjs` so the waiter
+  stays free of `node:sqlite`, and prints one non-terminal `queued-not-started` diagnostic as soon
+  as the item has been queued for 30 s with no turn carrying the dispatch. Tokens and exit codes are
+  unchanged.
 - Added an explicit, optional Windows SQLite reader for the inspector, snapshot and locator.
   `CODEX_IPC_SQLITE_READER` selects one reviewed Python/SQLite runtime by identity; Node's
   `node:sqlite` remains the default, and a selected reader never falls back. The reader runs

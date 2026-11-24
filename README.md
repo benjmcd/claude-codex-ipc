@@ -64,6 +64,9 @@ skills/ipc/scripts/handoff_to_codex.sh "review src/parser.js for edge cases"
 
 # 2. Thread-bound manual delivery: same UUID/reply correlation, no live contact.
 skills/ipc/scripts/handoff_to_codex.sh --ipc <conversation-id> --deliver manual -- "review the parser"
+#    On Codex Desktop 26.1117+ (no IPC router), queue the pickup line with the App's own runtime
+#    instead of pasting it; it starts when the thread is loaded and idle.
+skills/ipc/scripts/handoff_to_codex.sh --ipc <conversation-id> --deliver queue -- "review the parser"
 
 # 3. Live Desktop delivery (experimental): explicit UUID only — preview, then send.
 #    The wrapper repeats one read-only root/model inspection and a fresh host gate before contact;
@@ -164,6 +167,8 @@ live writes need `--send --ack-live-write` (+`--allow-any-thread`) — except th
 `handoff_to_codex.sh --ipc <uuid>` route, where selecting the explicit UUID is itself the
 acknowledgement and the wrapper supplies those client flags internally. `--deliver manual` makes no
 live attempt (see SECURITY.md "Completeness note"); no authorized thread id ships.
+`--deliver queue` contacts no pipe; it runs only the intended host's own proven runtime
+(`codex.exe queue`, never `codex` on PATH) after the same target and host gates.
 The wrapper rechecks a complete, single-intended-host inventory before every send or retry.
 Host settings resolve per field as flag > environment > `${CODEX_IPC_ROOT}/host-policy.json` >
 defaults (`autoload=off`, intended host `package`); every present layer must be valid. Alternate
