@@ -432,6 +432,15 @@ host of unknown version the client still finds no pipe and sends nothing; any ot
 connect-phase failure reports `reason=router-unreachable` the same way. On those builds use
 `--deliver queue`; `--deliver manual` with a pasted pickup line remains the fallback.
 
+The proven-host refusal adds one `QUEUE-HINT:` line between its `RESULT:` line and the pickup
+line. Queue delivery needs the host policy's `intendedRuntime` resolved. When it is, the line
+says that for a loaded, idle target thread the handoff can be re-sent with `--deliver queue`
+instead of pasting the pickup line below, and that line must then never be pasted; the re-send
+writes a new envelope, and doing both runs the task twice. Otherwise the line names the runtime
+status and points to the pickup line. A host of unknown version gets no hint. The `RESULT:` line
+and exit code are unchanged, and no refusal claims an injection: the live progress line prints
+only once the send gate has passed.
+
 When the target is unowned and Codex itself is the operator's foreground window, a **foreground
 policy** applies (default `defer` — never navigate the visible app). Canonical grammar:
 

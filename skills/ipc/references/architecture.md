@@ -271,7 +271,12 @@ Codex Desktop 26.1117 and later serve no router pipe; the router was removed ups
 `resources\owl-app.ini` `AppVersion`, else its Store package folder name) and `routerExpected`
 (`false` from 26.1117, `true` before, `null` when unknown). On `false` the send gate refuses with
 `gui-unowned -- reason=router-absent -- confirmation=not-attempted` and the pickup line before the
-client runs, so no process serving that pipe name is ever contacted. For any other host the client lists the Windows pipe namespace before connecting and reports a missing pipe,
+client runs, so no process serving that pipe name is ever contacted. That refusal alone adds one
+`QUEUE-HINT:` line after its `RESULT:` line: with the policy's `intendedRuntime` resolved (which
+queue delivery needs), re-send the handoff with `--deliver queue` instead of pasting, for a loaded,
+idle target, and never paste that pickup line afterwards; otherwise the line names the runtime
+status. The live progress line prints only after the send gate passes and claims an attempt, not
+an injection. For any other host the client lists the Windows pipe namespace before connecting and reports a missing pipe,
 or any other connect-phase failure, as a structured `phase: "connect"` result with no sent
 requests. Every frame is written only after connect, so the wrapper maps that exact structure to
 `gui-unowned -- reason=router-absent|router-unreachable -- confirmation=not-attempted` and prints

@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- The `router-absent` refusal of a proven 26.1117+ host now points to queue delivery. One
+  `QUEUE-HINT:` line follows its `RESULT:` line. When the host policy resolved `intendedRuntime`,
+  which queue delivery needs, it says to re-send the handoff with `--deliver queue` instead of
+  pasting, for a loaded, idle target, and never to paste that pickup line afterwards, because the
+  re-send writes a new envelope. Otherwise it names the runtime status (`missing`, `ambiguous` or
+  `not reported`) and points to the pickup line. A host of unknown version, whose `router-absent`
+  comes from the client's connect phase, gets no hint. The `RESULT:` line, exit codes and pickup
+  line are unchanged.
+- Live `--ipc` no longer prints "Injecting pickup line ... via IPC router..." before a send-gate
+  refusal. The progress line is printed only once the gate has passed, and it now reads
+  `Attempting live delivery into Desktop thread <uuid> via the IPC router...`, which also holds
+  when the client then finds no router pipe.
 - Added runtime queue delivery, `handoff_to_codex.sh --ipc <uuid> --deliver queue`, the
   recommended thread-bound path on Codex Desktop 26.1117+, which serves no IPC router. After the
   usual envelope, target inspection and shared send gate, the intended host's own runtime runs

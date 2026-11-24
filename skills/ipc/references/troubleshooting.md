@@ -39,7 +39,9 @@ required before any maintained-wrapper live attempt),
 `router-absent` (no router: Codex Desktop 26.1117 and later serve none. The host policy refuses a
 proven 26.1117+ host before any pipe contact, and a host of unknown version finds no pipe; nothing
 was sent, so the pickup line is printed — use `--deliver queue`, or `--deliver manual` as the
-fallback), `router-unreachable` (the pipe could not be connected; nothing was sent, pickup printed).
+fallback. On a proven host a `QUEUE-HINT:` line follows the `RESULT:` line: with `intendedRuntime`
+resolved, which queue delivery needs, re-send with `--deliver queue` instead of pasting, for a
+loaded, idle target, and then never paste that pickup line), `router-unreachable` (the pipe could not be connected; nothing was sent, pickup printed).
 
 `--deliver queue` results:
 `queued -- reason=runtime-accepted -- confirmation=pending -- queueId=<uuid>` means stored, not yet

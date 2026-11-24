@@ -152,7 +152,7 @@ function main() {
     )?.[1] || "";
   const initialLiveSendPath =
     handoffText.match(
-      /echo "Injecting pickup line into live Desktop thread \$\{IPC_CID\} via IPC router\.\.\."([\s\S]*?)(?=\n[ \t]*if ! authoritative_no_client; then)/,
+      /\n[ \t]*if send_live announce; then([\s\S]*?)(?=\n[ \t]*if ! authoritative_no_client; then)/,
     )?.[1] || "";
   const postAutoloadRetryPath =
     handoffText.match(
@@ -779,7 +779,8 @@ function main() {
       {
         label: "host-policy refusal preserves pickup after target eligibility is established",
         file: "scripts/handoff_to_codex.sh",
-        ok: /report_host_policy_refusal\(\) \{\n[^\n]*\n[^\n]*confirmation=not-attempted[^\n]*\n\s*fallback\n\s*\}/.test(handoffText) &&
+        // The only line allowed between the RESULT line and the pickup is the router-absent queue hint.
+        ok: /report_host_policy_refusal\(\) \{\n[^\n]*\n[^\n]*confirmation=not-attempted[^\n]*\n(?:[ \t]*\[\[ "\$HOST_POLICY_REFUSAL_REASON" != "router-absent" \]\] \|\| print_queue_hint\n)?\s*fallback\n\s*\}/.test(handoffText) &&
           handoffText.indexOf('if [[ -n "$TARGET_REFUSAL_REASON" ]]') < handoffText.indexOf("report_host_policy_refusal()"),
       },
       {
@@ -854,6 +855,17 @@ function main() {
           contains("scripts/handoff_to_codex.sh", 'if (routerExpected === false && typeof hostVersion !== "string") process.exit(1);') &&
           contains("scripts/handoff_to_codex.sh", 'HOST_POLICY_REFUSAL_REASON="router-absent"') &&
           /host_policy_send\(\) \{[\s\S]*HOST_POLICY_REFUSAL_REASON="router-absent"[\s\S]*?\n    \}\n    report_host_policy_refusal\(\) \{/.test(handoffText),
+      },
+      {
+        label: "that refusal points to --deliver queue instead of pasting, only when the intended runtime is resolved",
+        file: "scripts/handoff_to_codex.sh",
+        ok:
+          contains("scripts/handoff_to_codex.sh",
+            '[[ "$HOST_POLICY_REFUSAL_REASON" != "router-absent" ]] || print_queue_hint') &&
+          contains("scripts/handoff_to_codex.sh",
+            "re-send this handoff with --deliver queue instead of pasting the pickup line below") &&
+          contains("scripts/handoff_to_codex.sh", "--deliver queue needs the host policy's intendedRuntime resolved") &&
+          matchCount("scripts/handoff_to_codex.sh", /print_queue_hint/g) === 2,
       },
       {
         label: "a connect-phase failure is pre-write non-admission only in its exact structure, on the first attempt and every retry",
