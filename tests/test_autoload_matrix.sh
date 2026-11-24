@@ -918,7 +918,7 @@ utility_policy_case(){
     POLICY_OUT="$(powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$POLICYWIN" \
         -Purpose send -IpcRoot "$POLICY_ROOT" -IntendedHost "$intended" \
         -DryRun -MockInventoryJson "$inventory" 2>&1)"; POLICY_RC=$?
-    assert_policy 0 "R28 NodeService-launched runtime $scenario" "$predicate"
+    assert_policy 0 "${3:-R28 NodeService-launched runtime $scenario}" "$predicate"
 }
 UTILITY_ACCEPTED='value.sendEligible === true && value.inventory.complete === true &&
   value.inventory.guiHosts.length === 1 && value.inventory.guiHosts[0].pid === 861 &&
@@ -938,6 +938,55 @@ for scenario in launcher-renderer launcher-network launcher-subtype-prefix launc
 done
 utility_policy_case unreadable-identity 'value.sendEligible === false &&
   value.inventory.complete === false && value.sendReasons.includes("host-inventory-incomplete")'
+
+echo "== R29. intended runtime for --deliver queue =="
+# --deliver queue runs the runtime the policy already proved for the one intended GUI: the
+# app-server it launched directly or through its NodeService utility child. The policy reports
+# that proof; it never searches for a runtime, and it reports none it did not prove.
+POLICY_OUT="$(powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$POLICYWIN" \
+    -Purpose send -IpcRoot "$POLICY_ROOT" -DryRun -MockInventoryJson "$MOCK_PACKAGE" 2>&1)"; POLICY_RC=$?
+assert_policy 0 "R29a a package GUI's direct app-server is its resolved runtime" '
+  value.sendEligible === true && value.intendedRuntime.status === "resolved" &&
+  value.intendedRuntime.executable === "C:\\Program Files\\WindowsApps\\OpenAI.Codex_26.707.3563.0_x64__2p2nqsd0c76g0\\app\\resources\\codex.exe" &&
+  value.inventory.guiRuntimes.length === 1 && value.inventory.guiRuntimes[0].guiPid === 101 &&
+  value.inventory.guiRuntimes[0].status === "resolved"'
+POLICY_OUT="$(powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$POLICYWIN" \
+    -Purpose send -IpcRoot "$POLICY_ROOT" -IntendedHost 'C:\Alt\Host\ChatGPT.exe' \
+    -DryRun -MockInventoryJson "$MOCK_NATIVE_TREE" 2>&1)"; POLICY_RC=$?
+assert_policy 0 "R29b an alternate GUI's config-prefixed app-server is its resolved runtime" '
+  value.sendEligible === true && value.intendedRuntime.status === "resolved" &&
+  value.intendedRuntime.executable === "C:\\Alt Runtime\\codex.exe"'
+for scenario in base reverse-order; do
+    utility_policy_case "$scenario" '
+      value.sendEligible === true && value.intendedRuntime.status === "resolved" &&
+      value.intendedRuntime.executable === "C:\\Alt\\Host\\runtime\\codex.exe"' \
+      "R29c a NodeService-launched app-server is the resolved runtime ($scenario)"
+done
+utility_policy_case package-gui '
+  value.sendEligible === true && value.intendedRuntime.status === "resolved" &&
+  value.intendedRuntime.executable === "C:\\Packages\\OpenAI.Codex_fixture\\app\\resources\\codex.exe"' \
+  "R29d a package GUI's NodeService-launched runtime resolves inside the package"
+utility_policy_case conflicting-runtime '
+  value.intendedRuntime.status === "ambiguous" && value.intendedRuntime.executable === null' \
+  "R29e two different app-server executables leave the runtime ambiguous"
+utility_policy_case launcher-other-exe '
+  value.intendedRuntime.status === "missing" && value.intendedRuntime.executable === null' \
+  "R29f an app-server under an unproven launcher is no runtime"
+POLICY_OUT="$(powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$POLICYWIN" \
+    -Purpose send -IpcRoot "$POLICY_ROOT" -IntendedHost 'C:\Alt\Host\ChatGPT.exe' \
+    -DryRun -MockInventoryJson "$MOCK_ALTERNATE" 2>&1)"; POLICY_RC=$?
+assert_policy 0 "R29g a GUI with no proven app-server reports the runtime missing" '
+  value.sendEligible === true && value.intendedRuntime.status === "missing" &&
+  value.intendedRuntime.executable === null'
+POLICY_OUT="$(powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$POLICYWIN" \
+    -Purpose send -IpcRoot "$POLICY_ROOT" -DryRun -MockInventoryJson "$MOCK_EMPTY" 2>&1)"; POLICY_RC=$?
+assert_policy 0 "R29h no intended GUI leaves the runtime not evaluated" '
+  value.sendEligible === false && value.intendedRuntime.status === "not-evaluated" &&
+  value.intendedRuntime.executable === null'
+POLICY_OUT="$(powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$POLICYWIN" \
+    -Purpose configuration -IpcRoot "$POLICY_ROOT" 2>&1)"; POLICY_RC=$?
+assert_policy 0 "R29i the configuration purpose reports no runtime" '
+  value.purpose === "configuration" && value.intendedRuntime === null'
 
 echo "== S. shared policy activation decision =="
 PKG_CLEAR='{"state":"clear","runningPackageFullName":"OpenAI.Codex_26.707.3563.0_x64__2p2nqsd0c76g0","runningVersion":"26.707.3563.0","higherVersions":[],"evidence":"mock"}'
