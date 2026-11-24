@@ -958,7 +958,7 @@ manual_task=""; while IFS= read -r f; do grep -qx "t20b manual page" "$f" && { m
   && printf '%s\n' "$OUT" | grep -q -- '--reply-path ' \
   && printf '%s\n' "$OUT" | grep -q -- "--rollout-path C:/ipc-fixture/rollout-current-$UUIDF.jsonl" \
   && printf '%s\n' "$OUT" | grep '^WAIT:' | grep -Fq -- '--sessions-root C:/ipc-fixture' \
-  && ! printf '%s\n' "$OUT" | grep -Eq '^(POLICY:|RESULT:|Injecting pickup|\[ Delivered)' \
+  && ! printf '%s\n' "$OUT" | grep -Eq '^(POLICY:|RESULT:|Attempting live delivery|Injecting pickup|\[ Delivered)' \
   && [[ "$(cat "$FGDIR/inspect_count" 2>/dev/null || echo 0)" == "1" ]] \
   && [[ ! -f "$FGDIR/send_count" && ! -f "$FGDIR/powershell_count" \
         && ! -f "$FGDIR/observe_count" && ! -f "$FGDIR/pslog" ]] \

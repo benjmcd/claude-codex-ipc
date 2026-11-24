@@ -1247,14 +1247,34 @@ process.stdout.write([
     report_host_policy_refusal() {
         echo "HOST-WARNING: live IPC refused by host policy (${HOST_POLICY_REASON_LIST:-$HOST_POLICY_REFUSAL_REASON})." >&2
         echo "RESULT: gui-unowned -- reason=${HOST_POLICY_REFUSAL_REASON} -- confirmation=not-attempted" >&2
+        [[ "$HOST_POLICY_REFUSAL_REASON" != "router-absent" ]] || print_queue_hint
         fallback
     }
+    # router-absent from the send gate means a proven 26.1117+ host, which is exactly the host
+    # --deliver queue is for. One line: the re-send guidance when the policy resolved the intended
+    # runtime the queue route runs, otherwise why queue delivery is unavailable. Re-sending writes
+    # a new envelope, so the agent must choose one route: "instead of pasting" is load-bearing.
+    print_queue_hint() {
+        local runtime_status="$HOST_RUNTIME_STATUS"
+        if [[ "$runtime_status" == "resolved" ]]; then
+            echo "QUEUE-HINT: if the target thread is loaded and idle, re-send this handoff with --deliver queue instead of pasting the pickup line below, and then never paste that line." >&2
+        else
+            [[ "$runtime_status" != "absent" ]] || runtime_status="not reported"
+            echo "QUEUE-HINT: --deliver queue needs the host policy's intendedRuntime resolved, and it is ${runtime_status}; use the pickup line below." >&2
+        fi
+    }
+    # send_live [announce]: the shared send gate, then one router client run. The progress line is
+    # printed only after the gate passes, and it claims an attempt, not an injection: a refused gate
+    # contacts nothing, and an absent router pipe is found only by the client.
     send_live() {
         local send_status=0
         IPC_OUTPUT=""
         HOST_POLICY_REFUSAL=0
         if ! host_policy_send; then
             return 125
+        fi
+        if [[ "${1:-}" == "announce" ]]; then
+            echo "Attempting live delivery into Desktop thread ${IPC_CID} via the IPC router..."
         fi
         if IPC_OUTPUT=$(node "${SCRIPT_DIR}/codex_ipc_client.mjs" \
             --thread "${IPC_CID}" \
@@ -1553,8 +1573,7 @@ for (const line of lines) {
                 ;;
         esac
     fi
-    echo "Injecting pickup line into live Desktop thread ${IPC_CID} via IPC router..."
-    if send_live; then
+    if send_live announce; then
         if ! authoritative_success; then
             # Exit 0 without the exact one-target follower proof is still post-attempt
             # ambiguity. Never call it delivered and never retry automatically.

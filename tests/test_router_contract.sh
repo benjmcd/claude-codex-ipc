@@ -573,7 +573,7 @@ case "$name" in
         exit 0
         ;;
       malformed-success) printf '%s\n' '{"ok":true,"resultType":"success"}'; exit 0 ;;
-      routerless-host|routerless-unversioned|router-malformed-expectation|router-expected-host)
+      routerless-host|routerless-host-runtime|routerless-host-runtime-missing|routerless-unversioned|router-malformed-expectation|router-expected-host)
         printf 'client invoked: %s\n' "$ROUTER_CASE" >> "$TOOL_LOG.client"
         printf '{"ok":true,"targetThreadId":"%s","sentRequests":[{"name":"thread-follower-start-turn","json":{"method":"thread-follower-start-turn","params":{"conversationId":"%s"}}}],"response":{"resultType":"success"}}\n' "$target" "$target"
         exit 0
@@ -675,6 +675,8 @@ if [[ "${script##*/}" == "codex_ipc_host_policy.ps1" ]]; then
   printf '%s\n' "$*" >> "$POLICY_LOG"
   case "${ROUTER_CASE:-}" in
     routerless-host) echo '{"schemaVersion":1,"ok":true,"purpose":"send","configuration":{"valid":true,"autoload":{"value":"codex-uri","source":"environment"},"intendedHost":{"kind":"package","executable":null,"source":"default"}},"inventory":{"complete":true,"guiHosts":[{"matchesIntended":true}],"appServers":[]},"sendEligible":true,"sendReasons":[],"activationEligible":false,"activationReasons":["not-checked"],"intendedHostVersion":"26.1117.4957.0","routerExpected":false}' ;;
+    routerless-host-runtime) echo '{"schemaVersion":1,"ok":true,"purpose":"send","configuration":{"valid":true,"autoload":{"value":"codex-uri","source":"environment"},"intendedHost":{"kind":"package","executable":null,"source":"default"}},"inventory":{"complete":true,"guiHosts":[{"matchesIntended":true}],"appServers":[]},"sendEligible":true,"sendReasons":[],"activationEligible":false,"activationReasons":["not-checked"],"intendedHostVersion":"26.1117.31558.0","routerExpected":false,"intendedRuntime":{"status":"resolved","executable":"/fixture/runtime/codex.exe"}}' ;;
+    routerless-host-runtime-missing) echo '{"schemaVersion":1,"ok":true,"purpose":"send","configuration":{"valid":true,"autoload":{"value":"codex-uri","source":"environment"},"intendedHost":{"kind":"package","executable":null,"source":"default"}},"inventory":{"complete":true,"guiHosts":[{"matchesIntended":true}],"appServers":[]},"sendEligible":true,"sendReasons":[],"activationEligible":false,"activationReasons":["not-checked"],"intendedHostVersion":"26.1117.31558.0","routerExpected":false,"intendedRuntime":{"status":"missing","executable":null}}' ;;
     routerless-unversioned) echo '{"schemaVersion":1,"ok":true,"purpose":"send","configuration":{"valid":true,"autoload":{"value":"codex-uri","source":"environment"},"intendedHost":{"kind":"package","executable":null,"source":"default"}},"inventory":{"complete":true,"guiHosts":[{"matchesIntended":true}],"appServers":[]},"sendEligible":true,"sendReasons":[],"activationEligible":false,"activationReasons":["not-checked"],"intendedHostVersion":null,"routerExpected":false}' ;;
     router-malformed-expectation) echo '{"schemaVersion":1,"ok":true,"purpose":"send","configuration":{"valid":true,"autoload":{"value":"codex-uri","source":"environment"},"intendedHost":{"kind":"package","executable":null,"source":"default"}},"inventory":{"complete":true,"guiHosts":[{"matchesIntended":true}],"appServers":[]},"sendEligible":true,"sendReasons":[],"activationEligible":false,"activationReasons":["not-checked"],"intendedHostVersion":"26.1117.4957.0","routerExpected":"no"}' ;;
     router-expected-host) echo '{"schemaVersion":1,"ok":true,"purpose":"send","configuration":{"valid":true,"autoload":{"value":"codex-uri","source":"environment"},"intendedHost":{"kind":"package","executable":null,"source":"default"}},"inventory":{"complete":true,"guiHosts":[{"matchesIntended":true}],"appServers":[]},"sendEligible":true,"sendReasons":[],"activationEligible":false,"activationReasons":["not-checked"],"intendedHostVersion":"26.1111.9664.0","routerExpected":true}' ;;
@@ -852,6 +854,107 @@ for _pickup_case in router-absent router-unreachable; do
   fi
 done
 unset _pickup_case _pickup_out
+
+# Queue guidance on the router-absent refusal. Only the send gate's router-absent (a proven
+# 26.1117+ host) prints a QUEUE-HINT line, and it offers --deliver queue, instead of pasting, only
+# when the policy resolved the intended runtime that route runs. The RESULT line, the exit code and
+# the pickup line are unchanged, and no progress line claims an attempt the refused gate never made.
+ROUTER_OUT=""
+ROUTER_RC=0
+ROUTER_OUT_N=0
+capture_wrapper(){ # capture_wrapper <scenario>: sets ROUTER_OUT and ROUTER_RC
+  ROUTER_OUT_N=$((ROUTER_OUT_N + 1))
+  local case_root="$TMP/router-out-$ROUTER_OUT_N"
+  mkdir -p "$case_root/ipc" "$case_root/home" \
+    || fatal "could not create router-output fixture $ROUTER_OUT_N"
+  ROUTER_OUT="$(env PATH="$STUB_BIN:$PATH" REAL_NODE="$NODE_BIN" ROUTER_CASE="$1" \
+    TOOL_LOG="$TOOL_LOG" POLICY_LOG="$POLICY_LOG" HOME="$case_root/home" \
+    CLAUDE_SESSION_ID="33333333-3333-4333-8333-333333333333" CODEX_IPC_ROOT="$case_root/ipc" \
+    CODEX_IPC_AUTOLOAD=codex-uri CODEX_IPC_RETENTION_DAYS=0 \
+    bash "$WRAPPER" --ipc "$THREAD" "$TASK_TEXT" 2>&1)"
+  ROUTER_RC=$?
+}
+ROUTER_ABSENT_RESULT="RESULT: gui-unowned -- reason=router-absent -- confirmation=not-attempted"
+QUEUE_HINT_RESEND="QUEUE-HINT: if the target thread is loaded and idle, re-send this handoff with --deliver queue instead of pasting the pickup line below, and then never paste that line."
+LIVE_PROGRESS="Attempting live delivery into Desktop thread $THREAD via the IPC router..."
+# line_of <exact line>: the first line number of ROUTER_OUT that equals it, or 0.
+line_of(){ printf '%s\n' "$ROUTER_OUT" | grep -Fxn -- "$1" | sed -n '1s/:.*//p' | grep . || echo 0; }
+
+capture_wrapper routerless-host-runtime
+_result_at="$(line_of "$ROUTER_ABSENT_RESULT")"
+_hint_at="$(line_of "$QUEUE_HINT_RESEND")"
+_fallback_at="$(line_of "FALLBACK -- file-drop is ready.")"
+if [[ $ROUTER_RC -eq 1 && $_result_at -gt 0 && $_hint_at -eq $((_result_at + 1)) && $_fallback_at -gt $_hint_at ]] \
+  && [[ "$(printf '%s\n' "$ROUTER_OUT" | grep -c '^QUEUE-HINT:')" == "1" ]] \
+  && printf '%s\n' "$ROUTER_OUT" | grep -Eq '^    read ".*\.task\.md" and proceed$'; then
+  ok "a routerless host with a resolved runtime is told to re-send with --deliver queue instead of pasting, before the unchanged pickup"
+else
+  no "the resolved-runtime router-absent refusal lacks the exact queue hint, or moved the RESULT or pickup (rc=$ROUTER_RC)"
+  printf '%s\n' "$ROUTER_OUT" | sed -n '1,30p'
+fi
+if ! printf '%s\n' "$ROUTER_OUT" | grep -Eq 'Injecting|Attempting live delivery'; then
+  ok "a router-absent refusal from the send gate prints no injection or attempt claim"
+else
+  no "a router-absent refusal from the send gate still claims an injection or attempt"
+  printf '%s\n' "$ROUTER_OUT" | sed -n '1,30p'
+fi
+
+capture_wrapper routerless-host-runtime-missing
+if [[ $ROUTER_RC -eq 1 ]] && printf '%s\n' "$ROUTER_OUT" | grep -Fqx "$ROUTER_ABSENT_RESULT" \
+  && printf '%s\n' "$ROUTER_OUT" | grep -Fqx "QUEUE-HINT: --deliver queue needs the host policy's intendedRuntime resolved, and it is missing; use the pickup line below." \
+  && ! printf '%s\n' "$ROUTER_OUT" | grep -Fq -- "re-send" \
+  && printf '%s\n' "$ROUTER_OUT" | grep -Fq "FALLBACK -- file-drop is ready."; then
+  ok "a routerless host without a resolved runtime is told queue delivery needs it, and is not offered a re-send"
+else
+  no "the unresolved-runtime router-absent refusal output is wrong (rc=$ROUTER_RC)"
+  printf '%s\n' "$ROUTER_OUT" | sed -n '1,30p'
+fi
+
+capture_wrapper routerless-host
+if [[ $ROUTER_RC -eq 1 ]] && printf '%s\n' "$ROUTER_OUT" | grep -Fqx "$ROUTER_ABSENT_RESULT" \
+  && printf '%s\n' "$ROUTER_OUT" | grep -Fqx "QUEUE-HINT: --deliver queue needs the host policy's intendedRuntime resolved, and it is not reported; use the pickup line below." \
+  && ! printf '%s\n' "$ROUTER_OUT" | grep -Fq -- "re-send"; then
+  ok "policy output without intendedRuntime is reported as not resolved, with no re-send offer"
+else
+  no "the router-absent refusal without intendedRuntime output is wrong (rc=$ROUTER_RC)"
+  printf '%s\n' "$ROUTER_OUT" | sed -n '1,30p'
+fi
+
+if grep -Eq 'client invoked: routerless-host-runtime' "$TOOL_LOG.client"; then
+  no "the client ran for a routerless host with a reported runtime"
+else
+  ok "no client ran for a routerless host with a reported runtime (zero pipe contact)"
+fi
+
+# The connect-phase router-absent comes from a host of unknown version, where queue delivery is not
+# proven to apply: no hint. Its progress line, printed once the gate passed, claims an attempt only.
+for _nohint_case in router-absent router-unreachable routerless-unversioned router-malformed-expectation no-client unknown; do
+  capture_wrapper "$_nohint_case"
+  if [[ $ROUTER_RC -eq 1 ]] && ! printf '%s\n' "$ROUTER_OUT" | grep -q '^QUEUE-HINT:' \
+    && ! printf '%s\n' "$ROUTER_OUT" | grep -Fq 'Injecting'; then
+    ok "$_nohint_case prints no queue hint and no injection claim"
+  else
+    no "$_nohint_case printed a queue hint or an injection claim (rc=$ROUTER_RC)"
+    printf '%s\n' "$ROUTER_OUT" | sed -n '1,30p'
+  fi
+done
+unset _nohint_case
+capture_wrapper router-absent
+if [[ "$(printf '%s\n' "$ROUTER_OUT" | grep -Fxc "$LIVE_PROGRESS")" == "1" ]]; then
+  ok "the connect-phase router-absent path says it attempted live delivery, not that it injected"
+else
+  no "the connect-phase router-absent progress line is missing or repeated"
+  printf '%s\n' "$ROUTER_OUT" | sed -n '1,30p'
+fi
+capture_wrapper acceptance
+if [[ $ROUTER_RC -eq 0 && "$(printf '%s\n' "$ROUTER_OUT" | grep -Fxc "$LIVE_PROGRESS")" == "1" ]] \
+  && [[ "$(line_of "$LIVE_PROGRESS")" -lt "$(line_of "RESULT: gui-delivered -- reason=renderer-owned -- confirmation=rollout-hit")" ]]; then
+  ok "an accepted send prints the attempt line once, before its RESULT"
+else
+  no "an accepted send lost or repeated the attempt line (rc=$ROUTER_RC)"
+  printf '%s\n' "$ROUTER_OUT" | sed -n '1,30p'
+fi
+unset _result_at _hint_at _fallback_at
 
 echo "== 3c. --deliver queue: runtime queue delivery classification =="
 # The runtime is a fake codex.exe that the real helper launches exactly as it would the real one.
