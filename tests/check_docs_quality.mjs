@@ -52,6 +52,7 @@ const EXPECTED_BEHAVIORAL_SUITES = Object.freeze([
   "test_ipc.sh",
   "test_ipc_wait.sh",
   "test_payload_mirror_parity.sh",
+  "test_queue_wake.sh",
   "test_reply_harvest.sh",
   "test_reply_view.sh",
   "test_retention_sweep.sh",
@@ -1424,7 +1425,7 @@ function validMojibakeGuidance() {
 
 function validRunnerText() {
   return [
-    "DEFAULT_SUITES=(test_autoload_matrix.sh test_git_context_bound.sh test_ipc.sh test_ipc_wait.sh test_payload_mirror_parity.sh test_reply_harvest.sh test_reply_view.sh test_retention_sweep.sh test_rollout_reader.sh test_router_contract.sh test_session_inspect.sh test_uninstall_guard.sh test_wait_contract.sh)",
+    "DEFAULT_SUITES=(test_autoload_matrix.sh test_git_context_bound.sh test_ipc.sh test_ipc_wait.sh test_payload_mirror_parity.sh test_queue_wake.sh test_reply_harvest.sh test_reply_view.sh test_retention_sweep.sh test_rollout_reader.sh test_router_contract.sh test_session_inspect.sh test_uninstall_guard.sh test_wait_contract.sh)",
     '[ "${#SUITES[@]}" -gt 0 ] || SUITES=("${DEFAULT_SUITES[@]}")',
     "for s in \"${SUITES[@]}\"; do", "  run_one \"$s\" || true", "done",
     "node tests/check_text_integrity.mjs --self-test", "node tests/check_text_integrity.mjs --source index", "node tests/check_text_integrity.mjs --source worktree",
@@ -1449,7 +1450,7 @@ function validMonitoredRunnerText() {
 }
 
 function validWorkflowText() {
-  const suites = ["test_autoload_matrix.sh", "test_git_context_bound.sh", "test_ipc.sh", "test_ipc_wait.sh", "test_payload_mirror_parity.sh", "test_reply_harvest.sh", "test_reply_view.sh", "test_retention_sweep.sh", "test_rollout_reader.sh", "test_router_contract.sh", "test_session_inspect.sh", "test_uninstall_guard.sh", "test_wait_contract.sh"];
+  const suites = ["test_autoload_matrix.sh", "test_git_context_bound.sh", "test_ipc.sh", "test_ipc_wait.sh", "test_payload_mirror_parity.sh", "test_queue_wake.sh", "test_reply_harvest.sh", "test_reply_view.sh", "test_retention_sweep.sh", "test_rollout_reader.sh", "test_router_contract.sh", "test_session_inspect.sh", "test_uninstall_guard.sh", "test_wait_contract.sh"];
   const commands = [...suites.map((suite) => `bash tests/${suite}`),
     "node tests/check_text_integrity.mjs --self-test", "node tests/check_text_integrity.mjs --source index", "node tests/check_text_integrity.mjs --source worktree",
     "node tests/check_docs_quality.mjs --self-test", "node tests/check_docs_quality.mjs", "bash tests/gen_release_manifest.sh check-all --no-roots",

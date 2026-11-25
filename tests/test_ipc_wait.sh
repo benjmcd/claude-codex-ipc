@@ -2439,5 +2439,288 @@ await test("CLI --queue-id reads a fixture store read-only and prints queued-not
   assert.match(usage.stderr, /--queue-id must be a UUID/);
 });
 
+// Queue wake: the waiter wakes an unloaded thread once, through codex_ipc_wake.ps1. Every case here
+// injects the runner, the platform and the environment; nothing runs PowerShell or reads ~/.claude.
+const {
+  QUEUE_WAKE_AFTER_MS,
+  QUEUE_WAKE_NO_EFFECT_MS,
+  parseWakeOutput,
+  resolveWakeHostKind,
+} = api;
+const wakeExe = "C:\\Fixture\\Alt\\app\\ChatGPT.exe";
+
+function wakeRoot(name, descriptor) {
+  const root = caseDir(name);
+  fs.mkdirSync(path.join(root, "transport"), { recursive: true });
+  if (descriptor !== undefined) {
+    fs.writeFileSync(path.join(root, "transport", "host-policy.json"),
+      typeof descriptor === "string" ? descriptor : JSON.stringify(descriptor));
+  }
+  return root;
+}
+const alternateDescriptor = { schemaVersion: 1, intendedHost: { kind: "alternate", executable: wakeExe } };
+
+function wakeDiagnostics(items) {
+  return items.filter((item) => /^wake-/.test(item.code) || item.code === "queued-not-started");
+}
+
+// Runs a polling wait over a fresh queued item with an injected clock. `item(ageMs)` decides what
+// the queue store returns; `runWake` records each call with the item's age at that moment.
+async function runWakeCase({
+  root, records = [sessionMeta()], budgetMs = 60000, wake = true, platform = "win32", env = {},
+  item = () => "present", outcome, intendedHost = null, runWake, createdAgoMs = 0,
+}) {
+  const rollout = writeRollout(root, records);
+  let clock = 2_000_000;
+  const createdAtMs = clock - createdAgoMs;
+  const calls = [];
+  const live = [];
+  const result = await waitForCompletion(
+    directOptions(root, rollout, null, {
+      budgetMs, intervalMs: 1000, queueItemId: queueId, queueDbPath: "unused", wake, intendedHost,
+    }),
+    {
+      now: () => clock,
+      sleep: async (ms) => { clock += ms; },
+      platform,
+      env,
+      readQueuedItem: async () => {
+        const state = item(clock - createdAtMs);
+        return state === "present"
+          ? { status: "present", queueId, threadId: thread, createdAtMs }
+          : { status: state };
+      },
+      runWake: runWake || (async (request) => {
+        calls.push({ request, ageMs: clock - createdAtMs });
+        return outcome || {
+          result: "forwarded", wakeCode: "wake-forwarded", reasons: [], launched: true,
+          rootPid: 100, rootPidAfter: 100, helperPid: 555, helperExitCode: 0, exitStatus: 0,
+        };
+      }),
+      onDiagnostic: (diagnostic) => live.push(diagnostic),
+    },
+  );
+  return { result, calls, live };
+}
+
+await test("--no-wake and --intended-host need --queue-id; the wake is on by default for a queue dispatch", () => {
+  const base = ["--thread", thread, "--dispatch", dispatch];
+  assert.equal(parseWaitArgs(base, {}).options.wake, false, "no queue id, no wake");
+  const queued = parseWaitArgs([...base, "--queue-id", queueId], {}).options;
+  assert.equal(queued.wake, true);
+  assert.equal(queued.intendedHost, null);
+  assert.equal(parseWaitArgs([...base, "--queue-id", queueId, "--no-wake"], {}).options.wake, false);
+  assert.equal(parseWaitArgs([...base, "--queue-id", queueId, "--intended-host", wakeExe], {})
+    .options.intendedHost, wakeExe);
+  assert.equal(parseWaitArgs([...base, "--queue-id", queueId, "--intended-host", "package"], {})
+    .options.intendedHost, "package");
+  assert.throws(() => parseWaitArgs([...base, "--no-wake"], {}), /--no-wake requires --queue-id/);
+  assert.throws(() => parseWaitArgs([...base, "--intended-host", wakeExe], {}),
+    /--intended-host requires --queue-id/);
+  assert.throws(() => parseWaitArgs([...base, "--queue-id", queueId, "--intended-host", "relative\\ChatGPT.exe"], {}),
+    /--intended-host must be package or an absolute executable path/);
+  assert.equal(QUEUE_WAKE_AFTER_MS, 12000);
+  assert.equal(QUEUE_WAKE_NO_EFFECT_MS, 15000);
+});
+
+await test("a queued item still queued at 12 s is woken exactly once, then wake-no-effect at +15 s, then queued-not-started", async () => {
+  const root = wakeRoot("wake-once", alternateDescriptor);
+  const { result, calls, live } = await runWakeCase({ root });
+  assert.equal(result.token, "pending", "the wake never changes the token");
+  assert.equal(calls.length, 1, "exactly one wake");
+  assert.equal(calls[0].ageMs, QUEUE_WAKE_AFTER_MS, "at the first poll at or after 12 s");
+  assert.deepEqual(calls[0].request, {
+    threadId: thread, ipcRoot: path.join(root, "transport"), intendedHost: null, timeoutMs: 60000,
+  });
+  const codes = wakeDiagnostics(live).map((item) => item.code);
+  assert.deepEqual(codes, ["wake-attempted", "wake-result", "wake-no-effect", "queued-not-started"]);
+  const attempted = live.find((item) => item.code === "wake-attempted");
+  assert.equal(attempted.ageMs, QUEUE_WAKE_AFTER_MS);
+  assert.equal(attempted.threadId, thread);
+  const outcome = live.find((item) => item.code === "wake-result");
+  assert.equal(outcome.result, "forwarded");
+  assert.equal(outcome.wakeCode, "wake-forwarded");
+  assert.equal(outcome.launched, true);
+  const noEffect = live.find((item) => item.code === "wake-no-effect");
+  assert.equal(noEffect.sinceWakeMs, QUEUE_WAKE_NO_EFFECT_MS);
+  assert.deepEqual(noEffect.possibleCauses,
+    ["last-turn-interrupted", "thread-owned-by-another-writer", "app-not-ready"]);
+  assert.equal(live.find((item) => item.code === "queued-not-started").ageMs, QUEUE_NOT_STARTED_GRACE_MS);
+  assert.equal(result.diagnostics.filter((item) => /^wake-/.test(item.code)).length, 3,
+    "each wake diagnostic is recorded once");
+});
+
+await test("an item that starts before 12 s, or a turn that already carries the dispatch, is never woken", async () => {
+  const early = await runWakeCase({
+    root: wakeRoot("wake-started-early", alternateDescriptor),
+    item: (ageMs) => (ageMs < 5000 ? "present" : "absent"),
+  });
+  assert.equal(early.calls.length, 0);
+  assert.deepEqual(wakeDiagnostics(early.live), []);
+  const carried = await runWakeCase({
+    root: wakeRoot("wake-turn-carries", alternateDescriptor), records: ownOpenRecords(),
+  });
+  assert.equal(carried.calls.length, 0);
+  assert.deepEqual(wakeDiagnostics(carried.live), []);
+});
+
+await test("--no-wake and a single-shot wait never wake", async () => {
+  const off = await runWakeCase({ root: wakeRoot("wake-off", alternateDescriptor), wake: false });
+  assert.equal(off.calls.length, 0);
+  assert.deepEqual(wakeDiagnostics(off.live).map((item) => item.code), ["queued-not-started"],
+    "the existing queue diagnostic is unchanged");
+  const single = await runWakeCase({
+    root: wakeRoot("wake-single-shot", alternateDescriptor), budgetMs: 0, createdAgoMs: 600000,
+  });
+  assert.equal(single.calls.length, 0);
+  assert.equal(single.live.some((item) => /^wake-/.test(item.code)), false);
+});
+
+await test("not on Windows, the helper never runs: one wake-skipped not-windows", async () => {
+  const { calls, live } = await runWakeCase({
+    root: wakeRoot("wake-not-windows", alternateDescriptor), platform: "linux",
+  });
+  assert.equal(calls.length, 0);
+  assert.deepEqual(live.filter((item) => /^wake-/.test(item.code)),
+    [{ code: "wake-skipped", queueId, reason: "not-windows" }]);
+  assert.equal(live.some((item) => item.code === "queued-not-started"), true);
+});
+
+await test("a package host is never woken, from any configuration layer; an invalid one is not either", async () => {
+  const skipped = async (name, descriptor, extra = {}) => {
+    const run = await runWakeCase({ root: wakeRoot(name, descriptor), ...extra });
+    assert.equal(run.calls.length, 0, name);
+    return run.live.filter((item) => /^wake-/.test(item.code));
+  };
+  assert.deepEqual(await skipped("wake-default", undefined),
+    [{ code: "wake-skipped", queueId, reason: "host-package", source: "default" }]);
+  assert.deepEqual(await skipped("wake-descriptor-package", { schemaVersion: 1, intendedHost: { kind: "package" } }),
+    [{ code: "wake-skipped", queueId, reason: "host-package", source: "descriptor" }]);
+  assert.deepEqual(await skipped("wake-env-package", alternateDescriptor, { env: { CODEX_IPC_INTENDED_HOST: "package" } }),
+    [{ code: "wake-skipped", queueId, reason: "host-package", source: "environment" }]);
+  assert.deepEqual(await skipped("wake-flag-package", alternateDescriptor, { intendedHost: "package" }),
+    [{ code: "wake-skipped", queueId, reason: "host-package", source: "flag" }]);
+  assert.deepEqual(await skipped("wake-descriptor-invalid", "{not json"),
+    [{ code: "wake-skipped", queueId, reason: "host-policy-invalid", source: "descriptor" }]);
+  assert.deepEqual(await skipped("wake-descriptor-kind", { schemaVersion: 1, intendedHost: { kind: "other" } }),
+    [{ code: "wake-skipped", queueId, reason: "host-policy-invalid", source: "descriptor" }]);
+  assert.deepEqual(await skipped("wake-env-empty", alternateDescriptor, { env: { CODEX_IPC_INTENDED_HOST: " " } }),
+    [{ code: "wake-skipped", queueId, reason: "host-policy-invalid", source: "environment" }]);
+
+  const envAlternate = await runWakeCase({
+    root: wakeRoot("wake-env-alternate", { schemaVersion: 1, intendedHost: { kind: "package" } }),
+    env: { CODEX_IPC_INTENDED_HOST: wakeExe },
+  });
+  assert.equal(envAlternate.calls.length, 1, "the environment outranks the descriptor");
+  const flagAlternate = await runWakeCase({
+    root: wakeRoot("wake-flag-alternate", undefined), intendedHost: wakeExe,
+  });
+  assert.equal(flagAlternate.calls.length, 1, "the handoff's --intended-host outranks the default");
+  assert.equal(flagAlternate.calls[0].request.intendedHost, wakeExe, "and is passed to the helper");
+});
+
+await test("a refused or failed wake reports its code once and no wake-no-effect; queued-not-started still follows", async () => {
+  const refused = await runWakeCase({
+    root: wakeRoot("wake-refused", alternateDescriptor),
+    outcome: { result: "refused", wakeCode: "app-not-running", reasons: ["app-not-running"], launched: false, exitStatus: 6 },
+  });
+  assert.equal(refused.calls.length, 1);
+  assert.deepEqual(wakeDiagnostics(refused.live).map((item) => item.code),
+    ["wake-attempted", "wake-result", "queued-not-started"]);
+  const result = refused.live.find((item) => item.code === "wake-result");
+  assert.equal(result.result, "refused");
+  assert.equal(result.wakeCode, "app-not-running");
+  assert.equal(result.exitStatus, 6);
+
+  const thrown = await runWakeCase({
+    root: wakeRoot("wake-thrown", alternateDescriptor),
+    runWake: async () => { throw new Error("synthetic helper failure"); },
+  });
+  assert.deepEqual(thrown.live.filter((item) => item.code === "wake-result").map((item) => item.wakeCode),
+    ["helper-error"]);
+  assert.equal(thrown.live.some((item) => item.code === "wake-no-effect"), false);
+
+  const unverified = await runWakeCase({
+    root: wakeRoot("wake-unverified", alternateDescriptor),
+    outcome: {
+      result: "unverified", wakeCode: "wake-launch-not-exited", reasons: ["wake-launch-not-exited"],
+      launched: true, helperPid: 555, exitStatus: 7,
+    },
+  });
+  assert.deepEqual(wakeDiagnostics(unverified.live).map((item) => item.code),
+    ["wake-attempted", "wake-result", "wake-no-effect", "queued-not-started"],
+    "a launch that may have forwarded the URL is still followed up");
+});
+
+await test("parseWakeOutput keeps tokens and PIDs, drops paths, and rejects anything else", () => {
+  const document = {
+    schemaVersion: 1, tool: "codex_ipc_wake", result: "unverified", code: "host-changed",
+    reasons: ["host-changed", "Not A Token"], launched: true, rootPid: 100, rootPidAfter: 200,
+    helperPid: 555, helperExitCode: 0, userDataDir: "C:\\private\\desktop",
+    command: { executable: wakeExe },
+  };
+  const parsed = parseWakeOutput(`noise\n${JSON.stringify(document)}\n`, 7);
+  assert.deepEqual(parsed, {
+    result: "unverified", wakeCode: "host-changed", reasons: ["host-changed"], launched: true,
+    rootPid: 100, rootPidAfter: 200, helperPid: 555, helperExitCode: 0, exitStatus: 7,
+  });
+  assert.equal(JSON.stringify(parsed).includes("private"), false);
+  for (const bad of ["", "not json", JSON.stringify({ ...document, tool: "other" }),
+    JSON.stringify({ ...document, result: "woken" }), JSON.stringify({ ...document, code: "Bad Code" }),
+    JSON.stringify({ ...document, schemaVersion: 2 })]) {
+    assert.deepEqual(parseWakeOutput(bad, 1),
+      { result: null, wakeCode: "helper-output-invalid", launched: false, exitStatus: 1 });
+  }
+});
+
+await test("resolveWakeHostKind follows flag, environment, descriptor, then the package default", () => {
+  const root = wakeRoot("wake-resolve", alternateDescriptor);
+  const transportRoot = path.join(root, "transport");
+  assert.deepEqual(resolveWakeHostKind({ transportRoot }, {}), { kind: "alternate", source: "descriptor" });
+  assert.deepEqual(resolveWakeHostKind({ transportRoot, intendedHost: "package" }, { CODEX_IPC_INTENDED_HOST: wakeExe }),
+    { kind: "package", source: "flag" });
+  assert.deepEqual(resolveWakeHostKind({ transportRoot }, { CODEX_IPC_INTENDED_HOST: "package" }),
+    { kind: "package", source: "environment" });
+  assert.deepEqual(resolveWakeHostKind({ transportRoot: path.join(root, "absent") }, {}),
+    { kind: "package", source: "default" });
+  fs.writeFileSync(path.join(transportRoot, "host-policy.json"), `\uFEFF${JSON.stringify({ schemaVersion: 1 })}`);
+  assert.deepEqual(resolveWakeHostKind({ transportRoot }, {}), { kind: "package", source: "default" });
+});
+
+await test("CLI: a polling queue wait on a package host skips the wake without running PowerShell; --no-wake is silent", async () => {
+  const root = caseDir("wake-cli");
+  const rollout = writeRollout(root, [sessionMeta()]);
+  const store = path.join(root, "store", "queue_1.sqlite");
+  await writeQueueStore(store, [{ id: queueId, threadId: thread, createdAtMs: Date.now() - 600000 }]);
+  const transport = path.join(root, "transport");
+  fs.mkdirSync(transport, { recursive: true });
+  fs.writeFileSync(path.join(transport, "host-policy.json"),
+    JSON.stringify({ schemaVersion: 1, intendedHost: { kind: "package" } }));
+  const env = { ...process.env };
+  delete env.CODEX_IPC_INTENDED_HOST;
+  const args = ["--thread", thread, "--dispatch", dispatch, "--rollout-path", rollout,
+    "--sessions-root", root, "--transport-root", transport, "--status-exit-codes",
+    "--budget-ms", "1500", "--interval-ms", "500", "--queue-id", queueId, "--queue-db", store];
+  const run = (extra) => spawnSync(process.execPath, [waitPath, ...args, ...extra], {
+    cwd: tmp, encoding: "utf8", timeout: 30000,
+    env: { ...env, HOME: tmp, USERPROFILE: tmp, CODEX_IPC_ROLLOUT_PATH: "", CODEX_IPC_WAIT_BUDGET_MS: "",
+      CODEX_IPC_WAIT_INTERVAL_MS: "" },
+  });
+  const wakeLines = (stderr) => stderr.split(/\r?\n/u)
+    .filter((line) => line.startsWith("WAIT_DIAGNOSTIC "))
+    .map((line) => JSON.parse(line.slice("WAIT_DIAGNOSTIC ".length)))
+    .filter((item) => /^wake-/.test(item.code));
+  const woken = run([]);
+  assert.equal(woken.stdout, "pending\n", woken.stderr);
+  assert.equal(woken.status, 2, "the exit code is the wait's");
+  assert.deepEqual(wakeLines(woken.stderr), [process.platform === "win32"
+    ? { code: "wake-skipped", queueId, reason: "host-package", source: "descriptor" }
+    : { code: "wake-skipped", queueId, reason: "not-windows" }]);
+  const quiet = run(["--no-wake"]);
+  assert.equal(quiet.stdout, "pending\n");
+  assert.equal(quiet.status, 2);
+  assert.deepEqual(wakeLines(quiet.stderr), []);
+});
+
 console.log(`RESULT: ${passed} passed, 0 failed`);
 NODE

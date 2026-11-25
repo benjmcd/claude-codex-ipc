@@ -105,8 +105,9 @@ case "${1:-}" in
             '  pickup + WAIT instructions without contacting the Desktop pipe, host helper, or opener.' \
             '  --deliver queue (recommended on Codex Desktop 26.1117+, which serves no router) queues the' \
             '  pickup line with the runtime of the intended host (codex.exe queue, never codex on PATH)' \
-            '  after the same target checks; it never steers, and an unloaded or interrupted thread keeps' \
-            '  the item queued until it is opened. RESULT: queued ... -- queueId=<id> plus WAIT on success.' \
+            '  after the same target checks; it never steers. The WAIT line wakes an unloaded thread once' \
+            '  on an alternate host; an interrupted thread keeps the item queued until it is opened.' \
+            '  RESULT: queued ... -- queueId=<id> plus WAIT on success.' \
             '  --reply-mode final-message (--ipc only) asks for the reply in the final agent message, not' \
             '  a reply file, for a target that cannot write the transport root; the envelope records it.' \
             '  Transport root: ${CODEX_IPC_ROOT:-~/.claude/ipc}. Envelopes are kept by default.' \
@@ -958,8 +959,13 @@ process.stdout.write([state, parent, legacy, rolloutPath, sessionsRoot].join("\t
             --thread "$IPC_CID" --dispatch "$DISPATCH_ID" --reply-path "$INBOUND")
         [[ -z "$INSPECT_ROLLOUT_PATH" ]] || wait_args+=(--rollout-path "$INSPECT_ROLLOUT_PATH")
         [[ -z "$INSPECT_SESSIONS_ROOT" ]] || wait_args+=(--sessions-root "$INSPECT_SESSIONS_ROOT")
-        # Queue delivery only: the waiter reports an item that stays queued (non-terminal).
+        # Queue delivery only: the waiter reports an item that stays queued (non-terminal) and wakes
+        # an unloaded thread once. The wake resolves the intended host as the send gate did; only an
+        # explicit --intended-host is invisible to it, so that one value is passed on.
         [[ -z "$QUEUE_ID" ]] || wait_args+=(--queue-id "$QUEUE_ID")
+        if [[ -n "$QUEUE_ID" && "$HOST_INTENDED_HOST_FLAG_PRESENT" -eq 1 ]]; then
+            wait_args+=(--intended-host "$HOST_INTENDED_HOST_FLAG")
+        fi
         # --materialize-reply keeps a certified rollout-only reply beside the envelope, so it stays
         # readable after Codex compresses the page; it never writes the primary reply file.
         wait_args+=(--accept-rollout-fallback --budget-ms 1800000 --interval-ms 1000 --status-exit-codes --materialize-reply)
@@ -1453,8 +1459,9 @@ console.log(JSON.stringify({
     #   unknown        the runtime ran and anything but its exact success line followed: the item
     #                  may be queued and would start by itself, so pickup is suppressed and
     #                  resending is forbidden.
-    # It never steers: a busy thread runs the item after its current turn, and an unloaded thread or
-    # one whose last turn was interrupted keeps it queued until the thread is opened in the App.
+    # It never steers: a busy thread runs the item after its current turn. An unloaded thread starts
+    # it when the printed WAIT line's waiter wakes it (codex_ipc_wake.ps1, alternate hosts only); one
+    # whose last turn was interrupted keeps it queued until the thread is opened in the App.
     if [[ "$DELIVERY" == "queue" ]]; then
         report_queue_unavailable() {
             echo "RESULT: queue-unavailable -- reason=$1 -- confirmation=not-attempted" >&2
@@ -1544,8 +1551,9 @@ for (const line of lines) {
                 echo "[ Queued for thread ${IPC_CID} as queue item ${QUEUE_ID}. It starts when that thread is loaded and idle in the intended host. ]"
                 print_reply_route
                 echo "(Queue confirmation means the runtime stored the pickup line; it does not confirm that a" >&2
-                echo " turn started or finished. A busy thread runs it after its current turn; a thread that is" >&2
-                echo " not loaded, or whose last turn was interrupted, keeps it queued until it is opened.)" >&2
+                echo " turn started or finished. A busy thread runs it after its current turn. The WAIT line's" >&2
+                echo " waiter wakes a thread that is not loaded, once, on an alternate host; a thread whose last" >&2
+                echo " turn was interrupted keeps it queued until it is opened.)" >&2
                 if [[ -z "$INSPECT_ROLLOUT_PATH" ]]; then
                     echo "ROLLOUT-PATH: Supply the inspector's database-designated page with --rollout-path <path>." >&2
                 fi

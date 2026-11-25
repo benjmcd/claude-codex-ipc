@@ -56,6 +56,15 @@ and its exact success sentence did not follow: the item may be queued, so do not
 read the bounded runtime diagnostics, and run the waiter for that dispatch. A waiter
 `queued-not-started` diagnostic means the item is still queued after 30 s: the thread is busy, not
 loaded (open it in the intended App), or its last turn was interrupted. It is not a failure.
+The waiter wakes an unloaded thread once, 12 s after the item was queued. `wake-skipped` means the
+helper did not run (`not-windows`; `host-package`: a package host is never woken, so open the
+thread; `host-policy-invalid`). `wake-result` carries the helper's `wakeCode`: a refusal names the
+failed guard (for example `app-not-running`, `app-root-ambiguous`, `stock-app-running`,
+`lockfile-missing`, `app-not-responding`, `caller-integrity-refused`) and launched nothing;
+`wake-launch-not-exited` names a launched process that has not exited, which is left running;
+`host-changed` means the App's root process changed. `wake-no-effect` means the item is still
+queued 15 s after the wake: the last turn was interrupted, another writer owns the thread, or the
+App was not ready; open the thread in the App. Pass `--no-wake` to the waiter to skip the wake.
 The target snapshot is run once before the first live attempt and reused across auto-load recovery;
 the host inventory still runs fresh before each send or retry. `target-non-root` may print a known
 parent UUID. Legacy null-source rows continue only as warned `legacy-root-assumed` targets when

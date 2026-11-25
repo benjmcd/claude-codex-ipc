@@ -31,6 +31,7 @@ const REQUIRED_SCRIPT_FILES = [
   "scripts/handoff_to_codex.sh",
   "scripts/codex_ipc_autoload.ps1",
   "scripts/codex_ipc_host_policy.ps1",
+  "scripts/codex_ipc_wake.ps1",
 ];
 
 function usage() {
@@ -592,6 +593,7 @@ async function main() {
     handoffShellSyntax: checkGitBashSyntax("scripts/handoff_to_codex.sh"),
     autoloadPowerShellSyntax: checkPowerShellSyntax("scripts/codex_ipc_autoload.ps1"),
     hostPolicyPowerShellSyntax,
+    wakePowerShellSyntax: checkPowerShellSyntax("scripts/codex_ipc_wake.ps1"),
     nodeSqlite: checkNodeSqlite(),
     codexCliVersion: checkCodexCliVersion(),
     desktopVersionHint: checkDesktopVersionHint(),

@@ -3,6 +3,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { realpathSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import {
   assessRolloutPageSupersession,
   createDispatchCorrelator,
@@ -24,6 +26,17 @@ export const DEFAULT_WAIT_INTERVAL_MS = 250;
 // runtime's queue service polls loaded threads about every 10 s, so a healthy idle thread starts
 // the item well inside this window.
 export const QUEUE_NOT_STARTED_GRACE_MS = 30000;
+// --queue-id wake (on by default from the CLI, --no-wake opts out): an item still queued this long
+// after it was queued is likely on a thread the App has not loaded, so the waiter asks the running
+// App to load it once (codex_ipc_wake.ps1), then reports wake-no-effect if the item is still
+// queued this long after the wake.
+export const QUEUE_WAKE_AFTER_MS = 12000;
+export const QUEUE_WAKE_NO_EFFECT_MS = 15000;
+// The helper waits up to 15 s for its launch to exit; past this the waiter stops waiting for it
+// (it never kills it) and reports helper-timeout.
+export const QUEUE_WAKE_HELPER_TIMEOUT_MS = 60000;
+const WAKE_RESULTS = new Set(["forwarded", "dry-run", "refused", "unverified"]);
+const WAKE_TOKEN_RE = /^[a-z][a-z0-9-]{1,63}$/;
 export const WAIT_TOKENS = Object.freeze([
   "done",
   "aborted",
@@ -328,22 +341,182 @@ async function loadQueueReader() {
   return readQueuedItem;
 }
 
-// --queue-id (opt-in): a non-terminal diagnostic for a dispatch delivered with --deliver queue.
-// It never changes the determination token or exit code. It reports once, then stops checking:
+// The intended host kind the wake would use, resolved like the shared host policy (flag, then
+// CODEX_IPC_INTENDED_HOST, then <transport root>/host-policy.json, then package). Only an alternate
+// host may be woken; this pre-check keeps the helper from even starting for a package host, and
+// the helper re-validates everything itself.
+export function resolveWakeHostKind(options, env = process.env, fsImpl = fs) {
+  const classify = (value, source) => {
+    if (typeof value !== "string" || value.trim() === "") return { kind: "invalid", source };
+    return { kind: value === "package" ? "package" : "alternate", source };
+  };
+  if (options.intendedHost) return classify(options.intendedHost, "flag");
+  if (env.CODEX_IPC_INTENDED_HOST !== undefined) {
+    return classify(env.CODEX_IPC_INTENDED_HOST, "environment");
+  }
+  let text;
+  try {
+    text = fsImpl.readFileSync(path.join(options.transportRoot, "host-policy.json"), "utf8");
+  } catch (error) {
+    return error?.code === "ENOENT"
+      ? { kind: "package", source: "default" }
+      : { kind: "invalid", source: "descriptor" };
+  }
+  let value;
+  try {
+    value = JSON.parse(text.replace(/^\uFEFF/u, ""));
+  } catch {
+    return { kind: "invalid", source: "descriptor" };
+  }
+  if (value?.intendedHost === undefined) return { kind: "package", source: "default" };
+  const kind = value.intendedHost?.kind;
+  return kind === "package" || kind === "alternate"
+    ? { kind, source: "descriptor" }
+    : { kind: "invalid", source: "descriptor" };
+}
+
+// The helper's one JSON line, reduced to tokens and PIDs; paths are never carried forward.
+export function parseWakeOutput(stdout, exitStatus) {
+  const lines = String(stdout || "").split(/\r?\n/u).map((line) => line.trim()).filter(Boolean);
+  let value = null;
+  try {
+    value = JSON.parse(lines[lines.length - 1] || "");
+  } catch {
+    value = null;
+  }
+  const pid = (item) => (Number.isSafeInteger(item) && item > 0 ? item : null);
+  if (value?.schemaVersion !== 1 || value?.tool !== "codex_ipc_wake" ||
+      !WAKE_RESULTS.has(value?.result) || typeof value?.code !== "string" ||
+      !WAKE_TOKEN_RE.test(value.code)) {
+    return { result: null, wakeCode: "helper-output-invalid", launched: false, exitStatus };
+  }
+  return {
+    result: value.result,
+    wakeCode: value.code,
+    reasons: Array.isArray(value.reasons)
+      ? value.reasons.filter((item) => typeof item === "string" && WAKE_TOKEN_RE.test(item))
+      : [],
+    launched: value.launched === true,
+    rootPid: pid(value.rootPid),
+    rootPidAfter: pid(value.rootPidAfter),
+    helperPid: pid(value.helperPid),
+    helperExitCode: Number.isSafeInteger(value.helperExitCode) ? value.helperExitCode : null,
+    exitStatus,
+  };
+}
+
+// Runs codex_ipc_wake.ps1 once, the way the toolkit runs its other PowerShell helpers. It never
+// kills the helper: past the timeout the waiter stops waiting and reports helper-timeout.
+function runWakeHelper(request) {
+  return new Promise((resolve) => {
+    const helper = fileURLToPath(new URL("./codex_ipc_wake.ps1", import.meta.url));
+    const args = ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", helper,
+      "-ThreadId", request.threadId, "-IpcRoot", request.ipcRoot];
+    if (request.intendedHost) args.push("-IntendedHost", request.intendedHost);
+    let child = null;
+    let stdout = "";
+    let finished = false;
+    let timer = null;
+    let exitTimer = null;
+    const finish = (outcome) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      clearTimeout(exitTimer);
+      child?.stdout?.destroy();
+      child?.unref();
+      resolve(outcome);
+    };
+    try {
+      child = spawn("powershell.exe", args, { stdio: ["ignore", "pipe", "ignore"], windowsHide: true });
+    } catch {
+      finish({ result: null, wakeCode: "helper-unavailable", launched: false, exitStatus: null });
+      return;
+    }
+    timer = setTimeout(() => finish({
+      result: null, wakeCode: "helper-timeout", launched: false, exitStatus: null,
+    }), request.timeoutMs);
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => {
+      if (stdout.length < 65536) stdout += chunk;
+    });
+    child.on("error", () => finish({
+      result: null, wakeCode: "helper-unavailable", launched: false, exitStatus: null,
+    }));
+    child.on("close", (status) => finish(parseWakeOutput(stdout, status)));
+    // A process the helper launched could hold the pipe open; the helper's own exit is enough.
+    child.on("exit", (status) => {
+      exitTimer = setTimeout(() => finish(parseWakeOutput(stdout, status)), 2000);
+    });
+  });
+}
+
+// --queue-id (opt-in): non-terminal diagnostics for a dispatch delivered with --deliver queue.
+// They never change the determination token or exit code. Each is reported at most once:
 //   queued-not-started       the item is still queued after the grace period and no rollout turn
 //                            carries this dispatch (the thread may be busy, not loaded in the App,
 //                            or its last turn was interrupted; the item runs when it next idles)
 //   queue-check-unavailable  the queue store could not be read
 //   queue-item-thread-mismatch  the queued item belongs to another thread
-// An item that is gone was started (or removed in the App); the rollout decides the rest.
-function createQueueCheck(options, injected, now, report) {
+// With the wake on (options.wake, a polling wait), an item still queued QUEUE_WAKE_AFTER_MS after
+// it was queued, with no turn carrying the dispatch, gets one wake: wake-skipped (not Windows, or
+// not an alternate host: the helper never runs), or wake-attempted then wake-result with the
+// helper's code. A launched wake whose item is still queued QUEUE_WAKE_NO_EFFECT_MS later reports
+// wake-no-effect. An item that is gone was started (or removed in the App); the rollout decides
+// the rest.
+function createQueueCheck(options, injected, now, report, budgetMs) {
   if (!options.queueItemId) return null;
   const graceMs = Number.isSafeInteger(options.queueGraceMs) && options.queueGraceMs >= 0
     ? options.queueGraceMs
     : QUEUE_NOT_STARTED_GRACE_MS;
+  const wakeAfterMs = Number.isSafeInteger(options.wakeAfterMs) && options.wakeAfterMs >= 0
+    ? options.wakeAfterMs
+    : QUEUE_WAKE_AFTER_MS;
+  const noEffectMs = Number.isSafeInteger(options.wakeNoEffectMs) && options.wakeNoEffectMs >= 0
+    ? options.wakeNoEffectMs
+    : QUEUE_WAKE_NO_EFFECT_MS;
   const queueId = options.queueItemId;
+  // A single-shot wait (budget 0) is a status read; it never wakes.
+  let wakeState = options.wake === true && budgetMs > 0 ? "pending" : "off";
+  let wakeLaunched = false;
+  let wakeDoneAt = null;
+  let noEffectReported = false;
+  let notStartedReported = false;
   let settled = false;
   let firstSeenAt = null;
+  const wake = async (ageMs) => {
+    wakeState = "done";
+    const platform = injected.platform || process.platform;
+    if (platform !== "win32") {
+      report({ code: "wake-skipped", queueId, reason: "not-windows" });
+      return;
+    }
+    const host = resolveWakeHostKind(options, injected.env || process.env);
+    if (host.kind !== "alternate") {
+      report({
+        code: "wake-skipped",
+        queueId,
+        reason: host.kind === "package" ? "host-package" : "host-policy-invalid",
+        source: host.source,
+      });
+      return;
+    }
+    report({ code: "wake-attempted", queueId, threadId: options.threadId, ageMs });
+    let outcome;
+    try {
+      outcome = await (injected.runWake || runWakeHelper)({
+        threadId: options.threadId,
+        ipcRoot: options.transportRoot,
+        intendedHost: options.intendedHost || null,
+        timeoutMs: QUEUE_WAKE_HELPER_TIMEOUT_MS,
+      });
+    } catch {
+      outcome = { result: null, wakeCode: "helper-error", launched: false, exitStatus: null };
+    }
+    wakeDoneAt = now();
+    wakeLaunched = outcome?.launched === true;
+    report({ code: "wake-result", queueId, ...outcome });
+  };
   return async (records) => {
     if (settled) return;
     let item;
@@ -370,17 +543,41 @@ function createQueueCheck(options, injected, now, report) {
     if (firstSeenAt === null) firstSeenAt = now();
     const since = Number.isSafeInteger(item.createdAtMs) ? item.createdAtMs : firstSeenAt;
     const ageMs = Math.max(0, now() - since);
-    if (ageMs < graceMs) return;
+    const wakeDue = wakeState === "pending" && ageMs >= wakeAfterMs;
+    const noEffectDue = wakeState === "done" && wakeLaunched && !noEffectReported &&
+      now() - wakeDoneAt >= noEffectMs;
+    const notStartedDue = !notStartedReported && ageMs >= graceMs;
+    if (!wakeDue && !noEffectDue && !notStartedDue) return;
     // Between the turn start and the item's deletion a turn may already carry the dispatch.
     if (dispatchLifecycle(records, [], options.dispatchId).duplicateCount > 0) return;
-    settled = true;
-    report({
-      code: "queued-not-started",
-      queueId,
-      threadId: options.threadId,
-      ageMs,
-      possibleCauses: ["thread-busy", "thread-not-loaded", "last-turn-interrupted"],
-    });
+    if (wakeDue) {
+      // Once: the state leaves "pending" before the helper runs. The next poll re-reads the item.
+      await wake(ageMs);
+      return;
+    }
+    if (noEffectDue) {
+      noEffectReported = true;
+      report({
+        code: "wake-no-effect",
+        queueId,
+        threadId: options.threadId,
+        sinceWakeMs: Math.max(0, now() - wakeDoneAt),
+        possibleCauses: ["last-turn-interrupted", "thread-owned-by-another-writer", "app-not-ready"],
+      });
+    }
+    if (notStartedDue) {
+      notStartedReported = true;
+      report({
+        code: "queued-not-started",
+        queueId,
+        threadId: options.threadId,
+        ageMs,
+        possibleCauses: ["thread-busy", "thread-not-loaded", "last-turn-interrupted"],
+      });
+    }
+    if (notStartedReported && wakeState !== "pending" && (noEffectReported || !wakeLaunched)) {
+      settled = true;
+    }
   };
 }
 
@@ -414,7 +611,7 @@ export async function waitForCompletion(options, injected = {}) {
   const queueCheck = createQueueCheck(options, injected, now, (item) => {
     diagnostics.push(item);
     if (typeof injected.onDiagnostic === "function") injected.onDiagnostic(item);
-  });
+  }, budgetMs);
 
   let staleSnapshotRecorded = false;
   // "current" may certify; "stale" (the page grew after this read) keeps polling and never
@@ -582,6 +779,16 @@ Options:
                             may be busy, not loaded in the App, or its last turn was interrupted).
                             The token and exit code are unchanged.
   --queue-db <path>         Queue store for --queue-id (default ~/.codex/queue_1.sqlite).
+                            With --queue-id and a positive budget, the waiter also wakes the
+                            thread once: if the item is still queued ${QUEUE_WAKE_AFTER_MS / 1000} s after it was queued
+                            and no turn carries this dispatch, it runs codex_ipc_wake.ps1, which
+                            asks the running alternate-host App to load the thread (Windows only;
+                            never for a package host). WAIT_DIAGNOSTIC wake-attempted, wake-result,
+                            wake-skipped and wake-no-effect report it; the token and exit code are
+                            unchanged.
+  --no-wake                 With --queue-id: never run the wake.
+  --intended-host <value>   With --queue-id: the handoff's --intended-host (package or an
+                            absolute executable), used only by the wake.
 
 Environment:
   CODEX_IPC_ROLLOUT_PATH      same validation as --rollout-path; flag wins
@@ -632,6 +839,8 @@ export function parseWaitArgs(argv, env = process.env) {
     materializeReply: false,
     queueItemId: null,
     queueDbPath: null,
+    noWake: false,
+    intendedHost: null,
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -679,6 +888,12 @@ export function parseWaitArgs(argv, env = process.env) {
       case "--queue-db":
         raw.queueDbPath = takeValue(argv, ++index, arg);
         break;
+      case "--no-wake":
+        raw.noWake = true;
+        break;
+      case "--intended-host":
+        raw.intendedHost = takeValue(argv, ++index, arg);
+        break;
       default:
         throw new Error(`unknown argument: ${arg}`);
     }
@@ -705,6 +920,15 @@ export function parseWaitArgs(argv, env = process.env) {
   }
   if (raw.queueDbPath !== null && raw.queueItemId === null) {
     throw new Error("--queue-db requires --queue-id");
+  }
+  if (raw.noWake && raw.queueItemId === null) throw new Error("--no-wake requires --queue-id");
+  if (raw.intendedHost !== null) {
+    if (raw.queueItemId === null) throw new Error("--intended-host requires --queue-id");
+    if (raw.intendedHost !== "package" &&
+        (!/^(?:[A-Za-z]:[\\/]|\\\\)/u.test(raw.intendedHost) ||
+          /[\u0000-\u001f\u007f]/u.test(raw.intendedHost))) {
+      throw new Error("--intended-host must be package or an absolute executable path");
+    }
   }
 
   const warnings = [];
@@ -744,6 +968,9 @@ export function parseWaitArgs(argv, env = process.env) {
         ? raw.queueDbPath || env.CODEX_IPC_QUEUE_DB ||
           path.join(os.homedir(), ".codex", "queue_1.sqlite")
         : null,
+      // The wake is on by default for a queue dispatch; --no-wake opts out.
+      wake: raw.queueItemId !== null && !raw.noWake,
+      intendedHost: raw.intendedHost,
     },
   };
 }
