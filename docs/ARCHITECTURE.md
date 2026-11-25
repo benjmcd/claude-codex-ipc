@@ -88,7 +88,9 @@ is not another exact occurrence, and discloses that uncertainty rather than eras
    `queued -- confirmation=pending -- queueId=<uuid>` plus `WAIT:` with `--queue-id`;
    `queue-unavailable -- confirmation=not-attempted` plus pickup when the runtime never ran; and
    `failed-closed -- confirmation=unknown` with no pickup once it ran without its exact success
-   line. It never steers, and an unloaded or interrupted thread keeps the item until it is opened.
+   line. It never steers. The waiter wakes an unloaded thread on an alternate host once, through
+   the running App's own executable (`codex_ipc_wake.ps1`); an interrupted thread keeps the item
+   until it is opened.
 4. **`--ipc` live injection (optional, EXPERIMENTAL, Windows):** after writing the envelope, the
    wrapper checks a read-only host inventory and injects the pickup line into the renderer-owned
    Desktop thread over the app's private named-pipe router. The host check runs freshly before the

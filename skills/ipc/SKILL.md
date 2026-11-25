@@ -72,7 +72,9 @@ launch. Delivery is the file-drop default, thread-bound manual pickup with
 `--ipc <uuid> --deliver manual`, runtime queue delivery with `--ipc <uuid> --deliver queue`, or live
 `--ipc` injection into a Desktop GUI thread. Only `--deliver queue` starts a Codex binary: the
 intended Desktop host's own runtime executable, proven by the shared host policy, running
-`queue --thread <uuid> --message <pickup line>` once. No route looks up `codex` on PATH.
+`queue --thread <uuid> --message <pickup line>` once. No route looks up `codex` on PATH. The
+waiter of a queue dispatch may also start the running alternate host's own App executable once,
+as a short-lived second instance that hands it a wake URL and exits (see Queue wake).
 
 The IPC transport envelope (the `.task.md`/`.reply.md` pair) is deliberately machine-local under
 `${CODEX_IPC_ROOT:-~/.claude/ipc}` — that is the ONE exception to the rule below. Envelopes and
@@ -301,14 +303,57 @@ Results, one per run:
   resending is forbidden, and bounded runtime diagnostics are shown; run the waiter for that
   dispatch to learn whether it ran.
 
-It never steers: a busy thread runs the item after its current turn. A thread that is not loaded
-(for example after an App restart, before it is opened) or whose last turn was interrupted keeps
-the item queued until the thread is opened in the App, and the operator can remove a queued item
-there. The App shows the turn as a normal user message. With `--queue-id`, the waiter reads the
-queue store read-only and prints one non-terminal `queued-not-started` diagnostic as soon as the
-item has been queued for 30 s with no turn carrying the dispatch; the token and exit code are
-unchanged. The queue id travels only in the `RESULT:` and `WAIT:` lines, because the envelope is
-create-once. Fallback: `--deliver manual`, then paste the printed pickup line.
+It never steers: a busy thread runs the item after its current turn. The App starts queued items
+only on threads it has loaded, so after an App restart, or after an idle unload (about 60 s after
+no client is subscribed to the thread), an item waits; the printed `WAIT:` line wakes such a thread
+once (see Queue wake). A thread whose last turn was interrupted keeps the item queued until the
+thread is opened in the App, and the operator can remove a queued item there. The App shows the
+turn as a normal user message. With `--queue-id`, the waiter reads the queue store read-only and
+prints one non-terminal `queued-not-started` diagnostic as soon as the item has been queued for
+30 s with no turn carrying the dispatch; the token and exit code are unchanged. The queue id
+travels only in the `RESULT:` and `WAIT:` lines, because the envelope is create-once. Fallback:
+`--deliver manual`, then paste the printed pickup line.
+
+#### Queue wake
+
+The waiter of a queue dispatch (`--queue-id` with a positive budget, as in the printed `WAIT:`
+line) wakes the thread once by default. When the item is still queued 12 s after it was queued
+(the queue store's created time) and no turn carries the dispatch, it runs
+`scripts/codex_ipc_wake.ps1 -ThreadId <uuid>` once. That helper hands the App's built-in
+`codex://threads/wake/<uuid>` route to the running App, which resumes the thread in the background
+only if its queue is non-empty, without navigating or showing a window. It starts the running
+App's own executable with `--user-data-dir="<dir>" --single-argument codex://threads/wake/<uuid>`,
+in that order with the URL last, hidden, with `CODEX_ELECTRON_USER_DATA_PATH=<dir>` and, when the
+intended runtime resolves, `CODEX_CLI_PATH=<runtime>`. Electron's single-instance lock forwards the
+arguments to the running App, and the new process exits. It never uses OS protocol activation:
+`codex:` opens the Store package, whose App has other user data and would start beside it.
+
+Every guard must pass, or the helper refuses and launches nothing: Windows; an alternate intended
+host whose executable exists (resolved like the host policy: flag, environment, `host-policy.json`;
+a package host is refused, and the waiter does not even start the helper for one); a caller at
+Medium integrity outside an AppContainer (Low, Untrusted, Medium Plus, High and System are
+refused); no process from the Store package directory; exactly one root App process (no `--type=`)
+running that executable; exactly one `--user-data-dir=` on its command line, with `<dir>\lockfile`
+present; and the root process responding. After the launch it waits up to 15 s, then checks exit
+code 0, the same single root PID and no Store package process. A launch that has not exited is
+reported as `wake-launch-not-exited` with its PID and is never killed; a different root is
+`host-changed`. The helper prints one JSON document (`result` `forwarded`, `refused`, `unverified`
+or `dry-run`, and a stable `code`) and exits 0 (forwarded or dry-run), 6 (refused, nothing
+launched) or 7 (launched, a post-launch check failed).
+
+The waiter reports the wake with non-terminal `WAIT_DIAGNOSTIC` lines; the token and exit code are
+unchanged:
+
+- `wake-skipped` with `not-windows`, `host-package` or `host-policy-invalid`: the helper did not
+  run.
+- `wake-attempted`, then `wake-result` with the helper's `result` and `wakeCode`.
+- `wake-no-effect`: the wake launched and the item is still queued 15 s later. Possible causes: the
+  thread's last turn was interrupted, another writer owns the thread, or the App was not ready. The
+  waiter keeps waiting, and `queued-not-started` still follows.
+
+`--no-wake` turns the wake off; a single-shot wait (budget 0) never wakes. The wake cannot start an
+item on a thread whose last turn was interrupted; open that thread in the App. A handoff run with
+an explicit `--intended-host` passes it to the waiter in the `WAIT:` line.
 
 On Windows PowerShell, run the `.sh` wrapper through Git Bash.
 
@@ -743,6 +788,7 @@ stderr only; stdout and the exit code are unchanged, and neither is ever a refus
 - Use exactly one explicit UUID per IPC send.
 - Keep file-drop as default/fallback.
 - The dispatching agent never closes, restarts, launches, or signals a Desktop host, and never opens `codex://` itself. Host lifecycle belongs to the operator.
+- The one exception is the queue waiter's guarded wake (`codex_ipc_wake.ps1`, see Queue wake): a short-lived second instance of the running alternate host that forwards one wake URL to that App and exits. It never starts a separate App, uses protocol activation, or stops or signals any process.
 - Agents never run `codex_ipc_client.mjs` with `--send` directly. The maintained wrapper and write-proof harness are its only permitted sending callers.
 - A `--model` or `--effort` override changes stored thread settings and requires the operator's explicit intent.
 - `/ipc` success is strictly GUI delivery into the renderer-owned Desktop thread. Never treat any

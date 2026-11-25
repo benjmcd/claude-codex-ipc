@@ -4,6 +4,24 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- A queue dispatch's waiter now wakes a thread the App has not loaded. The App's queue service
+  starts items only on loaded threads, so after an App start or an idle unload a queued item waited
+  until someone opened the chat. With `--queue-id` and a positive budget (the printed `WAIT:` line),
+  an item still queued 12 s after it was queued, with no turn carrying the dispatch, gets one run of
+  the new `scripts/codex_ipc_wake.ps1`. On Windows and for an alternate intended host only, it
+  starts the running App's own executable with the App's `--user-data-dir`, `--single-argument` and
+  `codex://threads/wake/<uuid>` last, hidden, with `CODEX_ELECTRON_USER_DATA_PATH` and the intended
+  runtime as `CODEX_CLI_PATH`; Electron's single-instance lock forwards it to the running App, which
+  resumes the thread in the background when its queue is non-empty. It never uses OS protocol
+  activation and never kills a process. Every guard must pass or nothing is launched: alternate host
+  with an existing executable, Medium caller integrity, no Store package process, exactly one root
+  App process from that executable, its `lockfile` present, and the root responding. After the
+  launch it checks exit code 0, an unchanged root PID and no Store package process. The waiter
+  reports `wake-skipped`, `wake-attempted`, `wake-result` and `wake-no-effect` (still queued 15 s
+  after the wake) as non-terminal diagnostics; the token and exit code are unchanged, and
+  `queued-not-started` still follows. `--no-wake` opts out, a single-shot wait never wakes, and a
+  handoff run with `--intended-host` passes that value to the waiter. Queue mode still refuses
+  `--autoload` and the foreground flags.
 - The `router-absent` refusal of a proven 26.1117+ host now points to queue delivery. One
   `QUEUE-HINT:` line follows its `RESULT:` line. When the host policy resolved `intendedRuntime`,
   which queue delivery needs, it says to re-send the handoff with `--deliver queue` instead of

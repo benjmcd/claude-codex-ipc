@@ -83,7 +83,8 @@ jobs:
         run: |
           $files = @(
             'skills/ipc/scripts/codex_ipc_autoload.ps1',
-            'skills/ipc/scripts/codex_ipc_host_policy.ps1'
+            'skills/ipc/scripts/codex_ipc_host_policy.ps1',
+            'skills/ipc/scripts/codex_ipc_wake.ps1'
           )
           foreach ($file in $files) {
             $errors = $null
@@ -100,6 +101,12 @@ jobs:
         # identity; never fires codex:// or touches focus. Self-skips where
         # powershell.exe is absent (ubuntu leg).
         run: bash tests/test_autoload_matrix.sh
+
+      - name: Hermetic queue wake helper and waiter hook
+        # Runs the REAL codex_ipc_wake.ps1 under -DryRun with injected process snapshots,
+        # caller integrity and launch results; never launches an App or a codex:// URL. On
+        # ubuntu it checks the helper's non-Windows refusal under pwsh when pwsh is present.
+        run: bash tests/test_queue_wake.sh
 
       - name: Hermetic reply-viewer tests
         # GNU find/date required; the windows runner's Git Bash provides them.

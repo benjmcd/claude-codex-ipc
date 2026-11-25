@@ -27,6 +27,7 @@ const REQUIRED_FILES = [
   "scripts/codex_ipc_queue.mjs",
   "scripts/codex_ipc_autoload.ps1",
   "scripts/codex_ipc_host_policy.ps1",
+  "scripts/codex_ipc_wake.ps1",
   "scripts/codex_ipc_revalidate.mjs",
   "scripts/codex_ipc_reply_harvest.mjs",
   "scripts/codex_ipc_rollout_observe.mjs",
@@ -119,6 +120,7 @@ function main() {
   ];
   const hasWaiterContract = (relPath) => waiterContractSentences.every((sentence) => contains(relPath, sentence));
   const handoffText = readText("scripts/handoff_to_codex.sh");
+  const wakeText = readText("scripts/codex_ipc_wake.ps1");
   const unsafePickupPaths = [
     'echo "RESULT: failed-closed -- reason=invalid-foreground-policy',
     'echo "RESULT: gui-unowned -- reason=foreground-switch-unacknowledged',
@@ -986,6 +988,10 @@ function main() {
           ) &&
           contains(
             "SKILL.md",
+            "The one exception is the queue waiter's guarded wake (`codex_ipc_wake.ps1`, see Queue wake): a short-lived second instance of the running alternate host that forwards one wake URL to that App and exits. It never starts a separate App, uses protocol activation, or stops or signals any process.",
+          ) &&
+          contains(
+            "SKILL.md",
             "Agents never run `codex_ipc_client.mjs` with `--send` directly. The maintained wrapper and write-proof harness are its only permitted sending callers.",
           ) &&
           contains(
@@ -1321,6 +1327,63 @@ function main() {
           contains("SKILL.md", "RESULT: queued -- reason=runtime-accepted -- confirmation=pending -- queueId=<uuid>"),
       },
     ], "Static evidence backed by hermetic tests with a fake runtime and fixture queue stores. The live queue service's start timing and the real runtime's success sentence are proven only by live acceptance on a scratch thread."),
+    check("REQ-028", "The queue wake reaches only the running alternate-host App, through its own executable, once, behind every guard, and never kills a process.", [
+      {
+        label: "the wake helper launches the intended executable by CreateProcess with the URL last, never by protocol activation, and has no process-stopping call",
+        file: "scripts/codex_ipc_wake.ps1",
+        ok:
+          contains("scripts/codex_ipc_wake.ps1", "$startInfo.FileName = $hostExecutable") &&
+          contains("scripts/codex_ipc_wake.ps1", "$startInfo.UseShellExecute = $false") &&
+          contains("scripts/codex_ipc_wake.ps1", "$arguments = @(\"--user-data-dir=`\"$userDataDir`\"\", '--single-argument', $wakeUrl)") &&
+          contains("scripts/codex_ipc_wake.ps1", "$wakeUrl = \"codex://threads/wake/$threadIdNormalized\"") &&
+          matchCount("scripts/codex_ipc_wake.ps1", /Start-Process|Invoke-Item|ShellExecute\s*=\s*\$true|explorer\.exe|cmd(?:\.exe)?\s+\/c\s+start/gi) === 0 &&
+          matchCount("scripts/codex_ipc_wake.ps1", /Stop-Process|\.Kill\(|taskkill|Stop-Service/gi) === 0 &&
+          matchCount("scripts/codex_ipc_wake.ps1", /\[System\.Diagnostics\.Process\]::Start\(/g) === 1,
+      },
+      {
+        label: "every guard refuses before the launch, mocks require -DryRun, and dry-run never launches",
+        file: "scripts/codex_ipc_wake.ps1",
+        ok:
+          ["unsupported-os", "mock-requires-dry-run", "thread-id-invalid", "host-policy-invalid", "host-not-alternate",
+            "host-executable-missing", "caller-integrity-refused", "stock-app-running", "app-not-running",
+            "app-root-ambiguous", "app-root-not-intended", "user-data-dir-missing", "lockfile-missing",
+            "app-not-responding"].every((code) => contains("scripts/codex_ipc_wake.ps1", `Deny-Wake -Code '${code}'`)) &&
+          contains("scripts/codex_ipc_wake.ps1", "if ($callerIntegrity -ne 'medium')") &&
+          contains("scripts/codex_ipc_wake.ps1", "if ($DryRun -and -not $MOCK_LAUNCH_BOUND) {") &&
+          wakeText.indexOf("Deny-Wake -Code 'app-not-responding'") <
+            wakeText.indexOf("[System.Diagnostics.Process]::Start(") &&
+          wakeText.indexOf("if ($DryRun -and -not $MOCK_LAUNCH_BOUND) {") <
+            wakeText.indexOf("[System.Diagnostics.Process]::Start(") &&
+          contains("scripts/codex_ipc_wake.ps1", "$exited = $process.WaitForExit($WAKE_EXIT_TIMEOUT_MS)") &&
+          ["wake-launch-not-exited", "host-changed", "wake-launch-exit-nonzero"]
+            .every((code) => contains("scripts/codex_ipc_wake.ps1", `$reasons += '${code}'`)),
+      },
+      {
+        label: "the waiter wakes once, only when polling, only on Windows for an alternate host, and --no-wake opts out",
+        file: "scripts/codex_ipc_wait.mjs",
+        ok:
+          contains("scripts/codex_ipc_wait.mjs", "export const QUEUE_WAKE_AFTER_MS = 12000;") &&
+          contains("scripts/codex_ipc_wait.mjs", "export const QUEUE_WAKE_NO_EFFECT_MS = 15000;") &&
+          contains("scripts/codex_ipc_wait.mjs", 'let wakeState = options.wake === true && budgetMs > 0 ? "pending" : "off";') &&
+          contains("scripts/codex_ipc_wait.mjs", 'wakeState = "done";') &&
+          contains("scripts/codex_ipc_wait.mjs", 'if (platform !== "win32") {') &&
+          contains("scripts/codex_ipc_wait.mjs", 'if (host.kind !== "alternate") {') &&
+          contains("scripts/codex_ipc_wait.mjs", 'case "--no-wake":') &&
+          contains("scripts/codex_ipc_wait.mjs", 'spawn("powershell.exe", args,') &&
+          matchCount("scripts/codex_ipc_wait.mjs", /\.kill\(|process\.kill/g) === 0,
+      },
+      {
+        label: "SKILL.md documents the wake, its guards, --no-wake and the interrupted-thread limit",
+        file: "SKILL.md",
+        ok:
+          contains("SKILL.md", "#### Queue wake") &&
+          contains("SKILL.md", "codex://threads/wake/<uuid>") &&
+          contains("SKILL.md", "It never uses OS protocol activation") &&
+          contains("SKILL.md", "`--no-wake` turns the wake off") &&
+          contains("SKILL.md", "The wake cannot start an\nitem on a thread whose last turn was interrupted") &&
+          contains("SKILL.md", "`wake-no-effect`"),
+      },
+    ], "Static evidence backed by tests/test_queue_wake.sh, which runs the real helper under -DryRun with injected snapshots, integrity and launch results, and by the waiter's injected-runner tests. The App's forwarding of the wake URL is proven only by live acceptance on a scratch thread."),
   ];
 
   const ok = Object.values(files).every((item) => item.ok) &&

@@ -235,11 +235,24 @@ ran (nonzero exit, signal, timeout, extra or unrecognized output, another thread
 `failed-closed -- confirmation=unknown`: the item may be queued and would start by itself, so pickup
 and WAIT are suppressed and resending is forbidden.
 
-The queue never steers. A busy thread runs the item after its current turn; an unloaded thread, or
-one whose last turn was interrupted, keeps it until the thread is opened in the App. The waiter's
-opt-in `--queue-id` check opens the store read-only through `codex_ipc_queue.mjs`, so the waiter
-module itself stays SQLite-free, and reports one non-terminal `queued-not-started` once the item has
-been queued for 30 s with no turn carrying the dispatch.
+The queue never steers. A busy thread runs the item after its current turn; one whose last turn
+was interrupted keeps it until the thread is opened in the App. The waiter's opt-in `--queue-id`
+check opens the store read-only through `codex_ipc_queue.mjs`, so the waiter module itself stays
+SQLite-free, and reports one non-terminal `queued-not-started` once the item has been queued for
+30 s with no turn carrying the dispatch.
+
+The App's queue service starts items only on loaded threads, so an item on a thread that is not
+loaded (after an App start, or an idle unload) waits. A polling `--queue-id` waiter wakes it once,
+12 s after the item was queued, unless `--no-wake` is given: on Windows, for an alternate intended
+host only, it runs `codex_ipc_wake.ps1`, which starts the running App's own executable with
+`--user-data-dir="<dir>" --single-argument codex://threads/wake/<uuid>` (URL last) and the same user
+data. Electron's single-instance lock forwards that to the running App, whose wake route resumes the
+thread in the background when its queue is non-empty, and the second process exits. The helper
+refuses, launching nothing, unless the caller is at Medium integrity, exactly one root App process
+runs from the intended executable with a `--user-data-dir` whose `lockfile` exists and responds, and
+no Store package process runs. It never uses protocol activation, which would open the Store
+package's separate App, and never kills a process. The waiter reports `wake-attempted`,
+`wake-result`, `wake-skipped` and `wake-no-effect` as non-terminal diagnostics.
 
 `--reply-mode final-message` (any `--ipc` delivery) is the alternative that keeps the transport root,
 `host-policy.json` and every other lane's envelopes out of lane write access: the envelope replaces

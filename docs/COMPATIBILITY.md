@@ -41,8 +41,20 @@ Desktop update, silently. Revalidate experimental features with
 | Stability | **New.** Hermetic tests use a fake runtime; the real runtime's success sentence and the queue service's start timing are proven by live acceptance only |
 | Touches live Desktop state | Yes: one item in the target thread's durable queue (`queue_1.sqlite`), written by the App's own runtime. No pipe contact, no activation, no navigation |
 | Result contract | `queued -- reason=runtime-accepted -- confirmation=pending -- queueId=<uuid>` plus `WAIT:`; `queue-unavailable -- confirmation=not-attempted` plus pickup when the runtime never ran; `failed-closed -- confirmation=unknown` with no pickup after it ran without the exact success line |
-| Limits | Never steers: a busy thread runs the item after its current turn; an unloaded thread or one whose last turn was interrupted keeps it until the thread is opened. The turn is attributed to the user (`turn_trigger: "queue"`) |
+| Limits | Never steers: a busy thread runs the item after its current turn; one whose last turn was interrupted keeps it until the thread is opened. An unloaded thread waits until the waiter's wake (below) or until it is opened. The turn is attributed to the user (`turn_trigger: "queue"`) |
 | Fallback | `--deliver manual` and a pasted pickup line |
+
+## Queue wake (`codex_ipc_wake.ps1`, run by the `--queue-id` waiter)
+
+| | |
+|---|---|
+| Supported OS | **Windows only**; the waiter skips it elsewhere (`wake-skipped`, `not-windows`) |
+| Dependencies | `powershell.exe`, the shared host policy, an alternate intended host, and a Desktop build whose `app.asar` routes `codex://threads/wake/<uuid>` to a background queue wake (observed in the alternate-host build this was developed against; other builds are unproven) |
+| Stability | **New, on by default** for a polling `--queue-id` wait; `--no-wake` opts out. Hermetic tests use injected snapshots, integrity and launch results; the forwarding itself is proven by live acceptance only |
+| Touches live Desktop state | One short-lived second instance of the running App's own executable, hidden, with the App's `--user-data-dir`, `--single-argument` and the wake URL last. Never protocol activation, never a package host, never a kill |
+| Result contract | One JSON document: `result` `forwarded`, `refused`, `unverified` or `dry-run`, and a stable `code`; exit `0` forwarded or dry-run, `6` refused (nothing launched), `7` launched with a failed post-launch check |
+| Limits | Cannot start an item on a thread whose last turn was interrupted; `wake-no-effect` after 15 s |
+| Fallback | Open the thread in the App |
 
 ## Reply viewer (`codex_ipc_replies.sh`)
 

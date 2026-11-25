@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # CANON-RUNNER (NEXT-STEPS §5.2) — OS-aware release gate runner + checker.
 #
-# Runs runtime preflight, all DEFAULT_SUITES (currently thirteen), text/docs/manifest,
+# Runs runtime preflight, all DEFAULT_SUITES (currently fourteen), text/docs/manifest,
 # safety, and static-contract gates SEQUENTIALLY. A run records every hard problem and FAILS
 # if any monitored child:
 #   * exits nonzero; OR
@@ -95,6 +95,7 @@ DEFAULT_SUITES=(
   test_ipc.sh
   test_ipc_wait.sh
   test_payload_mirror_parity.sh
+  test_queue_wake.sh
   test_reply_harvest.sh
   test_reply_view.sh
   test_retention_sweep.sh
